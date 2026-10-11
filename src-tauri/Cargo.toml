@@ -1,0 +1,19 @@
+[package]
+name = "pos-app"
+description = "Point of sale"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pos"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+pos-core = { path = "../crates/pos-core" }
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true

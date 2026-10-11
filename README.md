@@ -1,19 +1,38 @@
-# POS Application
+# Restaurant POS
 
-An offline point-of-sale app for Windows. It installs like a normal Windows
-program, keeps all data in a local SQLite database, and is built to run well
-on low-end desktops and laptops (4 GB RAM).
+An offline restaurant point-of-sale app for Windows. It installs like a normal
+Windows program, keeps all data in a local SQLite database, and is built to
+run well on low-end desktops and laptops (4 GB RAM).
 
+- **Order types**: dine-in (on a table), takeaway, collection and delivery
+- **Floor plan editor** with **multiple floors**: drag tables into place, square or round, resize, rename. A table is just a name, with no seat numbers or covers to enter.
+- **Live table view**: free and occupied tables, running bill, time seated, and a red ring when items haven't been sent to the kitchen
+- **Orders stay open** while you add items over several rounds. *Send to kitchen* marks what has gone; *Move table* moves an order to any free table on any floor.
+- **Menu** with coloured categories, a tap-to-add item grid, notes per item ("no onions"), line discounts and optional stock counting (for example bottled drinks)
+- **Payment**: cash (with change) or card. Unsent items go to the kitchen automatically when paid.
 - **PIN login** with **admin** and **staff** roles
-- **Products** with barcode/SKU, price, cost, tax rate and stock tracking
-- **Selling** by barcode scan or search, line discounts, cash (with change) and card payments
-- **Sales history**, voids (admin) that put stock back, and an inventory ledger
-- **Reports**: daily totals, tax, payment-method breakdown, top products
+- **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, top items
 - **Backups**: automatic daily copy at startup (last 14 kept), plus "Back up now"
-- **Audit log** of logins, failed logins, user/product changes, voids and backups
+- **Audit log** of logins, voids, discounts, removed items, menu, floor and user changes
 
 The current UI is a functional placeholder. All business rules live in Rust,
 so the UI can be redesigned without touching them.
+
+## How service works
+
+| Order type | Starts from | Customer details |
+| --- | --- | --- |
+| Dine-in | Tap a table on the **Tables** screen | none |
+| Takeaway | **Orders → + Takeaway** | optional |
+| Collection | **Orders → + Collection** | name required, phone optional |
+| Delivery | **Orders → + Delivery** | name, phone and address required |
+
+1. Tap items to add them. Tapping the same item again increases the quantity.
+2. **Send to kitchen** sends only the new items. You can do this any number of times per order.
+3. Take payment by cash or card. A table becomes free as soon as its order is paid.
+
+Prices are fixed when an item is added, so menu price changes never alter an open bill.
+Each table can have only one open order at a time.
 
 ## Why this stack
 
@@ -29,11 +48,13 @@ so the UI can be redesigned without touching them.
 - WAL mode, so reports and searches never block a checkout.
 - `synchronous=FULL`, so a completed sale survives a power cut. This costs one fsync per sale.
 - A 16 MB page cache plus memory-mapped I/O. Every hot query uses an index, and prepared statements are cached.
-- Barcode scans are a single index lookup. Search uses the name index for 1–2 characters and an FTS5 trigram index for 3 or more, so it stays fast with 100k+ products.
+- The menu is loaded once per order screen and filtered in the UI, so tapping and searching items needs no database round trip.
+- The live floor view is a single query per refresh (about 0.25 ms with 30 busy tables).
 - Money is stored as integer cents and tax rates as basis points, so there is no floating-point drift.
 - The release build uses LTO, one codegen unit and stripped symbols.
 
-To benchmark on your own machine (50k products, 2k sales):
+To benchmark on your own machine (2,000-item menu, 60 tables on two floors,
+20,000 past orders):
 
 ```
 cargo test --release -p pos-core --test perf -- --ignored --nocapture
@@ -50,11 +71,13 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 
 | | Admin | Staff |
 | --- | :---: | :---: |
-| Sell | ✔ | ✔ |
-| See own sales | ✔ | ✔ |
-| See all sales, void sales | ✔ | |
-| Products and stock | ✔ | |
-| Users and PINs | ✔ | |
+| Open orders, add items, send to kitchen, take payment | ✔ | ✔ |
+| Move tables, edit customer details, discounts | ✔ | ✔ |
+| Remove or reduce items already sent to the kitchen | ✔ | |
+| Cancel an order that has items in the kitchen | ✔ | |
+| Void / refund paid orders | ✔ | |
+| Order history | all | own |
+| Menu, stock, floor plan, users | ✔ | |
 | Reports, settings, backup | ✔ | |
 
 ## Data location
@@ -95,6 +118,9 @@ npx @tauri-apps/cli@2 build            # build installers into target\release\bu
 
 ```
 crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
+  src/orders.rs      Order life cycle: open, items, kitchen, pay, cancel, void
+  src/floors.rs      Floors, tables, layout editing, live floor status
+  src/menu.rs        Categories and the menu grid
   src/schema.sql     Database schema (migrations via PRAGMA user_version)
   tests/             Integration tests and the performance benchmark
 src-tauri/           Desktop shell: window, IPC commands, backups, installer config
@@ -104,8 +130,9 @@ ui/                  Placeholder UI (index.html, app.js, style.css)
 ## Next steps (not built yet)
 
 - Final UI design
-- Receipt printing (ESC/POS thermal printers) and cash-drawer kick
-- Shifts / cash-up (opening float, Z-report per shift)
-- Returns/refunds of individual items (whole-sale void exists)
-- Product categories, weighed items, customer accounts
+- Printing: kitchen tickets (on *Send to kitchen*) and customer receipts on ESC/POS printers, plus cash-drawer kick
+- Item modifiers and options (sizes, extras with prices), courses and "hold/fire"
+- Split bill and partial payments, service charge and tips
+- Delivery status tracking (preparing, out for delivery, delivered) and driver assignment
+- Shifts / cash-up (opening float, end-of-day report per shift)
 - Code signing for the installer (avoids the Windows SmartScreen warning)

@@ -1,20 +1,28 @@
 'use strict';
-// Minimal placeholder UI. Every rule (prices, tax, permissions, stock) is
-// enforced in Rust; this file only calls commands and draws results.
+// Minimal placeholder UI. Every rule (prices, tax, permissions, stock, table
+// occupancy) is enforced in Rust; this file only calls commands and draws.
 
 const invoke = window.__TAURI__.core.invoke;
 const app = document.getElementById('app');
-const state = { session: null, storeName: null, view: 'sell', cart: [], quote: null };
+const state = {
+  session: null, storeName: null, plan: { w: 1000, h: 700 },
+  view: 'floor', floorId: null, orderId: null, returnTo: 'floor',
+  menu: null, cats: null, catId: null, planDirty: false,
+};
+const TYPE = { dine_in: 'Dine-in', takeaway: 'Takeaway', collection: 'Collection', delivery: 'Delivery' };
+
+// ---------- helpers ----------
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (k === 'value') el.value = v;
+    else if (k === 'checked') el.checked = !!v;
     else if (v === true) el.setAttribute(k, '');
     else if (v !== false && v != null) el.setAttribute(k, v);
   }
-  for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+  for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
   return el;
 }
 const money = (c) => (c / 100).toFixed(2);
@@ -26,15 +34,19 @@ function parseMoney(s) {
 }
 const pct = (bp) => (bp / 100).toString();
 const fmtTime = (t) => new Date(t * 1000).toLocaleString();
+const ago = (t) => `${Math.max(0, Math.floor((Date.now() / 1000 - t) / 60))} min`;
 const today = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 function dayRange(iso) {
   const [y, m, d] = iso.split('-').map(Number);
-  const from = new Date(y, m - 1, d).getTime() / 1000;
-  return [from, new Date(y, m - 1, d + 1).getTime() / 1000];
+  return [new Date(y, m - 1, d).getTime() / 1000, new Date(y, m - 1, d + 1).getTime() / 1000];
 }
+const isAdmin = () => state.session?.role === 'admin';
+const where = (o) => o.order_type === 'dine_in'
+  ? `${o.table_name}${o.floor_name ? ' · ' + o.floor_name : ''}`
+  : (o.customer_name || '—');
 
 let toastTimer;
 function toast(msg, err = false) {
@@ -63,8 +75,14 @@ const act = (fn) => async (ev) => {
   try { await fn(ev); } catch (e) { if (!e?.handled) toast(String(e?.message ?? e), true); }
 };
 
+let refreshTimer;
 function screen(...kids) {
+  clearInterval(refreshTimer);
   app.replaceChildren(...kids);
+}
+// Poll a live view (floor, open orders). Each refresh is well under 1 ms.
+function live(fn, ms = 10000) {
+  refreshTimer = setInterval(() => fn().catch(() => {}), ms);
 }
 
 // ---------- start / setup / login ----------
@@ -73,6 +91,7 @@ async function start() {
   const st = await invoke('app_status');
   state.session = st.session;
   state.storeName = st.store_name;
+  state.plan = { w: st.plan_width, h: st.plan_height };
   document.getElementById('store').textContent = st.store_name || 'POS';
   if (st.needs_setup) return renderSetup();
   if (!st.session) return renderLogin();
@@ -81,13 +100,15 @@ async function start() {
 
 function renderSetup() {
   document.getElementById('bar').hidden = true;
-  const name = h('input', { placeholder: 'Your name', autofocus: true });
+  const name = h('input', { placeholder: 'Your name' });
   const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: 'PIN (4-8 digits)' });
   const pin2 = h('input', { type: 'password', inputmode: 'numeric', placeholder: 'Repeat PIN' });
   const go = act(async () => {
     if (pin.value !== pin2.value) return toast('PINs do not match', true);
     state.session = await call('setup_admin', { name: name.value, pin: pin.value });
+    state.view = 'plan';
     renderShell();
+    toast('Welcome! Start by drawing your floor plan, then add your menu.');
   });
   screen(h('div', { class: 'center' },
     h('h2', {}, 'Welcome. Create the admin account'),
@@ -132,243 +153,678 @@ function renderLogin() {
 // ---------- shell ----------
 
 const VIEWS = [
-  ['sell', 'Sell', false],
-  ['sales', 'Sales', false],
-  ['products', 'Products', true],
+  ['floor', 'Tables', false],
+  ['orders', 'Orders', false],
+  ['history', 'History', false],
+  ['menuAdmin', 'Menu', true],
+  ['plan', 'Floor plan', true],
   ['users', 'Users', true],
   ['reports', 'Reports', true],
   ['settings', 'Settings', true],
 ];
 
+function go(view) {
+  if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
+  state.view = view;
+  state.orderId = null;
+  renderShell();
+}
+
 function renderShell() {
-  const isAdmin = state.session.role === 'admin';
-  if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin))) state.view = 'sell';
+  if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin()))) state.view = 'floor';
   document.getElementById('bar').hidden = false;
   document.getElementById('who').textContent = `${state.session.name} (${state.session.role})`;
-  document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , adm]) => !adm || isAdmin).map(([id, label]) =>
-    h('button', { class: id === state.view ? 'on' : '', onclick: () => { state.view = id; renderShell(); } }, label)));
-  ({ sell: renderSell, sales: renderSales, products: renderProducts, users: renderUsers,
-     reports: renderReports, settings: renderSettings })[state.view]();
+  document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , adm]) => !adm || isAdmin()).map(([id, label]) =>
+    h('button', { class: !state.orderId && id === state.view ? 'on' : '', onclick: () => go(id) }, label)));
+  const view = state.orderId ? renderOrder : {
+    floor: renderFloor, orders: renderOrders, history: renderHistory, menuAdmin: renderMenuAdmin,
+    plan: renderPlan, users: renderUsers, reports: renderReports, settings: renderSettings,
+  }[state.view];
+  view().catch((e) => { if (!e?.handled) toast(String(e?.message ?? e), true); });
+}
+
+function openOrder(id) {
+  state.returnTo = state.view;
+  state.orderId = id;
+  renderShell();
+}
+
+function closeOrder() {
+  state.orderId = null;
+  state.view = state.returnTo;
+  renderShell();
 }
 
 document.getElementById('logout').onclick = act(async () => {
+  if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
   await call('logout');
-  state.session = null;
-  state.cart = [];
-  state.quote = null;
-  state.view = 'sell';
+  Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null });
   renderLogin();
 });
 
-// ---------- sell ----------
+// ---------- floor plan canvas (shared by live view and editor) ----------
 
-function renderSell() {
-  const scan = h('input', { placeholder: 'Scan barcode or search…', style: 'width:100%', autofocus: true });
-  const results = h('div', { class: 'results' });
-  const lines = h('div', { class: 'lines' });
-  const totals = h('table', { class: 'totals' });
-  const tendered = h('input', { placeholder: 'Cash tendered', inputmode: 'decimal', style: 'width:140px' });
-  let found = [];
-  let timer;
-
-  const addProduct = (p) => {
-    const line = state.cart.find((l) => l.product.id === p.id);
-    if (line) line.qty += 1;
-    else state.cart.push({ product: p, qty: 1, discount_cents: 0 });
-    scan.value = '';
-    results.replaceChildren();
-    refreshCart();
-    scan.focus();
-  };
-
-  const showResults = (list) => {
-    found = list;
-    results.replaceChildren(h('table', {}, list.map((p) =>
-      h('tr', { style: 'cursor:pointer', onclick: () => addProduct(p) },
-        h('td', {}, p.name), h('td', {}, p.barcode || p.sku || ''),
-        h('td', { class: 'num' }, p.track_stock ? `stock ${p.stock_qty}` : ''),
-        h('td', { class: 'num' }, money(p.price_cents))))));
-  };
-
-  scan.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(async () => showResults(await call('search_products', { query: scan.value, limit: 40 })), 120);
-  });
-  scan.addEventListener('keydown', act(async (e) => {
-    if (e.key !== 'Enter' || !scan.value.trim()) return;
-    clearTimeout(timer);
-    const p = await call('find_by_code', { code: scan.value });
-    if (p) return addProduct(p);
-    const list = await call('search_products', { query: scan.value, limit: 40 });
-    if (list.length === 1) return addProduct(list[0]);
-    showResults(list);
-    if (!list.length) toast('No product found', true);
-  }));
-
-  async function refreshCart() {
-    lines.replaceChildren(h('table', {}, state.cart.map((l, i) => h('tr', {},
-      h('td', {}, l.product.name),
-      h('td', {},
-        h('button', { onclick: () => { if (l.qty > 1) l.qty--; refreshCart(); } }, '−'),
-        ` ${l.qty} `,
-        h('button', { onclick: () => { l.qty++; refreshCart(); } }, '+')),
-      h('td', {}, h('input', {
-        placeholder: 'disc', style: 'width:64px', value: l.discount_cents ? money(l.discount_cents) : '',
-        onchange: act(async (e) => { l.discount_cents = e.target.value ? parseMoney(e.target.value) : 0; await refreshCart(); }),
-      })),
-      h('td', { class: 'num' }, money(l.product.price_cents * l.qty)),
-      h('td', {}, h('button', { class: 'danger', onclick: () => { state.cart.splice(i, 1); refreshCart(); } }, '×'))))));
-    state.quote = null;
-    if (state.cart.length) {
-      state.quote = await call('quote_sale', { lines: cartLines() });
-    }
-    const q = state.quote || { subtotal_cents: 0, discount_cents: 0, tax_cents: 0, total_cents: 0 };
-    totals.replaceChildren(
-      h('tr', {}, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(q.subtotal_cents))),
-      h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(q.discount_cents))),
-      h('tr', {}, h('td', {}, 'Tax'), h('td', { class: 'num' }, money(q.tax_cents))),
-      h('tr', { class: 'grand' }, h('td', {}, 'Total'), h('td', { class: 'num' }, money(q.total_cents))));
-  }
-
-  const cartLines = () => state.cart.map((l) => ({ product_id: l.product.id, qty: l.qty, discount_cents: l.discount_cents }));
-
-  const pay = (method) => act(async () => {
-    if (!state.cart.length) return toast('Cart is empty', true);
-    const tenderedCents = method === 'cash' ? (tendered.value ? parseMoney(tendered.value) : state.quote.total_cents) : 0;
-    const sale = await call('complete_sale', { lines: cartLines(), method, tenderedCents });
-    state.cart = [];
-    tendered.value = '';
-    await refreshCart();
-    toast(`Sale #${sale.id} done. Total ${money(sale.total_cents)}` + (sale.change_cents ? `, change ${money(sale.change_cents)}` : ''));
-    scan.focus();
-  });
-
-  screen(h('div', { class: 'sell' },
-    h('div', { class: 'card' }, scan, results),
-    h('div', { class: 'card cart' },
-      lines, totals,
-      h('div', { class: 'row' }, tendered,
-        h('button', { class: 'primary', onclick: pay('cash') }, 'Cash'),
-        h('button', { class: 'primary', onclick: pay('card') }, 'Card'),
-        h('button', { onclick: () => { state.cart = []; refreshCart(); } }, 'Clear')))));
-  refreshCart();
-  scan.focus();
+function planBox() {
+  const { w, h: ph } = state.plan;
+  return h('div', { class: 'plan', style: `aspect-ratio:${w}/${ph}; width:min(100%, calc((100vh - 150px) * ${w / ph}))` });
 }
 
-// ---------- sales ----------
+function placeTable(el, t) {
+  const { w, h: ph } = state.plan;
+  el.style.left = `${(t.x / w) * 100}%`;
+  el.style.top = `${(t.y / ph) * 100}%`;
+  el.style.width = `${(t.w / w) * 100}%`;
+  el.style.height = `${(t.h / ph) * 100}%`;
+}
 
-function renderSales() {
+function tableEl(t, extra = '') {
+  const el = h('div', { class: `tbl ${t.shape === 'round' ? 'round' : ''} ${extra}` });
+  placeTable(el, t);
+  return el;
+}
+
+async function floorTabs(onPick, extra = []) {
+  const floors = await call('list_floors');
+  if (!floors.some((f) => f.id === state.floorId)) state.floorId = floors[0]?.id ?? null;
+  const tabs = h('div', { class: 'row' },
+    floors.map((f) => h('button', { class: f.id === state.floorId ? 'on' : '', onclick: () => onPick(f.id) }, f.name)),
+    extra);
+  return { floors, tabs };
+}
+
+// ---------- live floor view ----------
+
+async function renderFloor() {
+  const { floors, tabs } = await floorTabs((id) => { state.floorId = id; renderFloor(); });
+  if (!floors.length) {
+    return screen(h('div', { class: 'card' }, 'No floor plan yet. ',
+      isAdmin() ? h('button', { onclick: () => go('plan') }, 'Draw the floor plan') : 'Ask an admin to set it up.'));
+  }
+  const plan = planBox();
+  const draw = async () => {
+    const tables = await call('floor_status', { floorId: state.floorId });
+    plan.replaceChildren(...tables.map((t) => {
+      const el = tableEl(t, `${t.order_id ? 'busy' : ''} ${t.unsent_count ? 'unsent' : ''}`);
+      el.append(h('b', {}, t.name));
+      if (t.order_id) el.append(h('span', {}, money(t.total_cents)), h('span', { class: 'muted' }, ago(t.opened_at)));
+      el.onclick = act(async () => {
+        if (t.order_id) return openOrder(t.order_id);
+        try {
+          const o = await call('open_order', { order: { order_type: 'dine_in', table_id: t.id } });
+          openOrder(o.id);
+        } catch {
+          const o = await invoke('table_order', { tableId: t.id }); // someone else just opened it
+          if (o) openOrder(o.id);
+        }
+      });
+      return el;
+    }));
+  };
+  screen(h('div', { class: 'stack' },
+    h('div', { class: 'row' }, tabs, h('span', { style: 'flex:1' }),
+      h('span', { class: 'muted' }, 'Tap a table to open or continue its order. Red ring = items not sent to kitchen.')),
+    plan));
+  await draw();
+  live(draw);
+}
+
+// ---------- order screen ----------
+
+async function loadMenu() {
+  if (!state.menu) {
+    [state.menu, state.cats] = await Promise.all([
+      call('menu'), call('list_categories', { includeInactive: false }),
+    ]);
+  }
+}
+
+async function renderOrder() {
+  await loadMenu();
+  let order = await call('get_order', { id: state.orderId });
+  if (order.status !== 'open') {
+    return screen(h('div', { class: 'stack', style: 'max-width:640px' },
+      h('div', {}, h('button', { onclick: closeOrder }, '← Back')), orderDetail(order, () => renderShell())));
+  }
+  const orderId = order.id;
+
+  // --- menu side ---
+  const search = h('input', { placeholder: 'Search menu or scan barcode…', style: 'flex:1' });
+  const cats = h('div', { class: 'cats' });
+  const grid = h('div', { class: 'items' });
+  const catColor = Object.fromEntries(state.cats.map((c) => [c.id, c.color]));
+  const drawMenu = () => {
+    cats.replaceChildren(
+      h('button', { class: state.catId == null ? 'on' : '', onclick: () => { state.catId = null; drawMenu(); } }, 'All'),
+      ...state.cats.map((c) => h('button', {
+        class: state.catId === c.id ? 'on' : '', style: c.color ? `border-left:6px solid ${c.color}` : '',
+        onclick: () => { state.catId = c.id; search.value = ''; drawMenu(); },
+      }, c.name)));
+    const q = search.value.trim().toLowerCase();
+    const list = state.menu.filter((p) => q ? p.name.toLowerCase().includes(q) : state.catId == null || p.category_id === state.catId);
+    grid.replaceChildren(...list.slice(0, 300).map((p) => h('button', {
+      style: `border-left-color:${catColor[p.category_id] || '#d9dce1'}`, onclick: add(p.id),
+    }, h('span', {}, p.name), h('small', {}, money(p.price_cents)))));
+    return list;
+  };
+  search.addEventListener('input', drawMenu);
+  search.addEventListener('keydown', act(async (e) => {
+    if (e.key !== 'Enter' || !search.value.trim()) return;
+    const list = drawMenu();
+    const p = list.length === 1 ? list[0] : await call('find_by_code', { code: search.value });
+    if (!p) return toast('No item found', true);
+    await add(p.id)();
+    search.value = '';
+    drawMenu();
+  }));
+
+  // --- ticket side ---
+  const lines = h('div', { class: 'lines' });
+  const totals = h('table', { class: 'totals' });
+  const sendBtn = h('button', { onclick: act(send) });
+  const tendered = h('input', { placeholder: 'Cash tendered', inputmode: 'decimal', style: 'width:130px' });
+  const extra = h('div');
+  let editing = null;
+
+  function add(productId) {
+    return act(async () => {
+      order = await call('add_item', { orderId, productId, qty: 1, note: null });
+      draw();
+    });
+  }
+  async function setLine(it, changes) {
+    order = await call('update_item', {
+      itemId: it.id,
+      update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...changes },
+    });
+    draw();
+  }
+  async function send() {
+    const sent = await call('send_to_kitchen', { orderId });
+    order = await call('get_order', { id: orderId });
+    draw();
+    toast(sent.length ? `Sent ${sent.reduce((n, i) => n + i.qty, 0)} item(s) to the kitchen` : 'Nothing new to send');
+  }
+  const pay = (method) => act(async () => {
+    if (!order.items.length) return toast('The order is empty', true);
+    const tenderedCents = method === 'cash' ? (tendered.value ? parseMoney(tendered.value) : order.total_cents) : 0;
+    if (method === 'cash' && tenderedCents < order.total_cents) return toast('Cash tendered is less than the total', true);
+    // Anything not yet sent goes to the kitchen with the payment.
+    if (order.items.some((i) => !i.sent_at)) await call('send_to_kitchen', { orderId });
+    const paid = await call('pay_order', { orderId, method, tenderedCents });
+    toast(`Order #${paid.id} paid: ${money(paid.total_cents)}` + (paid.change_cents ? ` · change ${money(paid.change_cents)}` : ''));
+    closeOrder();
+  });
+
+  function draw() {
+    lines.replaceChildren(h('table', {}, order.items.map((it) => {
+      const sent = !!it.sent_at;
+      const row = h('tr', {},
+        h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : ''),
+          it.note && h('div', { class: 'muted' }, it.note),
+          it.discount_cents ? h('div', { class: 'muted' }, `discount -${money(it.discount_cents)}`) : ''),
+        h('td', { style: 'white-space:nowrap' },
+          h('button', { onclick: act(() => setLine(it, { qty: it.qty - 1 })) }, '−'),
+          ` ${it.qty} `,
+          h('button', { onclick: act(() => (sent ? add(it.product_id)() : setLine(it, { qty: it.qty + 1 }))) }, '+')),
+        h('td', { class: 'num' }, money(it.line_total_cents)),
+        h('td', {}, h('button', { onclick: () => { editing = editing === it.id ? null : it.id; draw(); } }, '✎')));
+      if (editing !== it.id) return row;
+      const note = h('input', { value: it.note ?? '', placeholder: 'Note (no onions…)', disabled: sent });
+      const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: 'Discount', style: 'width:90px' });
+      return [row, h('tr', {}, h('td', { colspan: 4 }, h('div', { class: 'row' }, note, disc,
+        h('button', { class: 'primary', onclick: act(async () => {
+          await setLine(it, { note: note.value || null, discount_cents: disc.value ? parseMoney(disc.value) : 0 });
+          editing = null; draw();
+        }) }, 'Save'),
+        h('button', { class: 'danger', onclick: act(async () => { editing = null; await setLine(it, { qty: 0 }); }) }, 'Remove'))))];
+    })));
+    if (!order.items.length) lines.append(h('p', { class: 'muted' }, 'Tap menu items to add them.'));
+    totals.replaceChildren(
+      h('tr', {}, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(order.subtotal_cents))),
+      order.discount_cents ? h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
+      h('tr', {}, h('td', {}, 'Tax'), h('td', { class: 'num' }, money(order.tax_cents))),
+      h('tr', { class: 'grand' }, h('td', {}, 'Total'), h('td', { class: 'num' }, money(order.total_cents))));
+    const unsent = order.items.filter((i) => !i.sent_at).reduce((n, i) => n + i.qty, 0);
+    sendBtn.textContent = unsent ? `Send to kitchen (${unsent})` : 'Send to kitchen';
+    sendBtn.disabled = !unsent;
+    sendBtn.className = unsent ? 'primary' : '';
+  }
+
+  // --- secondary actions: move table, customer details, cancel ---
+  const showMove = act(async () => {
+    const floors = await call('list_floors');
+    const statuses = await Promise.all(floors.map((f) => call('floor_status', { floorId: f.id })));
+    const sel = h('select', {}, floors.map((f, i) => h('optgroup', { label: f.name },
+      statuses[i].filter((t) => !t.order_id).map((t) => h('option', { value: t.id }, t.name)))));
+    extra.replaceChildren(h('div', { class: 'row card' }, 'Move to', sel,
+      h('button', { class: 'primary', onclick: act(async () => {
+        order = await call('move_order', { id: orderId, tableId: Number(sel.value) });
+        extra.replaceChildren(); header(); toast(`Moved to ${order.table_name}`);
+      }) }, 'Move'),
+      h('button', { onclick: () => extra.replaceChildren() }, 'Close')));
+  });
+  const showDetails = () => {
+    const f = customerFields(order.order_type, order);
+    extra.replaceChildren(h('div', { class: 'stack card' }, f.el, h('div', { class: 'row' },
+      h('button', { class: 'primary', onclick: act(async () => {
+        order = await call('update_order_details', { id: orderId, details: f.value() });
+        extra.replaceChildren(); header(); toast('Saved');
+      }) }, 'Save'),
+      h('button', { onclick: () => extra.replaceChildren() }, 'Close'))));
+  };
+  const showCancel = () => {
+    const reason = h('input', { placeholder: 'Reason', style: 'flex:1' });
+    extra.replaceChildren(h('div', { class: 'row card' }, reason,
+      h('button', { class: 'danger', onclick: act(async () => {
+        await call('cancel_order', { orderId, reason: reason.value });
+        toast('Order cancelled'); closeOrder();
+      }) }, 'Cancel order'),
+      h('button', { onclick: () => extra.replaceChildren() }, 'Keep order')));
+  };
+
+  const head = h('div');
+  function header() {
+    head.replaceChildren(h('div', { class: 'row' },
+      h('button', { onclick: closeOrder }, '← Back'),
+      h('strong', {}, `#${order.id} ${TYPE[order.order_type]} · ${where(order)}`)),
+    h('div', { class: 'muted' }, [
+      order.customer_phone, order.delivery_address, order.notes,
+      `opened ${ago(order.opened_at)} ago by ${order.opened_by_name}`,
+    ].filter(Boolean).join(' · ')));
+  }
+  header();
+  draw();
+  drawMenu();
+  screen(h('div', { class: 'order' },
+    h('div', { class: 'card menu' }, h('div', { class: 'row' }, search), cats, grid),
+    h('div', { class: 'card ticket' },
+      head, lines, totals,
+      h('div', { class: 'row' }, sendBtn),
+      h('div', { class: 'row' }, tendered,
+        h('button', { class: 'primary', onclick: pay('cash') }, 'Cash'),
+        h('button', { class: 'primary', onclick: pay('card') }, 'Card')),
+      h('div', { class: 'row' },
+        order.order_type === 'dine_in'
+          ? h('button', { onclick: showMove }, 'Move table')
+          : h('button', { onclick: showDetails }, 'Customer'),
+        h('button', { class: 'danger', onclick: showCancel }, 'Cancel order')),
+      extra)));
+  search.focus();
+}
+
+/// Inputs for customer details, shown according to order type.
+function customerFields(type, o = {}) {
+  const name = h('input', { value: o.customer_name ?? '', placeholder: 'Customer name' + (type === 'takeaway' ? ' (optional)' : '') });
+  const phone = h('input', { value: o.customer_phone ?? '', placeholder: 'Phone' + (type === 'delivery' ? '' : ' (optional)'), inputmode: 'tel' });
+  const addr = h('textarea', { placeholder: 'Delivery address', rows: 2, style: 'width:100%' });
+  addr.value = o.delivery_address ?? '';
+  const notes = h('input', { value: o.notes ?? '', placeholder: 'Notes (optional)', style: 'flex:1' });
+  return {
+    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, name, phone), type === 'delivery' && addr, h('div', { class: 'row' }, notes)),
+    value: () => ({
+      customer_name: name.value || null, customer_phone: phone.value || null,
+      delivery_address: type === 'delivery' ? addr.value || null : null, notes: notes.value || null,
+    }),
+  };
+}
+
+/// Read-only view of a closed order, with void for admins.
+function orderDetail(o, onChange) {
+  const reason = h('input', { placeholder: 'Void reason' });
+  return h('div', { class: 'card stack' },
+    h('h3', {}, `#${o.id} ${TYPE[o.order_type]} · ${where(o)} — ${o.status}`),
+    h('div', { class: 'muted' }, `Opened ${fmtTime(o.opened_at)} by ${o.opened_by_name}` +
+      (o.paid_at ? ` · paid ${fmtTime(o.paid_at)} (${o.payment_method})` : '')),
+    (o.customer_phone || o.delivery_address) && h('div', { class: 'muted' }, [o.customer_phone, o.delivery_address].filter(Boolean).join(' · ')),
+    h('table', {}, o.items.map((i) => h('tr', {},
+      h('td', {}, i.name, i.note && h('div', { class: 'muted' }, i.note)),
+      h('td', { class: 'num' }, `${i.qty} × ${money(i.unit_price_cents)}`),
+      h('td', { class: 'num' }, i.discount_cents ? '-' + money(i.discount_cents) : ''),
+      h('td', { class: 'num' }, money(i.line_total_cents))))),
+    h('div', {}, `Tax ${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
+      o.tendered_cents != null ? ` · Tendered ${money(o.tendered_cents)} · Change ${money(o.change_cents)}` : ''),
+    o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
+    isAdmin() && o.status === 'paid' && h('div', { class: 'row' }, reason,
+      h('button', { class: 'danger', onclick: act(async () => {
+        await call('void_order', { orderId: o.id, reason: reason.value });
+        toast('Order voided');
+        onChange();
+      }) }, 'Void / refund')));
+}
+
+// ---------- open orders board + new takeaway / collection / delivery ----------
+
+async function renderOrders() {
+  const form = h('div');
+  const board = h('div');
+  const newOrder = (type) => act(async () => {
+    if (type === 'takeaway') {
+      const o = await call('open_order', { order: { order_type: 'takeaway' } });
+      return openOrder(o.id);
+    }
+    const f = customerFields(type);
+    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, `New ${TYPE[type].toLowerCase()} order`), f.el,
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: act(async () => {
+          const o = await call('open_order', { order: { order_type: type, ...f.value() } });
+          openOrder(o.id);
+        }) }, 'Start order'),
+        h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+    form.querySelector('input').focus();
+  });
+  const draw = async () => {
+    const orders = await call('list_open_orders');
+    board.replaceChildren(orders.length ? h('table', {},
+      h('tr', {}, h('th', {}, '#'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Waiting'),
+        h('th', {}, 'Staff'), h('th', { class: 'num' }, 'Items'), h('th', { class: 'num' }, 'Total')),
+      orders.map((o) => h('tr', { class: 'click', onclick: () => openOrder(o.id) },
+        h('td', {}, o.id), h('td', {}, h('span', { class: 'badge' }, TYPE[o.order_type])),
+        h('td', {}, where(o), o.customer_phone ? h('div', { class: 'muted' }, o.customer_phone) : ''),
+        h('td', {}, ago(o.opened_at)), h('td', {}, o.opened_by_name),
+        h('td', { class: 'num' }, o.item_count, o.unsent_count ? h('div', {}, h('span', { class: 'badge warn' }, `${o.unsent_count} not sent`)) : ''),
+        h('td', { class: 'num' }, money(o.total_cents)))))
+      : h('p', { class: 'muted' }, 'No open orders.'));
+  };
+  screen(h('div', { class: 'stack' },
+    h('div', { class: 'row' },
+      h('button', { class: 'primary', onclick: newOrder('takeaway') }, '+ Takeaway'),
+      h('button', { class: 'primary', onclick: newOrder('collection') }, '+ Collection'),
+      h('button', { class: 'primary', onclick: newOrder('delivery') }, '+ Delivery'),
+      h('span', { class: 'muted' }, 'Dine-in orders start from the Tables screen.')),
+    form, h('h3', {}, 'Open orders'), board));
+  await draw();
+  live(draw);
+}
+
+// ---------- history ----------
+
+async function renderHistory() {
   const date = h('input', { type: 'date', value: today() });
   const list = h('div');
   const detail = h('div');
   const load = act(async () => {
     const [from, to] = dayRange(date.value);
-    const sales = await call('list_sales', { from, to, limit: 500, offset: 0 });
+    const orders = await call('list_orders', { from, to, limit: 500, offset: 0 });
     list.replaceChildren(h('table', {},
-      h('tr', {}, h('th', {}, '#'), h('th', {}, 'Time'), h('th', {}, 'Cashier'), h('th', {}, 'Paid'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Total')),
-      sales.map((s) => h('tr', { style: 'cursor:pointer', onclick: act(() => showSale(s.id)) },
-        h('td', {}, s.id), h('td', {}, fmtTime(s.created_at)), h('td', {}, s.user_name),
-        h('td', {}, s.payment_method), h('td', {}, s.status), h('td', { class: 'num' }, money(s.total_cents))))));
+      h('tr', {}, h('th', {}, '#'), h('th', {}, 'Opened'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Total')),
+      orders.map((o) => h('tr', { class: 'click', onclick: act(() => show(o.id)) },
+        h('td', {}, o.id), h('td', {}, new Date(o.opened_at * 1000).toLocaleTimeString()), h('td', {}, TYPE[o.order_type]),
+        h('td', {}, where(o)), h('td', {}, o.status), h('td', { class: 'num' }, money(o.total_cents))))));
   });
-  async function showSale(id) {
-    const s = await call('get_sale', { id });
-    const reason = h('input', { placeholder: 'Void reason' });
-    detail.replaceChildren(h('div', { class: 'card' },
-      h('h3', {}, `Sale #${s.id} — ${s.status}`),
-      h('div', {}, `${fmtTime(s.created_at)} · ${s.user_name} · ${s.payment_method}`),
-      h('table', {}, s.items.map((i) => h('tr', {},
-        h('td', {}, i.name), h('td', { class: 'num' }, `${i.qty} × ${money(i.unit_price_cents)}`),
-        h('td', { class: 'num' }, i.discount_cents ? '-' + money(i.discount_cents) : ''),
-        h('td', { class: 'num' }, money(i.line_total_cents))))),
-      h('p', {}, `Tax ${money(s.tax_cents)} · Total ${money(s.total_cents)} · Tendered ${money(s.tendered_cents)} · Change ${money(s.change_cents)}`),
-      s.void_reason && h('p', {}, `Voided: ${s.void_reason}`),
-      state.session.role === 'admin' && s.status === 'completed' && h('div', { class: 'row' }, reason,
-        h('button', { class: 'danger', onclick: act(async () => { await call('void_sale', { id, reason: reason.value }); toast('Sale voided'); await showSale(id); await load(); }) }, 'Void sale'))));
+  async function show(id) {
+    detail.replaceChildren(orderDetail(await call('get_order', { id }), async () => { await show(id); await load(); }));
   }
   date.onchange = load;
-  screen(h('div', { class: 'grid2' }, h('div', {}, h('div', { class: 'row' }, 'Day', date), list), detail));
-  load();
+  screen(h('div', { class: 'grid2' }, h('div', { class: 'stack' }, h('div', { class: 'row' }, 'Day', date), list), detail));
+  await load();
 }
 
-// ---------- products (admin) ----------
+// ---------- menu (admin) ----------
 
-function renderProducts() {
-  const list = h('div');
+async function renderMenuAdmin() {
+  const cats = await call('list_categories', { includeInactive: true });
+  const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
   const form = h('div');
+  const list = h('div');
+  const filter = h('select', {}, h('option', { value: '' }, 'All categories'), cats.filter((c) => c.active).map((c) => h('option', { value: c.id }, c.name)));
   const showInactive = h('input', { type: 'checkbox' });
-  const load = act(async () => {
-    const products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
+  const changed = async () => { state.menu = null; form.replaceChildren(); await renderMenuAdmin(); };
+
+  const loadProducts = act(async () => {
+    let products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
+    if (filter.value) products = products.filter((p) => p.category_id === Number(filter.value));
     list.replaceChildren(h('table', {},
-      h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Barcode'), h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
-      products.map((p) => h('tr', { style: 'cursor:pointer' + (p.active ? '' : ';opacity:.5'), onclick: () => edit(p) },
-        h('td', {}, p.name), h('td', {}, p.barcode || p.sku || ''), h('td', { class: 'num' }, money(p.price_cents)),
+      h('tr', {}, h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
+      products.map((p) => h('tr', { class: 'click', style: p.active ? '' : 'opacity:.5', onclick: () => editProduct(p) },
+        h('td', {}, p.name), h('td', {}, catName[p.category_id] ?? '—'), h('td', { class: 'num' }, money(p.price_cents)),
         h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—')))));
   });
-  function edit(p) {
+
+  function editCategory(c) {
+    const name = h('input', { value: c?.name ?? '', placeholder: 'Category name' });
+    const color = h('input', { type: 'color', value: c?.color ?? '#9ca3af' });
+    const order = h('input', { value: c?.sort_order ?? cats.length + 1, inputmode: 'numeric', style: 'width:70px', title: 'Position' });
+    const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
+    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
+      h('div', { class: 'row' }, name, 'Colour', color, 'Position', order, c && h('label', {}, active, ' Active')),
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: act(async () => {
+          const args = { name: name.value, color: color.value, sortOrder: parseInt(order.value, 10) || 0 };
+          if (c) await call('update_category', { id: c.id, ...args, active: active.checked });
+          else await call('create_category', args);
+          toast('Saved'); await changed();
+        }) }, 'Save'),
+        h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+    name.focus();
+  }
+
+  function editProduct(p) {
     const f = {
       name: h('input', { value: p?.name ?? '', placeholder: 'Name' }),
-      barcode: h('input', { value: p?.barcode ?? '', placeholder: 'Barcode' }),
-      sku: h('input', { value: p?.sku ?? '', placeholder: 'SKU' }),
-      price: h('input', { value: p ? money(p.price_cents) : '', placeholder: 'Price', inputmode: 'decimal' }),
-      cost: h('input', { value: p ? money(p.cost_cents) : '0', placeholder: 'Cost', inputmode: 'decimal' }),
-      tax: h('input', { value: p ? pct(p.tax_rate_bp) : '0', placeholder: 'Tax %', inputmode: 'decimal' }),
-      stock: h('input', { value: '0', placeholder: 'Opening stock', inputmode: 'numeric' }),
-      track: h('input', { type: 'checkbox', checked: p ? p.track_stock : true }),
+      cat: h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name))),
+      price: h('input', { value: p ? money(p.price_cents) : '', placeholder: 'Price', inputmode: 'decimal', style: 'width:100px' }),
+      tax: h('input', { value: p ? pct(p.tax_rate_bp) : '0', inputmode: 'decimal', style: 'width:70px' }),
+      cost: h('input', { value: p ? money(p.cost_cents) : '0', inputmode: 'decimal', style: 'width:100px' }),
+      barcode: h('input', { value: p?.barcode ?? '', placeholder: 'Barcode (optional)' }),
+      sku: h('input', { value: p?.sku ?? '', placeholder: 'Code / PLU (optional)' }),
+      track: h('input', { type: 'checkbox', checked: p ? p.track_stock : false }),
+      stock: h('input', { value: '0', inputmode: 'numeric', style: 'width:80px' }),
       active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
     };
+    f.cat.value = p ? (p.category_id ?? '') : filter.value;
     const data = () => ({
-      name: f.name.value, barcode: f.barcode.value || null, sku: f.sku.value || null,
+      name: f.name.value, category_id: f.cat.value ? Number(f.cat.value) : null,
+      barcode: f.barcode.value || null, sku: f.sku.value || null,
       price_cents: parseMoney(f.price.value), cost_cents: parseMoney(f.cost.value || '0'),
       tax_rate_bp: Math.round(Number(f.tax.value || 0) * 100), track_stock: f.track.checked,
     });
     const save = act(async () => {
       if (p) await call('update_product', { id: p.id, product: { ...data(), active: f.active.checked } });
       else await call('create_product', { product: { ...data(), stock_qty: parseInt(f.stock.value || '0', 10) } });
-      toast('Saved');
-      form.replaceChildren();
-      await load();
+      toast('Saved'); await changed();
     });
     const delta = h('input', { placeholder: '+/- qty', style: 'width:90px', inputmode: 'numeric' });
     const reason = h('input', { placeholder: 'Reason (delivery, count…)' });
-    const adjust = act(async () => {
-      await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
-      toast('Stock updated');
-      form.replaceChildren();
-      await load();
-    });
-    form.replaceChildren(h('div', { class: 'card' },
-      h('h3', {}, p ? `Edit ${p.name}` : 'New product'),
-      h('div', { class: 'row' }, f.name, f.barcode, f.sku),
-      h('div', { class: 'row' }, 'Price', f.price, 'Cost', f.cost, 'Tax %', f.tax),
-      h('div', { class: 'row' }, h('label', {}, f.track, ' Track stock'), p && h('label', {}, f.active, ' Active'), !p && ['Opening stock', f.stock]),
+    form.replaceChildren(h('div', { class: 'card stack' },
+      h('h3', {}, p ? `Edit ${p.name}` : 'New menu item'),
+      h('div', { class: 'row' }, f.name, f.cat),
+      h('div', { class: 'row' }, 'Price', f.price, 'Tax %', f.tax, 'Cost', f.cost),
+      h('div', { class: 'row' }, f.barcode, f.sku),
+      h('div', { class: 'row' }, h('label', {}, f.track, ' Count stock (e.g. bottled drinks)'),
+        !p && ['Opening stock', f.stock], p && h('label', {}, f.active, ' On the menu')),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel')),
-      p && p.track_stock && h('div', {}, h('h4', {}, `Stock: ${p.stock_qty}`), h('div', { class: 'row' }, delta, reason, h('button', { onclick: adjust }, 'Adjust')))));
+      p && p.track_stock && h('div', { class: 'row' }, `Stock: ${p.stock_qty}`, delta, reason,
+        h('button', { onclick: act(async () => {
+          await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
+          toast('Stock updated'); await changed();
+        }) }, 'Adjust'))));
     f.name.focus();
   }
-  showInactive.onchange = load;
+
+  filter.onchange = loadProducts;
+  showInactive.onchange = loadProducts;
   screen(h('div', { class: 'grid2' },
-    h('div', {}, h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => edit(null) }, 'New product'), h('label', {}, showInactive, ' Show inactive')), list),
+    h('div', { class: 'stack' },
+      h('div', { class: 'card stack' },
+        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Categories'), h('button', { onclick: () => editCategory(null) }, '+ Category')),
+        h('div', { class: 'row' }, cats.map((c) => h('button', {
+          style: `border-left:6px solid ${c.color || '#d9dce1'}${c.active ? '' : ';opacity:.5'}`, onclick: () => editCategory(c),
+        }, c.name)))),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => editProduct(null) }, '+ Menu item'), filter,
+        h('label', {}, showInactive, ' Show removed')),
+      list),
     form));
-  load();
+  await loadProducts();
+}
+
+// ---------- floor plan editor (admin) ----------
+
+async function renderPlan() {
+  const newFloor = h('input', { placeholder: 'New floor name', style: 'width:150px' });
+  const addFloor = act(async () => {
+    if (state.planDirty) return toast('Save or discard changes on this floor first', true);
+    const f = await call('create_floor', { name: newFloor.value });
+    state.floorId = f.id;
+    renderPlan();
+  });
+  const { floors, tabs } = await floorTabs((id) => {
+    if (state.planDirty) return toast('Save or discard changes on this floor first', true);
+    state.floorId = id;
+    renderPlan();
+  }, [newFloor, h('button', { onclick: addFloor }, '+ Floor')]);
+  if (!floors.length) {
+    return screen(h('div', { class: 'card stack', style: 'max-width:520px' },
+      h('h3', {}, 'Floor plan'), 'Create your first floor (for example "Ground floor"), then add tables to it.', tabs));
+  }
+  const floor = floors.find((f) => f.id === state.floorId);
+  const { w: PW, h: PH } = state.plan;
+  const SNAP = 10;
+  let tables = await call('list_tables', { floorId: floor.id });
+  let sel = null;
+  const plan = planBox();
+  plan.classList.add('edit');
+  const panel = h('div', { class: 'stack' });
+  const saveBtn = h('button', { class: 'primary', onclick: act(save) });
+  const setDirty = (d) => {
+    state.planDirty = d;
+    saveBtn.textContent = d ? 'Save layout •' : 'Saved';
+    saveBtn.disabled = !d;
+  };
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const snap = (v) => Math.round(v / SNAP) * SNAP;
+
+  function draw() {
+    plan.replaceChildren(...tables.map((t) => {
+      const el = tableEl(t, t === sel ? 'sel' : '');
+      el.append(h('b', {}, t.name));
+      el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        sel = t;
+        const rect = plan.getBoundingClientRect();
+        const scale = PW / rect.width;
+        const sx = e.clientX, sy = e.clientY, x0 = t.x, y0 = t.y;
+        let moved = false;
+        el.setPointerCapture(e.pointerId);
+        el.onpointermove = (m) => {
+          const nx = clamp(snap(x0 + (m.clientX - sx) * scale), 0, PW - t.w);
+          const ny = clamp(snap(y0 + (m.clientY - sy) * scale), 0, PH - t.h);
+          if (nx !== t.x || ny !== t.y) { t.x = nx; t.y = ny; moved = true; placeTable(el, t); }
+        };
+        el.onpointerup = () => {
+          el.onpointermove = el.onpointerup = null;
+          if (moved) setDirty(true);
+          draw();
+        };
+        plan.querySelectorAll('.tbl').forEach((x) => x.classList.remove('sel'));
+        el.classList.add('sel');
+        drawPanel();
+      });
+      return el;
+    }));
+    drawPanel();
+  }
+
+  function nextName() {
+    const used = new Set(tables.map((t) => t.name.toLowerCase()));
+    for (let n = 1; ; n++) if (!used.has(`t${n}`)) return `T${n}`;
+  }
+  function freeSpot(w, hh) {
+    const hit = (x, y) => tables.some((t) => x < t.x + t.w + SNAP && t.x < x + w + SNAP && y < t.y + t.h + SNAP && t.y < y + hh + SNAP);
+    for (let y = 20; y + hh <= PH; y += 20) for (let x = 20; x + w <= PW; x += 20) if (!hit(x, y)) return { x, y };
+    return { x: 0, y: 0 };
+  }
+  const addTable = (shape) => () => {
+    const size = shape === 'round' ? 90 : 100;
+    const t = { id: null, name: nextName(), shape, w: size, h: size, ...freeSpot(size, size) };
+    tables.push(t);
+    sel = t;
+    setDirty(true);
+    draw();
+  };
+
+  function drawPanel() {
+    const kids = [
+      h('div', { class: 'row' }, h('button', { onclick: addTable('rect') }, '+ Square table'), h('button', { onclick: addTable('round') }, '+ Round table')),
+      h('div', { class: 'muted' }, 'Drag tables to arrange them. No seat numbers needed: a table is just a name.'),
+    ];
+    if (sel) {
+      const t = sel;
+      const name = h('input', { value: t.name, style: 'width:110px' });
+      const shape = h('select', {}, h('option', { value: 'rect' }, 'Square / rectangle'), h('option', { value: 'round' }, 'Round'));
+      shape.value = t.shape;
+      const w = h('input', { type: 'number', value: t.w, step: SNAP, min: 30, max: 400, style: 'width:80px' });
+      const hh = h('input', { type: 'number', value: t.h, step: SNAP, min: 30, max: 400, style: 'width:80px' });
+      const apply = () => {
+        t.name = name.value.trim() || t.name;
+        t.shape = shape.value;
+        t.w = clamp(snap(Number(w.value) || t.w), 30, 400);
+        t.h = clamp(snap(Number(hh.value) || t.h), 30, 400);
+        t.x = clamp(t.x, 0, PW - t.w);
+        t.y = clamp(t.y, 0, PH - t.h);
+        setDirty(true);
+        draw();
+      };
+      [name, shape, w, hh].forEach((el) => el.addEventListener('change', apply));
+      kids.push(h('div', { class: 'card stack' },
+        h('h3', {}, `Table ${t.name}`),
+        h('div', { class: 'row' }, 'Name', name),
+        h('div', { class: 'row' }, 'Shape', shape),
+        h('div', { class: 'row' }, 'Width', w, 'Depth', hh),
+        h('div', { class: 'row' },
+          h('button', { onclick: () => { const c = { ...t, id: null, name: nextName(), ...freeSpot(t.w, t.h) }; tables.push(c); sel = c; setDirty(true); draw(); } }, 'Duplicate'),
+          h('button', { class: 'danger', onclick: () => { tables = tables.filter((x) => x !== t); sel = null; setDirty(true); draw(); } }, 'Remove table'))));
+    }
+    const rename = h('input', { value: floor.name, style: 'width:150px' });
+    kids.push(
+      h('div', { class: 'row' }, saveBtn,
+        h('button', { onclick: () => { setDirty(false); renderPlan(); } }, 'Discard changes')),
+      h('div', { class: 'card stack' }, h('h3', {}, 'This floor'),
+        h('div', { class: 'row' }, rename, h('button', { onclick: act(async () => {
+          await call('update_floor', { id: floor.id, name: rename.value, sortOrder: floor.sort_order });
+          toast('Renamed'); renderPlan();
+        }) }, 'Rename')),
+        h('button', { class: 'danger', onclick: act(async () => {
+          await call('delete_floor', { id: floor.id });
+          setDirty(false); state.floorId = null; toast('Floor removed'); renderPlan();
+        }) }, 'Delete floor')));
+    panel.replaceChildren(...kids);
+  }
+
+  async function save() {
+    const saved = await call('save_floor_layout', {
+      floorId: floor.id,
+      tables: tables.map(({ id, name, shape, x, y, w, h: th }) => ({ id: id ?? null, name, shape, x, y, w, h: th })),
+    });
+    const selName = sel?.name;
+    tables = saved;
+    sel = tables.find((t) => t.name === selName) ?? null;
+    setDirty(false);
+    draw();
+    toast('Floor plan saved');
+  }
+
+  setDirty(false);
+  screen(h('div', { class: 'stack' }, tabs,
+    h('div', { style: 'display:grid; grid-template-columns:1fr 320px; gap:12px; align-items:start' }, plan, panel)));
+  draw();
 }
 
 // ---------- users (admin) ----------
 
-function renderUsers() {
+async function renderUsers() {
   const list = h('div');
   const form = h('div');
-  const roleSelect = () => h('select', {}, h('option', { value: 'staff' }, 'Staff'), h('option', { value: 'admin' }, 'Admin'));
-  const load = act(async () => {
+  const load = async () => {
     const users = await call('list_users');
     list.replaceChildren(h('table', {},
       h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Role'), h('th', {}, 'Status'), h('th', {}, 'Last login')),
-      users.map((u) => h('tr', { style: 'cursor:pointer', onclick: () => edit(u) },
+      users.map((u) => h('tr', { class: 'click', onclick: () => edit(u) },
         h('td', {}, u.name), h('td', {}, u.role), h('td', {}, u.active ? 'active' : 'disabled'),
         h('td', {}, u.last_login_at ? fmtTime(u.last_login_at) : '—')))));
-  });
+  };
   function edit(u) {
     const name = h('input', { value: u?.name ?? '', placeholder: 'Name' });
-    const role = roleSelect();
+    const role = h('select', {}, h('option', { value: 'staff' }, 'Staff'), h('option', { value: 'admin' }, 'Admin'));
     role.value = u?.role ?? 'staff';
     const active = h('input', { type: 'checkbox', checked: u ? u.active : true });
     const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: u ? 'New PIN (optional)' : 'PIN (4-8 digits)' });
@@ -381,10 +837,9 @@ function renderUsers() {
       }
       toast('Saved');
       form.replaceChildren();
-      await load();
       await start(); // own role/name may have changed
     });
-    form.replaceChildren(h('div', { class: 'card' },
+    form.replaceChildren(h('div', { class: 'card stack' },
       h('h3', {}, u ? `Edit ${u.name}` : 'New user'),
       h('div', { class: 'row' }, name, role, u && h('label', {}, active, ' Active')),
       h('div', { class: 'row' }, pin),
@@ -392,42 +847,43 @@ function renderUsers() {
     name.focus();
   }
   screen(h('div', { class: 'grid2' },
-    h('div', {}, h('button', { class: 'primary', onclick: () => edit(null) }, 'New user'), list), form));
-  load();
+    h('div', { class: 'stack' }, h('div', {}, h('button', { class: 'primary', onclick: () => edit(null) }, '+ User')), list), form));
+  await load();
 }
 
 // ---------- reports (admin) ----------
 
-function renderReports() {
+async function renderReports() {
   const date = h('input', { type: 'date', value: today() });
   const out = h('div');
+  const rows = (pairs) => h('table', {}, pairs.map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'num' }, v))));
   const load = act(async () => {
     const [from, to] = dayRange(date.value);
-    const [s, top] = await Promise.all([
-      call('sales_summary', { from, to }),
-      call('top_products', { from, to, limit: 20 }),
-    ]);
+    const [s, top] = await Promise.all([call('sales_summary', { from, to }), call('top_products', { from, to, limit: 20 })]);
     out.replaceChildren(h('div', { class: 'grid2' },
-      h('div', { class: 'card' }, h('h3', {}, 'Summary'), h('table', {},
-        [['Sales', s.sale_count], ['Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
-         ['Tax', money(s.tax_cents)], ['Total', money(s.total_cents)],
-         ['Voided', `${s.voided_count} (${money(s.voided_total_cents)})`],
-         ...s.by_payment.map((p) => [`  ${p.method}`, `${p.count} · ${money(p.total_cents)}`])]
-          .map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'num' }, v))))),
-      h('div', { class: 'card' }, h('h3', {}, 'Top products'), h('table', {},
+      h('div', { class: 'stack' },
+        h('div', { class: 'card' }, h('h3', {}, 'Summary'), rows([
+          ['Paid orders', s.order_count], ['Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
+          ['Tax', money(s.tax_cents)], ['Total', money(s.total_cents)],
+          ['Voided / refunded', `${s.voided_count} (${money(s.voided_total_cents)})`], ['Cancelled', s.cancelled_count]])),
+        h('div', { class: 'card' }, h('h3', {}, 'By order type'),
+          rows(s.by_type.map((g) => [TYPE[g.key] ?? g.key, `${g.count} · ${money(g.total_cents)}`]))),
+        h('div', { class: 'card' }, h('h3', {}, 'By payment'),
+          rows(s.by_payment.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`])))),
+      h('div', { class: 'card' }, h('h3', {}, 'Top items'), h('table', {},
         top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents))))))));
   });
   date.onchange = load;
-  screen(h('div', {}, h('div', { class: 'row' }, 'Day', date), out));
-  load();
+  screen(h('div', { class: 'stack' }, h('div', { class: 'row' }, 'Day', date), out));
+  await load();
 }
 
 // ---------- settings (admin) ----------
 
-function renderSettings() {
-  const store = h('input', { value: state.storeName ?? '', placeholder: 'Store name' });
-  screen(h('div', { class: 'card' },
-    h('h3', {}, 'Store'),
+async function renderSettings() {
+  const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
+  screen(h('div', { class: 'card stack', style: 'max-width:640px' },
+    h('h3', {}, 'Restaurant'),
     h('div', { class: 'row' }, store, h('button', { class: 'primary', onclick: act(async () => {
       await call('set_setting', { key: 'store_name', value: store.value });
       toast('Saved');
@@ -435,7 +891,7 @@ function renderSettings() {
     }) }, 'Save')),
     h('h3', {}, 'Backup'),
     h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),
-    h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up now')));
+    h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up now'))));
 }
 
 start().catch((e) => toast(String(e), true));

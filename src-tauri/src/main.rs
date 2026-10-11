@@ -55,6 +55,8 @@ struct AppStatus {
     needs_setup: bool,
     session: Option<Session>,
     store_name: Option<String>,
+    plan_width: i64,
+    plan_height: i64,
 }
 
 #[tauri::command(async)]
@@ -64,6 +66,8 @@ fn app_status(app: Cmd<'_>) -> Result<AppStatus> {
         needs_setup: g.pos.needs_setup()?,
         session: g.session.clone(),
         store_name: g.pos.setting("store_name")?,
+        plan_width: PLAN_WIDTH,
+        plan_height: PLAN_HEIGHT,
     })
 }
 
@@ -92,7 +96,7 @@ fn logout(app: Cmd<'_>) -> Result<()> {
     Ok(())
 }
 
-// ---- products ----
+// ---- products (admin) ----
 
 #[tauri::command(async)]
 fn search_products(app: Cmd<'_>, query: String, limit: Option<i64>) -> Result<Vec<Product>> {
@@ -124,36 +128,137 @@ fn adjust_stock(app: Cmd<'_>, id: i64, delta: i64, reason: String) -> Result<Pro
     app.with_session(|pos, s| pos.adjust_stock(s, id, delta, &reason))
 }
 
-// ---- sales ----
+// ---- menu ----
 
 #[tauri::command(async)]
-fn quote_sale(app: Cmd<'_>, lines: Vec<CartLine>) -> Result<Quote> {
-    app.with_session(|pos, s| pos.quote_sale(s, &lines))
+fn menu(app: Cmd<'_>) -> Result<Vec<Product>> {
+    app.with_session(|pos, s| pos.menu(s))
 }
 
 #[tauri::command(async)]
-fn complete_sale(
+fn list_categories(app: Cmd<'_>, include_inactive: bool) -> Result<Vec<Category>> {
+    app.with_session(|pos, s| pos.list_categories(s, include_inactive))
+}
+
+#[tauri::command(async)]
+fn create_category(app: Cmd<'_>, name: String, color: Option<String>, sort_order: i64) -> Result<Category> {
+    app.with_session(|pos, s| pos.create_category(s, &name, color.as_deref(), sort_order))
+}
+
+#[tauri::command(async)]
+fn update_category(
     app: Cmd<'_>,
-    lines: Vec<CartLine>,
-    method: PaymentMethod,
-    tendered_cents: i64,
-) -> Result<Sale> {
-    app.with_session(|pos, s| pos.complete_sale(s, &lines, method, tendered_cents))
+    id: i64,
+    name: String,
+    color: Option<String>,
+    sort_order: i64,
+    active: bool,
+) -> Result<Category> {
+    app.with_session(|pos, s| pos.update_category(s, id, &name, color.as_deref(), sort_order, active))
+}
+
+// ---- floor plan ----
+
+#[tauri::command(async)]
+fn list_floors(app: Cmd<'_>) -> Result<Vec<Floor>> {
+    app.with_session(|pos, s| pos.list_floors(s))
 }
 
 #[tauri::command(async)]
-fn get_sale(app: Cmd<'_>, id: i64) -> Result<Sale> {
-    app.with_session(|pos, s| pos.get_sale(s, id))
+fn create_floor(app: Cmd<'_>, name: String) -> Result<Floor> {
+    app.with_session(|pos, s| pos.create_floor(s, &name))
 }
 
 #[tauri::command(async)]
-fn list_sales(app: Cmd<'_>, from: i64, to: i64, limit: i64, offset: i64) -> Result<Vec<SaleListItem>> {
-    app.with_session(|pos, s| pos.list_sales(s, from, to, limit, offset))
+fn update_floor(app: Cmd<'_>, id: i64, name: String, sort_order: i64) -> Result<Floor> {
+    app.with_session(|pos, s| pos.update_floor(s, id, &name, sort_order))
 }
 
 #[tauri::command(async)]
-fn void_sale(app: Cmd<'_>, id: i64, reason: String) -> Result<Sale> {
-    app.with_session(|pos, s| pos.void_sale(s, id, &reason))
+fn delete_floor(app: Cmd<'_>, id: i64) -> Result<()> {
+    app.with_session(|pos, s| pos.delete_floor(s, id))
+}
+
+#[tauri::command(async)]
+fn list_tables(app: Cmd<'_>, floor_id: i64) -> Result<Vec<DiningTable>> {
+    app.with_session(|pos, s| pos.list_tables(s, floor_id))
+}
+
+#[tauri::command(async)]
+fn floor_status(app: Cmd<'_>, floor_id: i64) -> Result<Vec<TableStatus>> {
+    app.with_session(|pos, s| pos.floor_status(s, floor_id))
+}
+
+#[tauri::command(async)]
+fn save_floor_layout(app: Cmd<'_>, floor_id: i64, tables: Vec<TableLayout>) -> Result<Vec<DiningTable>> {
+    app.with_session(|pos, s| pos.save_floor_layout(s, floor_id, &tables))
+}
+
+// ---- orders ----
+
+#[tauri::command(async)]
+fn open_order(app: Cmd<'_>, order: NewOrder) -> Result<Order> {
+    app.with_session(|pos, s| pos.open_order(s, &order))
+}
+
+#[tauri::command(async)]
+fn table_order(app: Cmd<'_>, table_id: i64) -> Result<Option<Order>> {
+    app.with_session(|pos, s| pos.table_order(s, table_id))
+}
+
+#[tauri::command(async)]
+fn get_order(app: Cmd<'_>, id: i64) -> Result<Order> {
+    app.with_session(|pos, s| pos.get_order(s, id))
+}
+
+#[tauri::command(async)]
+fn update_order_details(app: Cmd<'_>, id: i64, details: OrderDetails) -> Result<Order> {
+    app.with_session(|pos, s| pos.update_order_details(s, id, &details))
+}
+
+#[tauri::command(async)]
+fn move_order(app: Cmd<'_>, id: i64, table_id: i64) -> Result<Order> {
+    app.with_session(|pos, s| pos.move_order(s, id, table_id))
+}
+
+#[tauri::command(async)]
+fn add_item(app: Cmd<'_>, order_id: i64, product_id: i64, qty: i64, note: Option<String>) -> Result<Order> {
+    app.with_session(|pos, s| pos.add_item(s, order_id, product_id, qty, note.as_deref()))
+}
+
+#[tauri::command(async)]
+fn update_item(app: Cmd<'_>, item_id: i64, update: ItemUpdate) -> Result<Order> {
+    app.with_session(|pos, s| pos.update_item(s, item_id, &update))
+}
+
+#[tauri::command(async)]
+fn send_to_kitchen(app: Cmd<'_>, order_id: i64) -> Result<Vec<OrderItem>> {
+    app.with_session(|pos, s| pos.send_to_kitchen(s, order_id))
+}
+
+#[tauri::command(async)]
+fn pay_order(app: Cmd<'_>, order_id: i64, method: PaymentMethod, tendered_cents: i64) -> Result<Order> {
+    app.with_session(|pos, s| pos.pay_order(s, order_id, method, tendered_cents))
+}
+
+#[tauri::command(async)]
+fn cancel_order(app: Cmd<'_>, order_id: i64, reason: String) -> Result<()> {
+    app.with_session(|pos, s| pos.cancel_order(s, order_id, &reason))
+}
+
+#[tauri::command(async)]
+fn void_order(app: Cmd<'_>, order_id: i64, reason: String) -> Result<Order> {
+    app.with_session(|pos, s| pos.void_order(s, order_id, &reason))
+}
+
+#[tauri::command(async)]
+fn list_open_orders(app: Cmd<'_>) -> Result<Vec<OrderSummary>> {
+    app.with_session(|pos, s| pos.list_open_orders(s))
+}
+
+#[tauri::command(async)]
+fn list_orders(app: Cmd<'_>, from: i64, to: i64, limit: i64, offset: i64) -> Result<Vec<OrderSummary>> {
+    app.with_session(|pos, s| pos.list_orders(s, from, to, limit, offset))
 }
 
 // ---- users ----
@@ -262,11 +367,30 @@ fn main() {
             create_product,
             update_product,
             adjust_stock,
-            quote_sale,
-            complete_sale,
-            get_sale,
-            list_sales,
-            void_sale,
+            menu,
+            list_categories,
+            create_category,
+            update_category,
+            list_floors,
+            create_floor,
+            update_floor,
+            delete_floor,
+            list_tables,
+            floor_status,
+            save_floor_layout,
+            open_order,
+            table_order,
+            get_order,
+            update_order_details,
+            move_order,
+            add_item,
+            update_item,
+            send_to_kitchen,
+            pay_order,
+            cancel_order,
+            void_order,
+            list_open_orders,
+            list_orders,
             list_users,
             create_user,
             update_user,

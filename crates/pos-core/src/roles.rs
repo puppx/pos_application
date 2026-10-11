@@ -26,19 +26,22 @@ impl Role {
     pub fn can(self, p: Permission) -> bool {
         match self {
             Role::Admin => true,
-            Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnSales),
+            Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnOrders),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
+    /// Open orders, add items, send to kitchen, take payment.
     Sell,
-    ViewOwnSales,
-    ViewAllSales,
-    VoidSale,
-    ManageProducts,
+    ViewOwnOrders,
+    ViewAllOrders,
+    /// Remove items already sent to the kitchen, cancel such orders, void paid orders.
+    VoidOrder,
+    ManageMenu,
     AdjustStock,
+    ManageFloorPlan,
     ManageUsers,
     ViewReports,
     ManageSettings,

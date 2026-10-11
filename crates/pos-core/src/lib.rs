@@ -1,14 +1,16 @@
-//! POS business logic over a local SQLite database.
+//! Restaurant POS business logic over a local SQLite database.
 //!
 //! Everything the app can do goes through [`Pos`]. Methods that need
 //! authorisation take a [`Session`], which only `Pos::login` can produce.
 
 mod auth;
 mod error;
+mod floors;
+mod menu;
+mod orders;
 mod products;
 mod reports;
 mod roles;
-mod sales;
 mod users;
 
 use std::path::Path;
@@ -18,10 +20,14 @@ use rusqlite::{Connection, OptionalExtension};
 
 pub use auth::LoginThrottle;
 pub use error::{PosError, Result};
+pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_HEIGHT, PLAN_WIDTH};
+pub use menu::Category;
+pub use orders::{
+    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, PaymentMethod,
+};
 pub use products::{NewProduct, Product, ProductUpdate};
-pub use reports::{PaymentTotal, SalesSummary, TopProduct};
+pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use roles::{Permission, Role, Session};
-pub use sales::{CartLine, PaymentMethod, Quote, QuoteLine, Sale, SaleItem, SaleListItem};
 pub use users::User;
 
 const SCHEMA_VERSION: i32 = 1;

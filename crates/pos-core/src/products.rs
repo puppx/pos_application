@@ -7,6 +7,7 @@ use crate::{Permission, Pos, PosError, Result, Session};
 #[derive(Debug, Clone, Serialize)]
 pub struct Product {
     pub id: i64,
+    pub category_id: Option<i64>,
     pub sku: Option<String>,
     pub barcode: Option<String>,
     pub name: String,
@@ -21,6 +22,8 @@ pub struct Product {
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewProduct {
     #[serde(default)]
+    pub category_id: Option<i64>,
+    #[serde(default)]
     pub sku: Option<String>,
     #[serde(default)]
     pub barcode: Option<String>,
@@ -32,7 +35,8 @@ pub struct NewProduct {
     pub tax_rate_bp: i64,
     #[serde(default)]
     pub stock_qty: i64,
-    #[serde(default = "yes")]
+    /// Off by default: most dishes are not counted; bottled drinks may be.
+    #[serde(default)]
     pub track_stock: bool,
 }
 
@@ -40,6 +44,8 @@ pub struct NewProduct {
 /// `adjust_stock`, so the movement ledger always adds up.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProductUpdate {
+    #[serde(default)]
+    pub category_id: Option<i64>,
     #[serde(default)]
     pub sku: Option<String>,
     #[serde(default)]
@@ -50,7 +56,7 @@ pub struct ProductUpdate {
     pub cost_cents: i64,
     #[serde(default)]
     pub tax_rate_bp: i64,
-    #[serde(default = "yes")]
+    #[serde(default)]
     pub track_stock: bool,
     #[serde(default = "yes")]
     pub active: bool,
@@ -61,22 +67,23 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
 pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
     Ok(Product {
         id: r.get(0)?,
-        sku: r.get(1)?,
-        barcode: r.get(2)?,
-        name: r.get(3)?,
-        price_cents: r.get(4)?,
-        cost_cents: r.get(5)?,
-        tax_rate_bp: r.get(6)?,
-        stock_qty: r.get(7)?,
-        track_stock: r.get(8)?,
-        active: r.get(9)?,
+        category_id: r.get(1)?,
+        sku: r.get(2)?,
+        barcode: r.get(3)?,
+        name: r.get(4)?,
+        price_cents: r.get(5)?,
+        cost_cents: r.get(6)?,
+        tax_rate_bp: r.get(7)?,
+        stock_qty: r.get(8)?,
+        track_stock: r.get(9)?,
+        active: r.get(10)?,
     })
 }
 
@@ -156,7 +163,7 @@ impl Pos {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Product>> {
-        s.require(Permission::ManageProducts)?;
+        s.require(Permission::ManageMenu)?;
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {COLS} FROM products p WHERE (?1 OR p.active = 1)
              ORDER BY p.name LIMIT ?2 OFFSET ?3"
@@ -169,12 +176,13 @@ impl Pos {
     }
 
     pub fn create_product(&mut self, s: &Session, p: NewProduct) -> Result<Product> {
-        s.require(Permission::ManageProducts)?;
+        s.require(Permission::ManageMenu)?;
         let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
+        self.check_category(p.category_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 clean_code(p.sku),
                 clean_code(p.barcode),
@@ -183,7 +191,8 @@ impl Pos {
                 p.cost_cents,
                 p.tax_rate_bp,
                 p.stock_qty,
-                p.track_stock
+                p.track_stock,
+                p.category_id
             ],
         )
         .map_err(|e| map_unique(e, CODE_TAKEN))?;
@@ -203,13 +212,14 @@ impl Pos {
     }
 
     pub fn update_product(&self, s: &Session, id: i64, p: ProductUpdate) -> Result<Product> {
-        s.require(Permission::ManageProducts)?;
+        s.require(Permission::ManageMenu)?;
         let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
+        self.check_category(p.category_id)?;
         let changed = self
             .conn
             .execute(
                 "UPDATE products SET sku = ?2, barcode = ?3, name = ?4, price_cents = ?5, cost_cents = ?6,
-                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, updated_at = unixepoch()
+                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, updated_at = unixepoch()
                  WHERE id = ?1",
                 params![
                     id,
@@ -220,7 +230,8 @@ impl Pos {
                     p.cost_cents,
                     p.tax_rate_bp,
                     p.track_stock,
-                    p.active
+                    p.active,
+                    p.category_id
                 ],
             )
             .map_err(|e| map_unique(e, CODE_TAKEN))?;

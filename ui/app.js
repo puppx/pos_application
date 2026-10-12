@@ -283,14 +283,24 @@ async function renderFloor() {
 
 async function loadMenu() {
   if (!state.menu) {
-    const [menu, cats, opts] = await Promise.all([
+    const [menu, cats, opts, variants] = await Promise.all([
       call('menu'), call('list_categories', { includeInactive: false }), call('menu_options'),
+      call('list_variants', { productId: null }),
     ]);
+    state.itemVariants = {};
+    for (const v of variants) (state.itemVariants[v.product_id] ??= []).push(v);
     const byId = Object.fromEntries(opts.groups.map((g) => [g.id, g]));
     state.itemGroups = {};
     for (const l of opts.links) (state.itemGroups[l.product_id] ??= []).push(byId[l.group_id]);
     [state.menu, state.cats] = [menu, cats];
   }
+}
+
+/// Price label for a menu item: "6.50", or "from 6.50" when it has choices.
+function itemPrice(p, variants) {
+  if (!variants?.length) return money(p.price_cents);
+  const min = Math.min(...variants.map((v) => v.price_cents));
+  return variants.every((v) => v.price_cents === min) ? money(min) : `from ${money(min)}`;
 }
 
 /// Short rule text for an option group, e.g. "choose 1" or "optional, up to 3".
@@ -326,7 +336,8 @@ async function renderOrder() {
     const list = state.menu.filter((p) => q ? p.name.toLowerCase().includes(q) : state.catId == null || p.category_id === state.catId);
     grid.replaceChildren(...list.slice(0, 300).map((p) => h('button', {
       style: `border-left-color:${catColor[p.category_id] || '#d9dce1'}`, onclick: choose(p),
-    }, h('span', {}, p.name), h('small', {}, money(p.price_cents), state.itemGroups[p.id] ? ' …' : ''))));
+    }, h('span', {}, p.name), h('small', {}, itemPrice(p, state.itemVariants[p.id]),
+      state.itemGroups[p.id] || state.itemVariants[p.id] ? ' …' : ''))));
     return list;
   };
   search.addEventListener('input', drawMenu);
@@ -348,24 +359,33 @@ async function renderOrder() {
   const extra = h('div');
   let editing = null;
 
-  async function addItem(productId, optionIds = []) {
-    order = await call('add_item', { orderId, productId, qty: 1, note: null, optionIds });
+  async function addItem(productId, optionIds = [], variantId = null) {
+    order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds });
     draw();
   }
   // Tap on a menu item: add it straight away, or ask for its options first.
   function choose(p) {
     return act(async () => {
       const groups = (state.itemGroups[p.id] || []).filter((g) => g.options.length);
-      if (!groups.length) return addItem(p.id);
-      openPicker(p, groups);
+      const variants = state.itemVariants[p.id] || [];
+      if (!groups.length && !variants.length) return addItem(p.id);
+      openPicker(p, groups, variants);
     });
   }
-  function openPicker(p, groups) {
+  function openPicker(p, groups, variants = []) {
     const chosen = new Map(groups.map((g) => [g.id, new Set()]));
+    let variant = null;
     const body = h('div', { class: 'stack' });
     const price = h('strong');
     const redraw = () => {
-      body.replaceChildren(...groups.map((g) => h('div', { class: 'stack' },
+      body.replaceChildren(
+        variants.length > 0 && h('div', { class: 'stack' },
+          h('div', {}, h('strong', {}, 'Choose'), ' ', h('span', { class: 'muted' }, 'required')),
+          h('div', { class: 'opts' }, variants.map((v) => h('button', {
+            class: variant?.id === v.id ? 'on' : '',
+            onclick: () => { variant = v; redraw(); },
+          }, v.name, h('small', {}, money(v.price_cents)))))),
+        ...groups.map((g) => h('div', { class: 'stack' },
         h('div', {}, h('strong', {}, g.name), ' ', h('span', { class: 'muted' }, groupRule(g))),
         h('div', { class: 'opts' }, g.options.map((o) => {
           const set = chosen.get(g.id);
@@ -380,14 +400,26 @@ async function renderOrder() {
         })))));
       const extra = groups.flatMap((g) => g.options.filter((o) => chosen.get(g.id).has(o.id)))
         .reduce((n, o) => n + o.price_cents, 0);
-      price.textContent = money(p.price_cents + extra);
+      const base = variants.length ? variant?.price_cents : p.price_cents;
+      price.textContent = base == null ? `from ${itemPrice(p, variants).replace('from ', '')}` : money(base + extra);
     };
     const add = act(async () => {
+      if (variants.length && !variant) return toast(`Choose which ${p.name}`, true);
       const missing = groups.find((g) => chosen.get(g.id).size < g.min_select);
       if (missing) return toast(`${missing.name}: ${groupRule(missing)}`, true);
-      await addItem(p.id, groups.flatMap((g) => [...chosen.get(g.id)]));
+      await addItem(p.id, groups.flatMap((g) => [...chosen.get(g.id)]), variant?.id ?? null);
       closePicker();
     });
+    // With only choices (no option groups), one tap on a choice adds it.
+    if (!groups.length) {
+      picker.replaceChildren(h('h3', {}, p.name),
+        h('div', { class: 'opts' }, variants.map((v) => h('button', {
+          onclick: act(async () => { await addItem(p.id, [], v.id); closePicker(); }),
+        }, v.name, h('small', {}, money(v.price_cents))))),
+        h('div', { class: 'row' }, h('button', { onclick: closePicker }, 'Cancel')));
+      [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
+      return;
+    }
     picker.replaceChildren(h('h3', {}, p.name), body,
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: add }, 'Add to order'),
         h('button', { onclick: closePicker }, 'Cancel'), h('span', { style: 'flex:1' }), price));
@@ -444,7 +476,7 @@ async function renderOrder() {
           h('button', { onclick: act(() => setLine(it, { qty: it.qty - 1 })) }, '−'),
           ` ${it.qty} `,
           h('button', { onclick: act(() => (sent
-            ? addItem(it.product_id, it.options.map((o) => o.option_id))
+            ? addItem(it.product_id, it.options.map((o) => o.option_id), it.variant_id)
             : setLine(it, { qty: it.qty + 1 }))) }, '+')),
         h('td', { class: 'num' }, money(it.line_total_cents)),
         h('td', {}, h('button', { onclick: () => { editing = editing === it.id ? null : it.id; draw(); } }, '✎')));
@@ -783,11 +815,14 @@ async function renderHistory() {
 // ---------- menu (admin) ----------
 
 async function renderMenuAdmin() {
-  const [cats, groups, feed] = await Promise.all([
+  const [cats, groups, feed, allVariants] = await Promise.all([
     call('list_categories', { includeInactive: true }),
     call('list_option_groups', { includeInactive: true }),
     call('menu_options'),
+    call('list_variants', { productId: null }),
   ]);
+  const variantsOf = {};
+  for (const v of allVariants) (variantsOf[v.product_id] ??= []).push(v);
   const activeGroups = groups.filter((g) => g.active);
   const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
   const form = h('div');
@@ -802,7 +837,8 @@ async function renderMenuAdmin() {
     list.replaceChildren(h('table', {},
       h('tr', {}, h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
       products.map((p) => h('tr', { class: 'click', style: p.active ? '' : 'opacity:.5', onclick: () => editProduct(p) },
-        h('td', {}, p.name), h('td', {}, catName[p.category_id] ?? '—'), h('td', { class: 'num' }, money(p.price_cents)),
+        h('td', {}, p.name, variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
+        h('td', {}, catName[p.category_id] ?? '—'), h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
         h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—')))));
   });
 
@@ -872,12 +908,27 @@ async function renderMenuAdmin() {
       active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
     };
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
+    // Choices with their own price (e.g. soup: chicken 6.50 / beef 7.50).
+    const choices = (variantsOf[p?.id] ?? []).map((v) => ({ id: v.id, name: v.name, price: money(v.price_cents) }));
+    const choiceList = h('div', { class: 'stack' });
+    const priceHint = h('span', { class: 'muted' });
+    const drawChoices = () => {
+      priceHint.textContent = choices.length ? '(the item price above is not used)' : '';
+      choiceList.replaceChildren(...choices.map((c, i) => h('div', { class: 'row' },
+        h('input', { value: c.name, placeholder: 'e.g. Chicken', oninput: (e) => (c.name = e.target.value) }),
+        h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', oninput: (e) => (c.price = e.target.value) }),
+        h('button', { class: 'danger', onclick: () => { choices.splice(i, 1); drawChoices(); } }, '×'))));
+    };
+    const addChoice = () => { choices.push({ id: null, name: '', price: '' }); drawChoices(); choiceList.lastChild.querySelector('input').focus(); };
+    drawChoices();
     const groupBoxes = activeGroups.map((g) => ({ g, box: h('input', { type: 'checkbox', checked: linked.has(g.id) }) }));
     f.cat.value = p ? (p.category_id ?? '') : filter.value;
     const data = () => ({
       name: f.name.value, category_id: f.cat.value ? Number(f.cat.value) : null,
       barcode: f.barcode.value || null, sku: f.sku.value || null,
-      price_cents: parseMoney(f.price.value), cost_cents: parseMoney(f.cost.value || '0'),
+      // Items with choices have no price of their own: an empty box means 0.
+      price_cents: !f.price.value.trim() && choices.some((c) => c.name.trim()) ? 0 : parseMoney(f.price.value),
+      cost_cents: parseMoney(f.cost.value || '0'),
       tax_rate_bp: Math.round(Number(f.tax.value || 0) * 100), track_stock: f.track.checked,
     });
     const save = act(async () => {
@@ -886,6 +937,8 @@ async function renderMenuAdmin() {
         : await call('create_product', { product: { ...data(), stock_qty: parseInt(f.stock.value || '0', 10) } });
       const groupIds = groupBoxes.filter((x) => x.box.checked).map((x) => x.g.id);
       if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds });
+      const variants = choices.filter((c) => c.name.trim()).map((c) => ({ id: c.id, name: c.name, price_cents: parseMoney(c.price) }));
+      if (p || variants.length) await call('set_variants', { productId: saved.id, variants });
       toast('Saved'); await changed();
     });
     const delta = h('input', { placeholder: '+/- qty', style: 'width:90px', inputmode: 'numeric' });
@@ -894,6 +947,9 @@ async function renderMenuAdmin() {
       h('h3', {}, p ? `Edit ${p.name}` : 'New menu item'),
       h('div', { class: 'row' }, f.name, f.cat),
       h('div', { class: 'row' }, 'Price', f.price, 'Tax %', f.tax, 'Cost', f.cost),
+      h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
+        h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering. Leave empty for a normal item.'),
+        choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
       h('div', { class: 'row' }, f.barcode, f.sku),
       groupBoxes.length > 0 && h('div', { class: 'stack' }, h('strong', {}, 'Options'),
         h('div', { class: 'row' }, groupBoxes.map(({ g, box }) => h('label', {}, box, ` ${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))))),

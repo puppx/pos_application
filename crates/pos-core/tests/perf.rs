@@ -69,7 +69,7 @@ fn busy_restaurant() {
         let o = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
         let a = Instant::now();
         for j in 0..6 {
-            pos.add_item(&s, o.id, items[(n * 7 + j * 13) % items.len()], 1, None, &[]).unwrap();
+            pos.add_item(&s, o.id, items[(n * 7 + j * 13) % items.len()], 1, None, None, &[]).unwrap();
         }
         add_time += a.elapsed();
         pos.send_to_kitchen(&s, o.id).unwrap();
@@ -85,7 +85,7 @@ fn busy_restaurant() {
     for (i, (_, table)) in tables.iter().enumerate() {
         let o = pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: Some(*table), channel_id: None, details: Default::default() }).unwrap();
         for j in 0..8 {
-            pos.add_item(&s, o.id, items[(i * 11 + j * 17) % items.len()], 1, None, &[]).unwrap();
+            pos.add_item(&s, o.id, items[(i * 11 + j * 17) % items.len()], 1, None, None, &[]).unwrap();
         }
     }
     let floor_id = tables[0].0;

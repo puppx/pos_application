@@ -177,9 +177,9 @@ fn dine_in_full_service() {
     assert_eq!(pos.table_order(&s, g[0].id).unwrap().unwrap().id, o.id);
 
     // Round 1: two burgers (tapped twice -> one line), one cola, with a note.
-    pos.add_item(&s, o.id, burger.id, 1, None, &[]).unwrap();
-    pos.add_item(&s, o.id, burger.id, 1, None, &[]).unwrap();
-    let o2 = pos.add_item(&s, o.id, cola.id, 1, Some("no ice"), &[]).unwrap();
+    pos.add_item(&s, o.id, burger.id, 1, None, None, &[]).unwrap();
+    pos.add_item(&s, o.id, burger.id, 1, None, None, &[]).unwrap();
+    let o2 = pos.add_item(&s, o.id, cola.id, 1, Some("no ice"), None, &[]).unwrap();
     assert_eq!(o2.items.len(), 2);
     assert_eq!(o2.items[0].qty, 2);
     assert_eq!(o2.items[1].note.as_deref(), Some("no ice"));
@@ -195,7 +195,7 @@ fn dine_in_full_service() {
     assert!(pos.send_to_kitchen(&s, o.id).unwrap().is_empty());
 
     // Round 2: dessert-ish cola. Only the new line goes on the next ticket.
-    pos.add_item(&s, o.id, cola.id, 1, None, &[]).unwrap();
+    pos.add_item(&s, o.id, cola.id, 1, None, None, &[]).unwrap();
     let ticket = pos.send_to_kitchen(&s, o.id).unwrap();
     assert_eq!((ticket.len(), ticket[0].qty), (1, 1));
 
@@ -210,7 +210,7 @@ fn dine_in_full_service() {
     assert_eq!(pos.get_product(&admin, cola.id).unwrap().stock_qty, 22);
     // Table is free again; paid order is closed for edits.
     assert!(pos.table_order(&s, g[1].id).unwrap().is_none());
-    assert!(pos.add_item(&s, o.id, cola.id, 1, None, &[]).is_err());
+    assert!(pos.add_item(&s, o.id, cola.id, 1, None, None, &[]).is_err());
 
     let sum = pos.sales_summary(&admin, 0, i64::MAX).unwrap();
     assert_eq!((sum.order_count, sum.total_cents), (1, 2876));
@@ -230,7 +230,7 @@ fn sent_items_need_admin_to_remove() {
     let (_, g, _, _) = floors(&mut pos, &admin);
     let burger = item(&mut pos, &admin, "Burger", 1000, 0, None);
     let o = pos.open_order(&s, &dine_in(g[0].id)).unwrap();
-    let o = pos.add_item(&s, o.id, burger.id, 2, None, &[]).unwrap();
+    let o = pos.add_item(&s, o.id, burger.id, 2, None, None, &[]).unwrap();
     let line = o.items[0].id;
 
     // Unsent: staff can change freely.
@@ -257,7 +257,7 @@ fn sent_items_need_admin_to_remove() {
 
     // An order with nothing sent can be cancelled by staff without a reason.
     let o = pos.open_order(&s, &dine_in(g[0].id)).unwrap();
-    pos.add_item(&s, o.id, burger.id, 1, None, &[]).unwrap();
+    pos.add_item(&s, o.id, burger.id, 1, None, None, &[]).unwrap();
     pos.cancel_order(&s, o.id, "").unwrap();
 }
 
@@ -300,7 +300,7 @@ fn takeaway_collection_delivery() {
 
     assert_eq!(pos.list_open_orders(&s).unwrap().len(), 3);
     for o in [&ta, &col, &del] {
-        pos.add_item(&s, o.id, pizza.id, 1, None, &[]).unwrap();
+        pos.add_item(&s, o.id, pizza.id, 1, None, None, &[]).unwrap();
         pos.send_to_kitchen(&s, o.id).unwrap();
         pos.pay_order(&s, o.id, PaymentMethod::Card, 0).unwrap();
     }
@@ -323,8 +323,8 @@ fn staff_history_is_own_orders_only() {
     let mine = pos.open_order(&s, &ta).unwrap();
     let theirs = pos.open_order(&admin, &ta).unwrap();
     // Open orders are shared: staff can work on the admin's open order.
-    pos.add_item(&s, theirs.id, p.id, 1, None, &[]).unwrap();
-    pos.add_item(&s, mine.id, p.id, 1, None, &[]).unwrap();
+    pos.add_item(&s, theirs.id, p.id, 1, None, None, &[]).unwrap();
+    pos.add_item(&s, mine.id, p.id, 1, None, None, &[]).unwrap();
     pos.pay_order(&admin, theirs.id, PaymentMethod::Card, 0).unwrap();
     pos.pay_order(&s, mine.id, PaymentMethod::Card, 0).unwrap();
 
@@ -339,14 +339,14 @@ fn price_is_fixed_when_item_is_added() {
     let (mut pos, admin) = setup();
     let p = item(&mut pos, &admin, "Soup", 500, 0, None);
     let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
-    pos.add_item(&admin, o.id, p.id, 1, None, &[]).unwrap();
+    pos.add_item(&admin, o.id, p.id, 1, None, None, &[]).unwrap();
     let upd = ProductUpdate {
         category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 900,
         cost_cents: 0, tax_rate_bp: 0, track_stock: false, active: true,
     };
     pos.update_product(&admin, p.id, upd).unwrap();
     // Existing line keeps 5.00; a new tap at 9.00 becomes its own line.
-    let o = pos.add_item(&admin, o.id, p.id, 1, None, &[]).unwrap();
+    let o = pos.add_item(&admin, o.id, p.id, 1, None, None, &[]).unwrap();
     assert_eq!(o.items.iter().map(|i| i.unit_price_cents).collect::<Vec<_>>(), [500, 900]);
     assert_eq!(o.total_cents, 1400);
 }

@@ -82,7 +82,7 @@ fn platform_orders_need_no_customer_details() {
     assert!(pos.open_order(&s, &NewOrder { order_type: OrderType::Collection, table_id: None, channel_id: Some(999), details: Default::default() }).is_err());
 
     // Kitchen ticket heading shows the platform and its order number.
-    pos.add_item(&s, o.id, pizza.id, 1, None, &[]).unwrap();
+    pos.add_item(&s, o.id, pizza.id, 1, None, None, &[]).unwrap();
     let sent = pos.send_to_kitchen(&s, o.id).unwrap();
     let text = pos.kitchen_ticket(&s, o.id, &sent, false).unwrap().to_text(42);
     assert!(text.contains("UBER EATS #A1B2C"), "{text}");
@@ -93,7 +93,7 @@ fn platform_orders_need_no_customer_details() {
 
     // Reports split by platform, with direct orders under "Direct".
     let direct = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
-    pos.add_item(&s, direct.id, pizza.id, 2, None, &[]).unwrap();
+    pos.add_item(&s, direct.id, pizza.id, 2, None, None, &[]).unwrap();
     pos.pay_order(&s, direct.id, PaymentMethod::Card, 0).unwrap();
     let sum = pos.sales_summary(&admin, 0, i64::MAX).unwrap();
     let by: Vec<(&str, i64)> = sum.by_channel.iter().map(|g| (g.key.as_str(), g.total_cents)).collect();
@@ -188,7 +188,7 @@ fn upgrades_a_v0_1_0_database() {
     assert_eq!(pos.setting("store_name").unwrap().as_deref(), Some("Old Shop"));
     let conn = rusqlite::Connection::open(&path).unwrap();
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     let (name, channel): (String, Option<i64>) = conn
         .query_row("SELECT customer_name, channel_id FROM orders WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();

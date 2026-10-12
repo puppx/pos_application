@@ -45,18 +45,18 @@ fn options_price_and_rules() {
     let o = takeaway(&pos, &admin);
 
     // Size is required, extras limited to two, options must belong to the item.
-    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, &[]).is_err());
-    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, &[id(&size, "Regular"), id(&size, "Large")]).is_err());
+    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, None, &[]).is_err());
+    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Regular"), id(&size, "Large")]).is_err());
     assert!(pos
-        .add_item(&admin, o.id, burger.id, 1, None, &[id(&size, "Large"), id(&extras, "Cheese"), id(&extras, "Bacon"), id(&extras, "Egg")])
+        .add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Large"), id(&extras, "Cheese"), id(&extras, "Bacon"), id(&extras, "Egg")])
         .is_err());
     let fries = product(&mut pos, &admin, "Fries", 300);
-    assert!(pos.add_item(&admin, o.id, fries.id, 1, None, &[id(&extras, "Cheese")]).is_err());
-    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, &[id(&size, "Large"), id(&size, "Large")]).is_err());
+    assert!(pos.add_item(&admin, o.id, fries.id, 1, None, None, &[id(&extras, "Cheese")]).is_err());
+    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Large"), id(&size, "Large")]).is_err());
 
     // Large + Bacon + Cheese = 10.00 + 2.50 + 1.50 + 1.00 = 15.00, listed in menu order.
     let large_bacon_cheese = [id(&extras, "Bacon"), id(&size, "Large"), id(&extras, "Cheese")];
-    let order = pos.add_item(&admin, o.id, burger.id, 1, None, &large_bacon_cheese).unwrap();
+    let order = pos.add_item(&admin, o.id, burger.id, 1, None, None, &large_bacon_cheese).unwrap();
     let line = &order.items[0];
     assert_eq!(line.unit_price_cents, 1500);
     assert_eq!(line.options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["Large", "Cheese", "Bacon"]);
@@ -64,9 +64,9 @@ fn options_price_and_rules() {
     assert_eq!(order.total_cents, 1650); // + 10% tax
 
     // Same choices (any order) merge; different choices make a new line.
-    let order = pos.add_item(&admin, o.id, burger.id, 1, None, &[id(&extras, "Cheese"), id(&extras, "Bacon"), id(&size, "Large")]).unwrap();
+    let order = pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&extras, "Cheese"), id(&extras, "Bacon"), id(&size, "Large")]).unwrap();
     assert_eq!((order.items.len(), order.items[0].qty), (1, 2));
-    let order = pos.add_item(&admin, o.id, burger.id, 1, None, &[id(&size, "Regular")]).unwrap();
+    let order = pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Regular")]).unwrap();
     assert_eq!(order.items.len(), 2);
     assert_eq!(order.items[1].unit_price_cents, 1000);
 
@@ -75,7 +75,7 @@ fn options_price_and_rules() {
     let order = pos.get_order(&admin, o.id).unwrap();
     assert_eq!((order.items[0].unit_price_cents, order.items[0].options[0].name.as_str()), (1500, "Large"));
     // ...but "Regular" was retired, so it can no longer be chosen.
-    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, &[id(&size, "Regular")]).is_err());
+    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Regular")]).is_err());
 
     let paid = pos.pay_order(&admin, o.id, PaymentMethod::Card, 0).unwrap();
     assert_eq!(paid.total_cents, 2 * 1650 + 1100);
@@ -88,7 +88,7 @@ fn removing_a_line_removes_its_options() {
     let (mut pos, admin) = setup();
     let (burger, size, _) = burger_with_options(&mut pos, &admin);
     let o = takeaway(&pos, &admin);
-    let order = pos.add_item(&admin, o.id, burger.id, 1, None, &[id(&size, "Large")]).unwrap();
+    let order = pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Large")]).unwrap();
     let line = &order.items[0];
     let order = pos.update_item(&admin, line.id, &ItemUpdate { qty: 0, discount_cents: 0, note: None }).unwrap();
     assert!(order.items.is_empty());
@@ -112,7 +112,7 @@ fn option_admin_and_menu_feed() {
     let feed = pos.menu_options(&admin).unwrap();
     assert_eq!(feed.groups.len(), 1);
     let o = takeaway(&pos, &admin);
-    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, &[]).is_ok());
+    assert!(pos.add_item(&admin, o.id, burger.id, 1, None, None, &[]).is_ok());
 
     // Staff can read options but not change them.
     pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
@@ -131,7 +131,7 @@ fn kitchen_tickets_per_round() {
         .save_floor_layout(&admin, floor.id, &[TableLayout { id: None, name: "T3".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
     let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t[0].id), channel_id: None, details: Default::default() }).unwrap();
-    pos.add_item(&admin, o.id, burger.id, 2, Some("no onions"), &[id(&size, "Large"), id(&extras, "Cheese")]).unwrap();
+    pos.add_item(&admin, o.id, burger.id, 2, Some("no onions"), None, &[id(&size, "Large"), id(&extras, "Cheese")]).unwrap();
 
     // No printer configured: sending still works, nothing to print.
     let sent = pos.send_to_kitchen(&admin, o.id).unwrap();
@@ -145,7 +145,7 @@ fn kitchen_tickets_per_round() {
     assert!(text.contains("2 x Burger\n   + Large\n   + Cheese\n   ** no onions\n"), "{text}");
 
     // Second round is marked as additional and only lists the new items.
-    pos.add_item(&admin, o.id, burger.id, 1, None, &[id(&size, "Regular")]).unwrap();
+    pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Regular")]).unwrap();
     let sent = pos.send_to_kitchen(&admin, o.id).unwrap();
     let text = pos.kitchen_ticket(&admin, o.id, &sent, false).unwrap().to_text(42);
     assert!(text.contains("ADDITIONAL"));
@@ -182,4 +182,70 @@ fn printer_settings_are_admin_only_and_validated() {
     // Internal setting is not exposed through the generic settings API.
     assert!(pos.setting("_kitchen_printer").unwrap().is_none());
     assert!(pos.set_setting(&admin, "_kitchen_printer", "{}").is_err());
+}
+
+/// Tom Yum Soup has no price of its own: Chicken 6.50 / Beef 7.50 / Prawn 8.50.
+#[test]
+fn item_choices_with_their_own_prices() {
+    let (mut pos, admin) = setup();
+    let soup = product(&mut pos, &admin, "Tom Yum Soup", 0);
+    let v = |id, name: &str, price| VariantInput { id, name: name.into(), price_cents: price };
+    let choices = pos
+        .set_variants(&admin, soup.id, &[v(None, "Chicken", 650), v(None, "Beef", 750), v(None, "Prawn", 850)])
+        .unwrap();
+    let id = |n: &str| choices.iter().find(|c| c.name == n).unwrap().id;
+    assert_eq!(pos.list_variants(&admin, None).unwrap().len(), 3);
+
+    let o = takeaway(&pos, &admin);
+    // A choice is required, and must belong to this item.
+    assert!(pos.add_item(&admin, o.id, soup.id, 1, None, None, &[]).is_err());
+    let fries = product(&mut pos, &admin, "Fries", 300);
+    assert!(pos.add_item(&admin, o.id, fries.id, 1, None, Some(id("Beef")), &[]).is_err());
+
+    pos.add_item(&admin, o.id, soup.id, 1, None, Some(id("Beef")), &[]).unwrap();
+    pos.add_item(&admin, o.id, soup.id, 1, None, Some(id("Beef")), &[]).unwrap(); // merges
+    let order = pos.add_item(&admin, o.id, soup.id, 1, None, Some(id("Prawn")), &[]).unwrap();
+    let lines: Vec<(&str, i64, i64)> =
+        order.items.iter().map(|i| (i.name.as_str(), i.qty, i.unit_price_cents)).collect();
+    assert_eq!(lines, [("Tom Yum Soup (Beef)", 2, 750), ("Tom Yum Soup (Prawn)", 1, 850)]);
+    assert_eq!(order.subtotal_cents, 2 * 750 + 850);
+
+    // Options still add on top of the choice's price.
+    let extras = pos.create_option_group(&admin, "Add-ons", 0, 3).unwrap();
+    let extras = pos.save_group_options(&admin, extras.id, &[opt("Extra noodles", 100)]).unwrap();
+    pos.set_product_option_groups(&admin, soup.id, &[extras.id]).unwrap();
+    let order = pos.add_item(&admin, o.id, soup.id, 1, None, Some(id("Chicken")), &[extras.options[0].id]).unwrap();
+    assert_eq!(order.items[2].unit_price_cents, 750);
+    assert_eq!(order.items[2].name, "Tom Yum Soup (Chicken)");
+
+    // Kitchen ticket shows which meat.
+    let sent = pos.send_to_kitchen(&admin, o.id).unwrap();
+    let text = pos.kitchen_ticket(&admin, o.id, &sent, false).unwrap().to_text(42);
+    assert!(text.contains("2 x Tom Yum Soup (Beef)") && text.contains("1 x Tom Yum Soup (Chicken)\n   + Extra noodles"), "{text}");
+
+    // Reports count each choice separately.
+    pos.pay_order(&admin, o.id, PaymentMethod::Card, 0).unwrap();
+    let top = pos.top_products(&admin, 0, i64::MAX, 10).unwrap();
+    let names: Vec<&str> = top.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Tom Yum Soup (Beef)", "Tom Yum Soup (Prawn)", "Tom Yum Soup (Chicken)"]);
+
+    // Edit: rename and reprice one, drop one, add one. Old lines keep their snapshot.
+    let edited = pos
+        .set_variants(&admin, soup.id, &[v(Some(id("Chicken")), "Chicken", 700), v(None, "Tofu", 600)])
+        .unwrap();
+    assert_eq!(edited.iter().map(|c| (c.name.as_str(), c.price_cents)).collect::<Vec<_>>(), [("Chicken", 700), ("Tofu", 600)]);
+    let o2 = takeaway(&pos, &admin);
+    assert!(pos.add_item(&admin, o2.id, soup.id, 1, None, Some(id("Beef")), &[]).is_err());
+    assert!(pos.set_variants(&admin, soup.id, &[v(None, "A", 1), v(None, "a", 2)]).is_err());
+
+    // Clearing the choices makes the item use its own price again.
+    pos.set_variants(&admin, soup.id, &[]).unwrap();
+    let order = pos.add_item(&admin, o2.id, soup.id, 1, None, None, &[]).unwrap();
+    assert_eq!((order.items[0].name.as_str(), order.items[0].unit_price_cents), ("Tom Yum Soup", 0));
+
+    // Staff can read choices, not edit them.
+    pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+    let staff = pos.login("2222").unwrap();
+    assert!(pos.list_variants(&staff, Some(soup.id)).is_ok());
+    assert!(matches!(pos.set_variants(&staff, soup.id, &[]), Err(PosError::Forbidden)));
 }

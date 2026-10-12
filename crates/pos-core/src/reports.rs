@@ -109,7 +109,7 @@ impl Pos {
             "SELECT i.product_id, MAX(i.name), SUM(i.qty), SUM(i.unit_price_cents * i.qty - i.discount_cents)
              FROM orders o JOIN order_items i ON i.order_id = o.id
              WHERE o.paid_at >= ?1 AND o.paid_at < ?2 AND o.status = 'paid'
-             GROUP BY i.product_id ORDER BY 4 DESC LIMIT ?3",
+             GROUP BY i.product_id, i.variant_id ORDER BY 4 DESC LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![from, to, limit.clamp(1, 100)], |r| {
             Ok(TopProduct { product_id: r.get(0)?, name: r.get(1)?, qty: r.get(2)?, revenue_cents: r.get(3)? })

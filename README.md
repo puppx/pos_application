@@ -9,6 +9,7 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Live table view**: free and occupied tables, running bill, time seated, and a red ring when items haven't been sent to the kitchen
 - **Orders stay open** while you add items over several rounds. *Send to kitchen* marks what has gone; *Move table* moves an order to any free table on any floor.
 - **Menu** with coloured categories, a tap-to-add item grid, notes per item ("no onions"), line discounts and optional stock counting (for example bottled drinks)
+- **Item choices with their own prices**: one menu item sold in versions, e.g. *Tom Yum Soup*: Chicken 6.50 / Beef 7.50 / Prawn 8.50. Set them up in the item's own editor (no option groups needed); the menu shows "from 6.50", staff tap the soup then the meat, and the bill, kitchen ticket and reports show *Tom Yum Soup (Beef)*.
 - **Item options with prices**: sizes, extras and choices such as "Burger size" (pick exactly one), "Extras" (pick up to 5) or "Cooking". Option groups are reusable across items, and each option's price (+ or −) is added to the item.
 - **Delivery platforms**: one-tap buttons for Uber Eats, Just Eat and Deliveroo (add, rename, recolour or remove them in Settings). They record the platform's order number, have a *Paid by Uber Eats* button, a ticket heading such as `UBER EATS #7F3K2`, and their own line in reports.
 - **Saved customers** for delivery and collection: find them by any part of their phone number, name or postcode and fill the order in one tap. Edit them on the **Customers** screen, which also shows each customer's recent orders.
@@ -185,6 +186,7 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
   src/options.rs     Option groups (sizes, extras) and validation of choices
   src/channels.rs    Delivery platforms (Uber Eats, Just Eat, Deliveroo…)
   src/customers.rs   Saved customers, phone/postcode search
+  src/variants.rs    Item choices with their own prices (soup: chicken / beef)
   src/migrations/    Database upgrades applied on start (never edit a shipped one)
   src/printing.rs    Kitchen tickets: layout, ESC/POS, network/Windows/serial printing
   src/schema.sql     Database schema (migrations via PRAGMA user_version)

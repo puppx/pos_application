@@ -16,6 +16,7 @@ mod products;
 mod reports;
 mod roles;
 mod users;
+mod variants;
 
 use std::path::Path;
 use std::time::Duration;
@@ -37,16 +38,18 @@ pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use roles::{Permission, Role, Session};
 pub use users::User;
+pub use variants::{Variant, VariantInput};
 
 /// Database migrations, applied in order and tracked in `PRAGMA user_version`.
 ///
 /// Released installs already contain these, so NEVER edit an entry once it has
 /// shipped (v0.1.0 shipped `schema.sql`). To change the schema, append a new
-/// file (e.g. `migrations/0003_xxx.sql`) holding only the ALTER/CREATE
+/// file (e.g. `migrations/0004_xxx.sql`) holding only the ALTER/CREATE
 /// statements; existing databases are upgraded on the next start.
 const MIGRATIONS: &[&str] = &[
     include_str!("schema.sql"),
     include_str!("migrations/0002_delivery_customers.sql"),
+    include_str!("migrations/0003_item_choices.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

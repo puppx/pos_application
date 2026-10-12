@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{invalid, map_unique};
 use crate::options::{resolve_options, ItemOption};
+use crate::variants::resolve_variant;
 use crate::{Permission, Pos, PosError, Result, Session};
 
 const MAX_QTY: i64 = 1_000;
@@ -107,6 +108,8 @@ pub struct OrderItem {
     pub qty: i64,
     pub discount_cents: i64,
     pub note: Option<String>,
+    /// The item choice (e.g. "Beef"), when the item has choices.
+    pub variant_id: Option<i64>,
     pub options: Vec<ItemOption>,
     /// None until sent to the kitchen.
     pub sent_at: Option<i64>,
@@ -247,7 +250,8 @@ fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
 
 const TABLE_BUSY: &str = "that table already has an open order";
 
-const ITEM_COLS: &str = "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at";
+const ITEM_COLS: &str =
+    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id";
 
 fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
     let (price, rate, qty, disc): (i64, i64, i64, i64) = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
@@ -261,6 +265,7 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         qty,
         discount_cents: disc,
         note: r.get(7)?,
+        variant_id: r.get(9)?,
         options: Vec::new(),
         sent_at: r.get(8)?,
         line_total_cents: net,
@@ -514,10 +519,12 @@ impl Pos {
         self.get_order(s, id)
     }
 
-    /// Add a menu item at its current price, with the chosen options
-    /// (validated against the item's option groups). Repeated taps on the
-    /// same item with the same options (no note, not yet sent) increase the
-    /// quantity of one line.
+    /// Add a menu item at its current price. Items with choices (e.g. soup:
+    /// chicken / beef) need `variant_id`, whose price replaces the item's;
+    /// options (validated against the item's option groups) add to it.
+    /// Repeated taps on the same item, choice and options (no note, not yet
+    /// sent) increase the quantity of one line.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_item(
         &mut self,
         s: &Session,
@@ -525,6 +532,7 @@ impl Pos {
         product_id: i64,
         qty: i64,
         note: Option<&str>,
+        variant_id: Option<i64>,
         option_ids: &[i64],
     ) -> Result<Order> {
         s.require(Permission::Sell)?;
@@ -539,6 +547,12 @@ impl Pos {
             .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available".into()))?;
+        let variant = resolve_variant(&tx, product_id, variant_id)?;
+        let variant_id = variant.as_ref().map(|v| v.0);
+        let (name, base) = match variant {
+            Some((_, vname, vprice)) => (format!("{name} ({vname})"), vprice),
+            None => (name, base),
+        };
         let options = resolve_options(&tx, product_id, option_ids)?;
         let price = base + options.iter().map(|o| o.price_cents).sum::<i64>();
         if price < 0 {
@@ -554,9 +568,10 @@ impl Pos {
                     "SELECT id FROM order_items
                      WHERE order_id = ?1 AND product_id = ?2 AND sent_at IS NULL AND note IS NULL
                        AND discount_cents = 0 AND unit_price_cents = ?3 AND qty + ?4 <= ?5
+                       AND variant_id IS ?6
                      ORDER BY id DESC",
                 )?
-                .query_map(params![order_id, product_id, price, qty, MAX_QTY], |r| r.get(0))?
+                .query_map(params![order_id, product_id, price, qty, MAX_QTY, variant_id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             for id in candidates {
                 if line_option_ids(&tx, id)? == wanted {
@@ -573,10 +588,10 @@ impl Pos {
                 return invalid("this order has too many lines");
             }
             tx.prepare_cached(
-                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?
-            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id])?;
+            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id])?;
             let item_id = tx.last_insert_rowid();
             let mut ins = tx.prepare_cached(
                 "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents)
@@ -609,6 +624,7 @@ impl Pos {
                     qty: r.get(6)?,
                     discount_cents: r.get(7)?,
                     note: r.get(8)?,
+                    variant_id: r.get(10)?,
                     options: Vec::new(),
                     sent_at: r.get(9)?,
                     line_total_cents: 0,

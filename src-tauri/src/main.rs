@@ -201,6 +201,18 @@ fn customer_orders(app: Cmd<'_>, id: i64) -> Result<Vec<OrderSummary>> {
     app.with_session(|pos, s| pos.customer_orders(s, id, 10))
 }
 
+// ---- item choices (variants) ----
+
+#[tauri::command(async)]
+fn list_variants(app: Cmd<'_>, product_id: Option<i64>) -> Result<Vec<Variant>> {
+    app.with_session(|pos, s| pos.list_variants(s, product_id))
+}
+
+#[tauri::command(async)]
+fn set_variants(app: Cmd<'_>, product_id: i64, variants: Vec<VariantInput>) -> Result<Vec<Variant>> {
+    app.with_session(|pos, s| pos.set_variants(s, product_id, &variants))
+}
+
 // ---- item options ----
 
 #[tauri::command(async)]
@@ -312,10 +324,11 @@ fn add_item(
     product_id: i64,
     qty: i64,
     note: Option<String>,
+    variant_id: Option<i64>,
     option_ids: Option<Vec<i64>>,
 ) -> Result<Order> {
     let option_ids = option_ids.unwrap_or_default();
-    app.with_session(|pos, s| pos.add_item(s, order_id, product_id, qty, note.as_deref(), &option_ids))
+    app.with_session(|pos, s| pos.add_item(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids))
 }
 
 #[tauri::command(async)]
@@ -543,6 +556,8 @@ fn main() {
             test_kitchen_printer,
             list_system_printers,
             menu_options,
+            list_variants,
+            set_variants,
             list_channels,
             save_channels,
             search_customers,

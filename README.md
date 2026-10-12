@@ -132,19 +132,30 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 
 To restore a backup, close the app and copy the backup over `pos.db`.
 
+## Install and update
+
+1. Open **Releases** on the GitHub page of this repository (you must be logged in while it is private).
+2. Download `POS_x.y.z_x64-setup.exe` from the newest release and run it.
+   Because the installer is not code-signed yet, Windows may say "Windows protected
+   your PC": click **More info → Run anyway**.
+3. To **update**, download the newer setup file and run it over the installed version.
+   All data is kept: it lives in `%APPDATA%\com.puppx.pos`, separate from the program.
+   **Settings → About** shows the installed version.
+
+The installer works offline: it includes the WebView2 runtime installer for the rare
+PC that lacks it (Windows 10/11 normally have it).
+
 ## Building
 
-### Windows installer (recommended: GitHub Actions)
+### Publishing a new version (maintainers)
 
-Each push to `main`, each `v*` tag and each manual run of the **Windows build**
-workflow builds both installers. Download them from the run's
-`pos-windows-installers` artifact:
+1. Bump the version in **both** `Cargo.toml` (`[workspace.package]`) and `src-tauri/tauri.conf.json`.
+2. If the database changes, **append** a migration (never edit `schema.sql`, it has shipped). See `MIGRATIONS` in `crates/pos-core/src/lib.rs`.
+3. Commit, then tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
 
-- `POS_0.1.0_x64-setup.exe` (NSIS)
-- `POS_0.1.0_x64_en-US.msi`
-
-The installer embeds the WebView2 bootstrapper, so it also works on machines
-that don't have WebView2 yet.
+The **Windows build** workflow tests, builds the installers and publishes the
+release. Every push to `main` also builds installers you can download from the
+run's *Artifacts* section without making a release.
 
 ### On a Windows PC
 

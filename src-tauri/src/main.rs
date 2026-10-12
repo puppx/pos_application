@@ -52,6 +52,7 @@ type Cmd<'a> = State<'a, App>;
 
 #[derive(Serialize)]
 struct AppStatus {
+    version: String,
     needs_setup: bool,
     session: Option<Session>,
     store_name: Option<String>,
@@ -60,9 +61,10 @@ struct AppStatus {
 }
 
 #[tauri::command(async)]
-fn app_status(app: Cmd<'_>) -> Result<AppStatus> {
+fn app_status(app: Cmd<'_>, handle: tauri::AppHandle) -> Result<AppStatus> {
     let g = app.lock();
     Ok(AppStatus {
+        version: handle.package_info().version.to_string(),
         needs_setup: g.pos.needs_setup()?,
         session: g.session.clone(),
         store_name: g.pos.setting("store_name")?,

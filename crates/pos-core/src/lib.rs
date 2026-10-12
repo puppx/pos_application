@@ -34,8 +34,14 @@ pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use roles::{Permission, Role, Session};
 pub use users::User;
 
-const SCHEMA_VERSION: i32 = 1;
+/// Database migrations, applied in order and tracked in `PRAGMA user_version`.
+///
+/// Released installs already contain these, so NEVER edit an entry once it has
+/// shipped (v0.1.0 shipped `schema.sql`). To change the schema, append a new
+/// file (e.g. `migrations/0002_xxx.sql`) holding only the ALTER/CREATE
+/// statements; existing databases are upgraded on the next start.
 const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
 pub struct Pos {
     conn: Connection,

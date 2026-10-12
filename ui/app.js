@@ -98,6 +98,7 @@ async function start() {
   state.session = st.session;
   state.storeName = st.store_name;
   state.plan = { w: st.plan_width, h: st.plan_height };
+  state.version = st.version;
   document.getElementById('store').textContent = st.store_name || 'POS';
   if (st.needs_setup) return renderSetup();
   if (!st.session) return renderLogin();
@@ -1076,6 +1077,10 @@ async function renderSettings() {
           await call('set_kitchen_printer', { config: config() });
           toast('Kitchen printer saved');
         }) }, 'Save printer'))),
+    h('div', { class: 'card stack' },
+      h('h3', {}, 'About'),
+      h('div', {}, `POS version ${state.version}`),
+      h('div', { class: 'muted' }, 'To update, download the newer POS_x.y.z_x64-setup.exe from the GitHub Releases page and run it. Your data is kept.')),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Backup'),
       h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),

@@ -274,7 +274,7 @@ const VIEWS = [
   ['menuAdmin', 'Menu', true],
   ['plan', 'Floor plan', true],
   ['users', 'Staff', true],
-  ['reports', 'Reports', true],
+  ['reports', 'Reports', false],
   ['settings', 'Settings', true],
 ];
 

@@ -26,7 +26,8 @@ impl Role {
     pub fn can(self, p: Permission) -> bool {
         match self {
             Role::Admin => true,
-            Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnOrders),
+            // Staff run the shift: they can see sales reports and close the day.
+            Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnOrders | Permission::ViewReports),
         }
     }
 }
@@ -43,6 +44,7 @@ pub enum Permission {
     AdjustStock,
     ManageFloorPlan,
     ManageUsers,
+    /// Sales reports and End of day (closing the day, viewing and reprinting past days).
     ViewReports,
     ManageSettings,
     Backup,

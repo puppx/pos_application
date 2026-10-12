@@ -148,7 +148,8 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 | Order history | all | own |
 | Menu, options, stock, floor plan, users | ✔ | |
 | Kitchen printer setup | ✔ | |
-| Reports, settings, backup | ✔ | |
+| Reports and End of day (close day, print summary) | ✔ | ✔ |
+| Settings, backup, reset data | ✔ | |
 
 ## Other devices (local server)
 

@@ -99,7 +99,8 @@ fn staff_cannot_manage() {
     let s = staff(&mut pos, &admin);
     let floor = pos.create_floor(&admin, "Main").unwrap();
     assert!(matches!(pos.list_users(&s), Err(PosError::Forbidden)));
-    assert!(matches!(pos.sales_summary(&s, 0, i64::MAX), Err(PosError::Forbidden)));
+    // Staff can see sales reports (and close the day), but not manage.
+    assert!(pos.sales_summary(&s, 0, i64::MAX).is_ok());
     assert!(matches!(pos.create_floor(&s, "Roof"), Err(PosError::Forbidden)));
     assert!(matches!(pos.save_floor_layout(&s, floor.id, &[]), Err(PosError::Forbidden)));
     assert!(matches!(pos.create_category(&s, "Mains", None, 0), Err(PosError::Forbidden)));

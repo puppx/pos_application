@@ -91,6 +91,23 @@ fn set_server(
     status(&app, &srv)
 }
 
+// ---- full screen (desktop only) ----
+
+/// Setting (admin, Settings > Display): "1" opens the window full screen.
+const START_FULLSCREEN: &str = "start_fullscreen";
+
+fn window_error(e: tauri::Error) -> PosError {
+    PosError::Internal(format!("window: {e}"))
+}
+
+/// F11 or the top bar button. Returns whether the window is now full screen.
+#[tauri::command(async)]
+fn toggle_fullscreen(window: tauri::WebviewWindow) -> Result<bool> {
+    let on = !window.is_fullscreen().map_err(window_error)?;
+    window.set_fullscreen(on).map_err(window_error)?;
+    Ok(on)
+}
+
 // ---- automatic updates (desktop only) ----
 
 #[derive(Serialize)]
@@ -163,7 +180,13 @@ fn main() {
             let pos = Pos::open(data_dir.join("pos.db"))?;
             auto_backup(&pos, &backup_dir);
             let server = pos.server_settings()?;
+            let fullscreen = pos.setting(START_FULLSCREEN)?.as_deref() == Some("1");
             app.manage(App::new(pos, backup_dir));
+            if fullscreen {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_fullscreen(true);
+                }
+            }
             app.manage(ServerState::default());
             if server.auto_start {
                 let handle = app.handle().clone();
@@ -177,6 +200,7 @@ fn main() {
             call,
             server_status,
             set_server,
+            toggle_fullscreen,
             check_update,
             install_update,
         ])

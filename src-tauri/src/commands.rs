@@ -551,6 +551,10 @@ commands! {
         app.with_session(t, |pos, s| pos.top_products(s, from, to, limit))
     }
 
+    fn get_setting(app, t, key: String) -> Option<String> {
+        app.with_session(t, |pos, _| pos.setting(&key))
+    }
+
     fn set_setting(app, t, key: String, value: String) -> () {
         app.with_session(t, |pos, s| pos.set_setting(s, &key, &value))
     }

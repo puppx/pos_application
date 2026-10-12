@@ -6,7 +6,7 @@
 
 const TAURI = window.__TAURI__?.core;
 /// Commands only the desktop window has (they act on this PC itself).
-const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server']);
+const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server', 'toggle_fullscreen']);
 /// A browser's own random id: its login belongs to this id only.
 const terminalId = (() => {
   const make = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -79,6 +79,7 @@ const ICONS = {
   drawer: '<rect x="2" y="13" width="20" height="8" rx="2"/><path d="M5 13l2-9h10l2 9M10 17h4"/>',
   wifi: '<path d="M2 8.8a15 15 0 0 1 20 0M5 12.6a10 10 0 0 1 14 0M8.5 16.4a5 5 0 0 1 7 0"/><circle cx="12" cy="20" r="1"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  expand: '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>',
 };
 function icon(name, size = 22) {
   const el = h('span', { class: 'icon' });
@@ -448,8 +449,8 @@ async function renderFloor() {
       const el = tableEl(t, `${t.order_id ? 'busy' : 'free'} ${t.unsent_count ? 'unsent' : ''} ${t.held_count ? 'held' : ''}`);
       el.append(h('b', {}, t.name));
       // Small tables show less, so the text always fits.
-      const roomy = Math.min(t.w, t.h) >= 100;
-      if (t.order_id) el.append(h('span', { class: 'amt' }, money(t.total_cents)), roomy && h('span', { class: 'time' }, ago(t.opened_at)));
+      const roomy = Math.min(t.w, t.h) * (plan.clientWidth / state.plan.w || 1) >= 96;
+      if (t.order_id) el.append(h('span', { class: 'amt' }, money(t.total_cents)), roomy ? h('span', { class: 'time' }, ago(t.opened_at)) : '');
       if (t.held_count) el.append(h('span', { class: 'flag' }, roomy ? 'mains waiting' : 'mains'));
       else if (t.unsent_count && roomy) el.append(h('span', { class: 'flag bad' }, 'not sent'));
       el.onclick = act(async () => {
@@ -1782,6 +1783,22 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   };
 }
 
+/// Settings card for full screen (desktop window only).
+function displayCard() {
+  const on = h('input', { type: 'checkbox' });
+  invoke('get_setting', { key: 'start_fullscreen' }).then((v) => (on.checked = v === '1')).catch(() => {});
+  on.onchange = act(async () => {
+    await call('set_setting', { key: 'start_fullscreen', value: on.checked ? '1' : '0' });
+    toast(on.checked ? 'The POS will open in full screen' : 'The POS will open in a window');
+  });
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Display'),
+    h('label', { class: 'switch' }, on, h('span', {}), 'Open in full screen when the POS starts'),
+    h('div', { class: 'row' },
+      h('button', { onclick: act(toggleFullscreen) }, icon('expand', 18), 'Full screen on / off'),
+      h('span', { class: 'muted' }, 'Shortcut: F11, or the full-screen button at the top right.')));
+}
+
 /// Settings card for the local network server (desktop window only).
 function serverCard() {
   const card = h('div', { class: 'card stack' });
@@ -1845,6 +1862,7 @@ async function renderSettings() {
         toast('Saved');
         await start();
       }) }, 'Save'))),
+    state.remote ? '' : displayCard(),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Kitchen printer'),
       h('div', { class: 'muted' }, 'Tickets print on "Send to kitchen", grouped by menu category, on any ESC/POS thermal printer (Epson, Star, Xprinter…). ' +
@@ -1900,6 +1918,24 @@ async function renderSettings() {
       h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),
       h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up now')))));
 }
+
+// ---------- full screen ----------
+
+/// Desktop: the app window. Browser: the page (tablets have no F11).
+async function toggleFullscreen() {
+  if (TAURI) return invoke('toggle_fullscreen');
+  if (document.fullscreenElement) await document.exitFullscreen();
+  else await document.documentElement.requestFullscreen?.();
+}
+document.addEventListener('keydown', (e) => {
+  // Browsers handle F11 themselves; the desktop window needs it done here.
+  if (e.key === 'F11' && TAURI) {
+    e.preventDefault();
+    toggleFullscreen().catch((err) => toast(String(err?.message ?? err), true));
+  }
+});
+document.getElementById('fullscreen').append(icon('expand', 20));
+document.getElementById('fullscreen').onclick = act(toggleFullscreen);
 
 document.getElementById('logout').append(icon('logout'));
 start().catch((e) => toast(String(e?.message ?? e), true));

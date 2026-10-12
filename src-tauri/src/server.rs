@@ -24,6 +24,7 @@ const MAX_BODY: u64 = 1 << 20;
 const INDEX_HTML: &[u8] = include_bytes!("../../ui/index.html");
 const APP_JS: &[u8] = include_bytes!("../../ui/app.js");
 const STYLE_CSS: &[u8] = include_bytes!("../../ui/style.css");
+const ICON_PNG: &[u8] = include_bytes!("../../ui/icon.png");
 
 pub struct Server {
     http: Arc<tiny_http::Server>,
@@ -112,6 +113,7 @@ fn respond(handle: &AppHandle, mut rq: Request) {
         (Method::Get, "/" | "/index.html") => rq.respond(file(INDEX_HTML, "text/html; charset=utf-8")),
         (Method::Get, "/app.js") => rq.respond(file(APP_JS, "text/javascript; charset=utf-8")),
         (Method::Get, "/style.css") => rq.respond(file(STYLE_CSS, "text/css; charset=utf-8")),
+        (Method::Get, "/icon.png" | "/favicon.ico") => rq.respond(file(ICON_PNG, "image/png")),
         (Method::Post, p) if p.starts_with("/api/") => {
             let cmd = p["/api/".len()..].to_string();
             let response = api(handle, &mut rq, &cmd);

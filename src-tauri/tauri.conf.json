@@ -41,7 +41,8 @@
         "type": "embedBootstrapper"
       },
       "nsis": {
-        "installMode": "both"
+        "installMode": "both",
+        "installerIcon": "icons/icon.ico"
       }
     },
     "createUpdaterArtifacts": true

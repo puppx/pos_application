@@ -18,6 +18,9 @@ pub enum PosError {
     Validation(String),
     #[error("{0}")]
     Conflict(String),
+    /// The printer could not be reached or refused the job.
+    #[error("{0}")]
+    Printer(String),
     #[error("internal error: {0}")]
     Internal(String),
 }

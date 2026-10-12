@@ -9,6 +9,8 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Live table view**: free and occupied tables, running bill, time seated, and a red ring when items haven't been sent to the kitchen
 - **Orders stay open** while you add items over several rounds. *Send to kitchen* marks what has gone; *Move table* moves an order to any free table on any floor.
 - **Menu** with coloured categories, a tap-to-add item grid, notes per item ("no onions"), line discounts and optional stock counting (for example bottled drinks)
+- **Item options with prices**: sizes, extras and choices such as "Burger size" (pick exactly one), "Extras" (pick up to 5) or "Cooking". Option groups are reusable across items, and each option's price (+ or −) is added to the item.
+- **Kitchen ticket printing** on *Send to kitchen*, to any ESC/POS thermal printer (USB through Windows, network/IP, or a serial port). Tickets show only the new round, marked *NEW ORDER* or *ADDITIONAL*, with options and notes. A **Reprint** button covers paper jams.
 - **Payment**: cash (with change) or card. Unsent items go to the kitchen automatically when paid.
 - **PIN login** with **admin** and **staff** roles
 - **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, top items
@@ -27,12 +29,53 @@ so the UI can be redesigned without touching them.
 | Collection | **Orders → + Collection** | name required, phone optional |
 | Delivery | **Orders → + Delivery** | name, phone and address required |
 
-1. Tap items to add them. Tapping the same item again increases the quantity.
-2. **Send to kitchen** sends only the new items. You can do this any number of times per order.
+1. Tap items to add them. Items with options open a picker first; required choices (such as size) must be made. Tapping the same item with the same choices again increases the quantity.
+2. **Send to kitchen** sends only the new items and prints their ticket. You can do this any number of times per order. If the printer is offline, the items still count as sent and the app tells you to use **Reprint kitchen**.
 3. Take payment by cash or card. A table becomes free as soon as its order is paid.
 
 Prices are fixed when an item is added, so menu price changes never alter an open bill.
 Each table can have only one open order at a time.
+
+## Kitchen printer
+
+**Settings → Kitchen printer** (admin):
+
+| Printer connection | Choose | Enter |
+| --- | --- | --- |
+| USB (with the maker's Windows driver installed) | *Printer installed in Windows* | pick it from the list |
+| Network / Ethernet / Wi-Fi | *Network printer* | its IP address (printed on its self-test page), port 9100 |
+| Serial or shared printer | *Serial port or shared printer path* | e.g. `COM3` or `\\PC-NAME\Kitchen` |
+
+Pick 80 mm or 58 mm paper, press **Print test ticket**, then **Save printer**.
+Tickets are sent as raw ESC/POS (supported by Epson TM, Star, Bixolon, Xprinter and most
+other receipt printers). They use large text, list each item's options and highlight notes:
+
+```
+   NEW ORDER
+DINE-IN 4
+Ground
+#27  19:42  Sam
+------------------------------------------
+2 x Classic burger
+   + Double
+   + Cheese
+   ** no onions
+1 x Cola
+   + Large
+------------------------------------------
+```
+
+Printing happens after the order is saved and never blocks the till. A printer
+that is off or unreachable gives up after 4 seconds and shows an error.
+
+## Try it with demo data
+
+To get a restaurant with floors, tables, a menu and options already set up
+(admin PIN 1234, staff PIN 2222), run this before the first start of the app:
+
+```
+cargo run -p pos-core --example demo_data -- "%APPDATA%\com.puppx.pos\pos.db"
+```
 
 ## Why this stack
 
@@ -71,13 +114,14 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 
 | | Admin | Staff |
 | --- | :---: | :---: |
-| Open orders, add items, send to kitchen, take payment | ✔ | ✔ |
+| Open orders, add items, send to kitchen, reprint, take payment | ✔ | ✔ |
 | Move tables, edit customer details, discounts | ✔ | ✔ |
 | Remove or reduce items already sent to the kitchen | ✔ | |
 | Cancel an order that has items in the kitchen | ✔ | |
 | Void / refund paid orders | ✔ | |
 | Order history | all | own |
-| Menu, stock, floor plan, users | ✔ | |
+| Menu, options, stock, floor plan, users | ✔ | |
+| Kitchen printer setup | ✔ | |
 | Reports, settings, backup | ✔ | |
 
 ## Data location
@@ -121,8 +165,11 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
   src/orders.rs      Order life cycle: open, items, kitchen, pay, cancel, void
   src/floors.rs      Floors, tables, layout editing, live floor status
   src/menu.rs        Categories and the menu grid
+  src/options.rs     Option groups (sizes, extras) and validation of choices
+  src/printing.rs    Kitchen tickets: layout, ESC/POS, network/Windows/serial printing
   src/schema.sql     Database schema (migrations via PRAGMA user_version)
   tests/             Integration tests and the performance benchmark
+  examples/          demo_data: a sample restaurant for trying the app
 src-tauri/           Desktop shell: window, IPC commands, backups, installer config
 ui/                  Placeholder UI (index.html, app.js, style.css)
 ```
@@ -130,8 +177,9 @@ ui/                  Placeholder UI (index.html, app.js, style.css)
 ## Next steps (not built yet)
 
 - Final UI design
-- Printing: kitchen tickets (on *Send to kitchen*) and customer receipts on ESC/POS printers, plus cash-drawer kick
-- Item modifiers and options (sizes, extras with prices), courses and "hold/fire"
+- Customer receipts / bills on the same printers, plus cash-drawer kick
+- Several kitchen printers with routing by category (e.g. drinks to the bar printer)
+- Courses and "hold/fire"
 - Split bill and partial payments, service charge and tips
 - Delivery status tracking (preparing, out for delivery, delivered) and driver assignment
 - Shifts / cash-up (opening float, end-of-day report per shift)

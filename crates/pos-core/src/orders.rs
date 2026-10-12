@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{invalid, map_unique};
+use crate::options::{resolve_options, ItemOption};
 use crate::{Permission, Pos, PosError, Result, Session};
 
 const MAX_QTY: i64 = 1_000;
@@ -90,11 +91,13 @@ pub struct OrderItem {
     pub id: i64,
     pub product_id: i64,
     pub name: String,
+    /// Item price plus its options' prices.
     pub unit_price_cents: i64,
     pub tax_rate_bp: i64,
     pub qty: i64,
     pub discount_cents: i64,
     pub note: Option<String>,
+    pub options: Vec<ItemOption>,
     /// None until sent to the kitchen.
     pub sent_at: Option<i64>,
     /// unit price x qty - discount, before tax.
@@ -237,6 +240,7 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         qty,
         discount_cents: disc,
         note: r.get(7)?,
+        options: Vec::new(),
         sent_at: r.get(8)?,
         line_total_cents: net,
         tax_cents: tax_of(net, rate),
@@ -245,8 +249,32 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
 
 fn load_items(conn: &Connection, order_id: i64) -> Result<Vec<OrderItem>> {
     let mut stmt = conn.prepare_cached(&format!("SELECT {ITEM_COLS} FROM order_items WHERE order_id = ?1 ORDER BY id"))?;
-    let rows = stmt.query_map([order_id], item_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut items: Vec<OrderItem> = stmt.query_map([order_id], item_from_row)?.collect::<rusqlite::Result<_>>()?;
+    let mut opts = conn.prepare_cached(
+        "SELECT o.item_id, o.option_id, o.group_name, o.name, o.price_cents
+         FROM order_item_options o JOIN order_items i ON i.id = o.item_id
+         WHERE i.order_id = ?1 ORDER BY o.id",
+    )?;
+    let rows = opts.query_map([order_id], |r| {
+        Ok((r.get::<_, i64>(0)?, ItemOption { option_id: r.get(1)?, group_name: r.get(2)?, name: r.get(3)?, price_cents: r.get(4)? }))
+    })?;
+    for row in rows {
+        let (item_id, o) = row?;
+        if let Some(it) = items.iter_mut().find(|i| i.id == item_id) {
+            it.options.push(o);
+        }
+    }
+    Ok(items)
+}
+
+/// Option ids on an order line, sorted, for comparing lines.
+fn line_option_ids(conn: &Connection, item_id: i64) -> Result<Vec<i64>> {
+    let mut ids: Vec<i64> = conn
+        .prepare_cached("SELECT option_id FROM order_item_options WHERE item_id = ?1")?
+        .query_map([item_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 struct Totals {
@@ -423,9 +451,19 @@ impl Pos {
         self.get_order(s, id)
     }
 
-    /// Add a menu item at its current price. Repeated taps on the same item
-    /// (no note, not yet sent) increase the quantity of one line.
-    pub fn add_item(&mut self, s: &Session, order_id: i64, product_id: i64, qty: i64, note: Option<&str>) -> Result<Order> {
+    /// Add a menu item at its current price, with the chosen options
+    /// (validated against the item's option groups). Repeated taps on the
+    /// same item with the same options (no note, not yet sent) increase the
+    /// quantity of one line.
+    pub fn add_item(
+        &mut self,
+        s: &Session,
+        order_id: i64,
+        product_id: i64,
+        qty: i64,
+        note: Option<&str>,
+        option_ids: &[i64],
+    ) -> Result<Order> {
         s.require(Permission::Sell)?;
         if !(1..=MAX_QTY).contains(&qty) {
             return invalid(format!("quantity must be between 1 and {MAX_QTY}"));
@@ -433,25 +471,38 @@ impl Pos {
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, price, rate): (String, i64, i64) = tx
+        let (name, base, rate): (String, i64, i64) = tx
             .prepare_cached("SELECT name, price_cents, tax_rate_bp FROM products WHERE id = ?1 AND active = 1")?
             .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available".into()))?;
-        let merged = if note.is_none() {
-            tx.prepare_cached(
-                "UPDATE order_items SET qty = qty + ?3
-                 WHERE id = (SELECT id FROM order_items
-                             WHERE order_id = ?1 AND product_id = ?2 AND sent_at IS NULL AND note IS NULL
-                               AND discount_cents = 0 AND unit_price_cents = ?4
-                             ORDER BY id DESC LIMIT 1)
-                   AND qty + ?3 <= ?5",
-            )?
-            .execute(params![order_id, product_id, qty, price, MAX_QTY])?
-                > 0
-        } else {
-            false
-        };
+        let options = resolve_options(&tx, product_id, option_ids)?;
+        let price = base + options.iter().map(|o| o.price_cents).sum::<i64>();
+        if price < 0 {
+            return invalid("the options make this item's price negative");
+        }
+
+        let mut merged = false;
+        if note.is_none() {
+            let mut wanted: Vec<i64> = option_ids.to_vec();
+            wanted.sort_unstable();
+            let candidates: Vec<i64> = tx
+                .prepare_cached(
+                    "SELECT id FROM order_items
+                     WHERE order_id = ?1 AND product_id = ?2 AND sent_at IS NULL AND note IS NULL
+                       AND discount_cents = 0 AND unit_price_cents = ?3 AND qty + ?4 <= ?5
+                     ORDER BY id DESC",
+                )?
+                .query_map(params![order_id, product_id, price, qty, MAX_QTY], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for id in candidates {
+                if line_option_ids(&tx, id)? == wanted {
+                    tx.execute("UPDATE order_items SET qty = qty + ?2 WHERE id = ?1", params![id, qty])?;
+                    merged = true;
+                    break;
+                }
+            }
+        }
         if !merged {
             let lines: i64 =
                 tx.query_row("SELECT COUNT(*) FROM order_items WHERE order_id = ?1", [order_id], |r| r.get(0))?;
@@ -463,6 +514,14 @@ impl Pos {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?
             .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id])?;
+            let item_id = tx.last_insert_rowid();
+            let mut ins = tx.prepare_cached(
+                "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for o in &options {
+                ins.execute(params![item_id, o.option_id, o.group_name, o.name, o.price_cents])?;
+            }
         }
         tx.commit()?;
         self.get_order(s, order_id)
@@ -487,6 +546,7 @@ impl Pos {
                     qty: r.get(6)?,
                     discount_cents: r.get(7)?,
                     note: r.get(8)?,
+                    options: Vec::new(),
                     sent_at: r.get(9)?,
                     line_total_cents: 0,
                     tax_cents: 0,
@@ -537,13 +597,16 @@ impl Pos {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let sent = {
-            let mut stmt = tx.prepare_cached(&format!(
-                "UPDATE order_items SET sent_at = unixepoch() WHERE order_id = ?1 AND sent_at IS NULL
-                 RETURNING {ITEM_COLS}"
-            ))?;
-            let rows = stmt.query_map([order_id], item_from_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        let ids: Vec<i64> = tx
+            .prepare_cached(
+                "UPDATE order_items SET sent_at = unixepoch() WHERE order_id = ?1 AND sent_at IS NULL RETURNING id",
+            )?
+            .query_map([order_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let sent: Vec<OrderItem> = if ids.is_empty() {
+            Vec::new()
+        } else {
+            load_items(&tx, order_id)?.into_iter().filter(|i| ids.contains(&i.id)).collect()
         };
         tx.commit()?;
         Ok(sent)

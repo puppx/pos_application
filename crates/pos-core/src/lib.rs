@@ -7,7 +7,9 @@ mod auth;
 mod error;
 mod floors;
 mod menu;
+mod options;
 mod orders;
+mod printing;
 mod products;
 mod reports;
 mod roles;
@@ -22,6 +24,8 @@ pub use auth::LoginThrottle;
 pub use error::{PosError, Result};
 pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_HEIGHT, PLAN_WIDTH};
 pub use menu::Category;
+pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
+pub use printing::{system_printers, KitchenTicket, PrintJob, PrinterConfig, PrinterTarget, TicketItem};
 pub use orders::{
     ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, PaymentMethod,
 };

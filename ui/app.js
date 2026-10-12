@@ -32,6 +32,12 @@ function parseMoney(s) {
   const [w, f = ''] = s.split('.');
   return Number(w) * 100 + Number(f.padEnd(2, '0'));
 }
+function parseSignedMoney(s) {
+  s = String(s).trim();
+  const neg = s.startsWith('-');
+  return (neg ? -1 : 1) * parseMoney(s.replace(/^[+-]/, '') || '0');
+}
+const signed = (c) => (c > 0 ? '+' : c < 0 ? '-' : '') + money(Math.abs(c));
 const pct = (bp) => (bp / 100).toString();
 const fmtTime = (t) => new Date(t * 1000).toLocaleString();
 const ago = (t) => `${Math.max(0, Math.floor((Date.now() / 1000 - t) / 60))} min`;
@@ -272,10 +278,21 @@ async function renderFloor() {
 
 async function loadMenu() {
   if (!state.menu) {
-    [state.menu, state.cats] = await Promise.all([
-      call('menu'), call('list_categories', { includeInactive: false }),
+    const [menu, cats, opts] = await Promise.all([
+      call('menu'), call('list_categories', { includeInactive: false }), call('menu_options'),
     ]);
+    const byId = Object.fromEntries(opts.groups.map((g) => [g.id, g]));
+    state.itemGroups = {};
+    for (const l of opts.links) (state.itemGroups[l.product_id] ??= []).push(byId[l.group_id]);
+    [state.menu, state.cats] = [menu, cats];
   }
+}
+
+/// Short rule text for an option group, e.g. "choose 1" or "optional, up to 3".
+function groupRule(g) {
+  if (g.min_select === g.max_select) return `choose ${g.min_select}`;
+  if (g.min_select) return `choose ${g.min_select} to ${g.max_select}`;
+  return g.max_select === 1 ? 'optional' : `optional, up to ${g.max_select}`;
 }
 
 async function renderOrder() {
@@ -291,6 +308,7 @@ async function renderOrder() {
   const search = h('input', { placeholder: 'Search menu or scan barcode…', style: 'flex:1' });
   const cats = h('div', { class: 'cats' });
   const grid = h('div', { class: 'items' });
+  const picker = h('div', { class: 'stack picker', hidden: true });
   const catColor = Object.fromEntries(state.cats.map((c) => [c.id, c.color]));
   const drawMenu = () => {
     cats.replaceChildren(
@@ -302,8 +320,8 @@ async function renderOrder() {
     const q = search.value.trim().toLowerCase();
     const list = state.menu.filter((p) => q ? p.name.toLowerCase().includes(q) : state.catId == null || p.category_id === state.catId);
     grid.replaceChildren(...list.slice(0, 300).map((p) => h('button', {
-      style: `border-left-color:${catColor[p.category_id] || '#d9dce1'}`, onclick: add(p.id),
-    }, h('span', {}, p.name), h('small', {}, money(p.price_cents)))));
+      style: `border-left-color:${catColor[p.category_id] || '#d9dce1'}`, onclick: choose(p),
+    }, h('span', {}, p.name), h('small', {}, money(p.price_cents), state.itemGroups[p.id] ? ' …' : ''))));
     return list;
   };
   search.addEventListener('input', drawMenu);
@@ -312,7 +330,7 @@ async function renderOrder() {
     const list = drawMenu();
     const p = list.length === 1 ? list[0] : await call('find_by_code', { code: search.value });
     if (!p) return toast('No item found', true);
-    await add(p.id)();
+    await choose(p)();
     search.value = '';
     drawMenu();
   }));
@@ -325,11 +343,60 @@ async function renderOrder() {
   const extra = h('div');
   let editing = null;
 
-  function add(productId) {
+  async function addItem(productId, optionIds = []) {
+    order = await call('add_item', { orderId, productId, qty: 1, note: null, optionIds });
+    draw();
+  }
+  // Tap on a menu item: add it straight away, or ask for its options first.
+  function choose(p) {
     return act(async () => {
-      order = await call('add_item', { orderId, productId, qty: 1, note: null });
-      draw();
+      const groups = (state.itemGroups[p.id] || []).filter((g) => g.options.length);
+      if (!groups.length) return addItem(p.id);
+      openPicker(p, groups);
     });
+  }
+  function openPicker(p, groups) {
+    const chosen = new Map(groups.map((g) => [g.id, new Set()]));
+    const body = h('div', { class: 'stack' });
+    const price = h('strong');
+    const redraw = () => {
+      body.replaceChildren(...groups.map((g) => h('div', { class: 'stack' },
+        h('div', {}, h('strong', {}, g.name), ' ', h('span', { class: 'muted' }, groupRule(g))),
+        h('div', { class: 'opts' }, g.options.map((o) => {
+          const set = chosen.get(g.id);
+          const on = set.has(o.id);
+          return h('button', { class: on ? 'on' : '', onclick: () => {
+            if (on) set.delete(o.id);
+            else if (g.max_select === 1) { set.clear(); set.add(o.id); }
+            else if (set.size < g.max_select) set.add(o.id);
+            else return toast(`Up to ${g.max_select} for ${g.name}`, true);
+            redraw();
+          } }, o.name, o.price_cents ? h('small', {}, signed(o.price_cents)) : '');
+        })))));
+      const extra = groups.flatMap((g) => g.options.filter((o) => chosen.get(g.id).has(o.id)))
+        .reduce((n, o) => n + o.price_cents, 0);
+      price.textContent = money(p.price_cents + extra);
+    };
+    const add = act(async () => {
+      const missing = groups.find((g) => chosen.get(g.id).size < g.min_select);
+      if (missing) return toast(`${missing.name}: ${groupRule(missing)}`, true);
+      await addItem(p.id, groups.flatMap((g) => [...chosen.get(g.id)]));
+      closePicker();
+    });
+    picker.replaceChildren(h('h3', {}, p.name), body,
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: add }, 'Add to order'),
+        h('button', { onclick: closePicker }, 'Cancel'), h('span', { style: 'flex:1' }), price));
+    redraw();
+    [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
+  }
+  function closePicker() {
+    [picker.hidden, grid.hidden, cats.hidden] = [true, false, false];
+  }
+  // Report a kitchen print attempt alongside `msg`.
+  function reportPrint(p, msg, needPrinter = false) {
+    if (p.error) return toast(`${msg}, but the kitchen ticket did not print (${p.error}). Use Reprint.`, true);
+    if (!p.attempted && needPrinter) return toast('No kitchen printer is set up (Settings → Kitchen printer)', true);
+    toast(p.attempted ? `${msg} · ticket printed` : msg);
   }
   async function setLine(it, changes) {
     order = await call('update_item', {
@@ -339,20 +406,25 @@ async function renderOrder() {
     draw();
   }
   async function send() {
-    const sent = await call('send_to_kitchen', { orderId });
+    const r = await call('send_to_kitchen', { orderId });
     order = await call('get_order', { id: orderId });
     draw();
-    toast(sent.length ? `Sent ${sent.reduce((n, i) => n + i.qty, 0)} item(s) to the kitchen` : 'Nothing new to send');
+    const n = r.items.reduce((n, i) => n + i.qty, 0);
+    if (!n) return toast('Nothing new to send');
+    reportPrint(r.print, `Sent ${n} item(s) to the kitchen`);
   }
   const pay = (method) => act(async () => {
     if (!order.items.length) return toast('The order is empty', true);
     const tenderedCents = method === 'cash' ? (tendered.value ? parseMoney(tendered.value) : order.total_cents) : 0;
     if (method === 'cash' && tenderedCents < order.total_cents) return toast('Cash tendered is less than the total', true);
     // Anything not yet sent goes to the kitchen with the payment.
-    if (order.items.some((i) => !i.sent_at)) await call('send_to_kitchen', { orderId });
+    let printError = null;
+    if (order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId })).print.error;
     const paid = await call('pay_order', { orderId, method, tenderedCents });
-    toast(`Order #${paid.id} paid: ${money(paid.total_cents)}` + (paid.change_cents ? ` · change ${money(paid.change_cents)}` : ''));
+    const msg = `Order #${paid.id} paid: ${money(paid.total_cents)}` + (paid.change_cents ? ` · change ${money(paid.change_cents)}` : '');
     closeOrder();
+    if (printError) toast(`${msg}. Kitchen ticket did not print (${printError}); reprint it from History.`, true);
+    else toast(msg);
   });
 
   function draw() {
@@ -360,12 +432,15 @@ async function renderOrder() {
       const sent = !!it.sent_at;
       const row = h('tr', {},
         h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : ''),
-          it.note && h('div', { class: 'muted' }, it.note),
+          it.options.length > 0 && h('div', { class: 'muted' }, it.options.map((o) => o.name).join(', ')),
+          it.note && h('div', { class: 'muted' }, '“', it.note, '”'),
           it.discount_cents ? h('div', { class: 'muted' }, `discount -${money(it.discount_cents)}`) : ''),
         h('td', { style: 'white-space:nowrap' },
           h('button', { onclick: act(() => setLine(it, { qty: it.qty - 1 })) }, '−'),
           ` ${it.qty} `,
-          h('button', { onclick: act(() => (sent ? add(it.product_id)() : setLine(it, { qty: it.qty + 1 }))) }, '+')),
+          h('button', { onclick: act(() => (sent
+            ? addItem(it.product_id, it.options.map((o) => o.option_id))
+            : setLine(it, { qty: it.qty + 1 }))) }, '+')),
         h('td', { class: 'num' }, money(it.line_total_cents)),
         h('td', {}, h('button', { onclick: () => { editing = editing === it.id ? null : it.id; draw(); } }, '✎')));
       if (editing !== it.id) return row;
@@ -436,7 +511,7 @@ async function renderOrder() {
   draw();
   drawMenu();
   screen(h('div', { class: 'order' },
-    h('div', { class: 'card menu' }, h('div', { class: 'row' }, search), cats, grid),
+    h('div', { class: 'card menu' }, h('div', { class: 'row' }, search), cats, grid, picker),
     h('div', { class: 'card ticket' },
       head, lines, totals,
       h('div', { class: 'row' }, sendBtn),
@@ -447,6 +522,7 @@ async function renderOrder() {
         order.order_type === 'dine_in'
           ? h('button', { onclick: showMove }, 'Move table')
           : h('button', { onclick: showDetails }, 'Customer'),
+        h('button', { onclick: act(async () => reportPrint(await call('reprint_kitchen', { orderId }), 'Kitchen ticket reprinted', true)) }, 'Reprint kitchen'),
         h('button', { class: 'danger', onclick: showCancel }, 'Cancel order')),
       extra)));
   search.focus();
@@ -477,13 +553,19 @@ function orderDetail(o, onChange) {
       (o.paid_at ? ` · paid ${fmtTime(o.paid_at)} (${o.payment_method})` : '')),
     (o.customer_phone || o.delivery_address) && h('div', { class: 'muted' }, [o.customer_phone, o.delivery_address].filter(Boolean).join(' · ')),
     h('table', {}, o.items.map((i) => h('tr', {},
-      h('td', {}, i.name, i.note && h('div', { class: 'muted' }, i.note)),
+      h('td', {}, i.name, i.options.length > 0 && h('div', { class: 'muted' }, i.options.map((x) => x.name).join(', ')),
+        i.note && h('div', { class: 'muted' }, i.note)),
       h('td', { class: 'num' }, `${i.qty} × ${money(i.unit_price_cents)}`),
       h('td', { class: 'num' }, i.discount_cents ? '-' + money(i.discount_cents) : ''),
       h('td', { class: 'num' }, money(i.line_total_cents))))),
     h('div', {}, `Tax ${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
       o.tendered_cents != null ? ` · Tendered ${money(o.tendered_cents)} · Change ${money(o.change_cents)}` : ''),
     o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
+    o.status === 'paid' && h('div', {}, h('button', { onclick: act(async () => {
+      const p = await call('reprint_kitchen', { orderId: o.id });
+      if (p.error) toast(`Did not print: ${p.error}`, true);
+      else toast(p.attempted ? 'Kitchen ticket reprinted' : 'No kitchen printer is set up', !p.attempted);
+    }) }, 'Reprint kitchen ticket')),
     isAdmin() && o.status === 'paid' && h('div', { class: 'row' }, reason,
       h('button', { class: 'danger', onclick: act(async () => {
         await call('void_order', { orderId: o.id, reason: reason.value });
@@ -562,7 +644,12 @@ async function renderHistory() {
 // ---------- menu (admin) ----------
 
 async function renderMenuAdmin() {
-  const cats = await call('list_categories', { includeInactive: true });
+  const [cats, groups, feed] = await Promise.all([
+    call('list_categories', { includeInactive: true }),
+    call('list_option_groups', { includeInactive: true }),
+    call('menu_options'),
+  ]);
+  const activeGroups = groups.filter((g) => g.active);
   const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
   const form = h('div');
   const list = h('div');
@@ -598,6 +685,40 @@ async function renderMenuAdmin() {
     name.focus();
   }
 
+  function editGroup(g) {
+    const name = h('input', { value: g?.name ?? '', placeholder: 'Group name, e.g. Burger size' });
+    const min = h('input', { type: 'number', value: g?.min_select ?? 0, min: 0, max: 20, style: 'width:70px' });
+    const max = h('input', { type: 'number', value: g?.max_select ?? 1, min: 1, max: 20, style: 'width:70px' });
+    const active = h('input', { type: 'checkbox', checked: g ? g.active : true });
+    const rows = (g?.options ?? []).filter((o) => o.active).map((o) => ({ id: o.id, name: o.name, price: o.price_cents ? signed(o.price_cents) : '' }));
+    const list = h('div', { class: 'stack' });
+    const drawRows = () => list.replaceChildren(...rows.map((r, i) => h('div', { class: 'row' },
+      h('input', { value: r.name, placeholder: 'Option, e.g. Large', oninput: (e) => (r.name = e.target.value) }),
+      h('input', { value: r.price, placeholder: '+0.00', style: 'width:90px', inputmode: 'decimal', oninput: (e) => (r.price = e.target.value) }),
+      h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); drawRows(); } }, '×'))));
+    const addRow = () => { rows.push({ id: null, name: '', price: '' }); drawRows(); list.lastChild.querySelector('input').focus(); };
+    const save = act(async () => {
+      const args = { name: name.value, minSelect: parseInt(min.value, 10) || 0, maxSelect: parseInt(max.value, 10) || 1 };
+      const options = rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, price_cents: parseSignedMoney(r.price) }));
+      const saved = g
+        ? await call('update_option_group', { id: g.id, ...args, sortOrder: g.sort_order, active: active.checked })
+        : await call('create_option_group', args);
+      await call('save_group_options', { groupId: saved.id, options });
+      toast('Saved'); await changed();
+    });
+    form.replaceChildren(h('div', { class: 'card stack' },
+      h('h3', {}, g ? `Edit ${g.name}` : 'New option group'),
+      h('div', { class: 'row' }, name, g && h('label', {}, active, ' In use')),
+      h('div', { class: 'row' }, 'Customer must choose at least', min, 'and at most', max),
+      h('div', { class: 'muted' }, 'Sizes: at least 1, at most 1. Extras: at least 0, at most e.g. 5. Prices are added to the item (use -1.00 for a cheaper option).'),
+      list,
+      h('div', {}, h('button', { onclick: addRow }, '+ Option')),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+    drawRows();
+    if (!rows.length) addRow();
+    name.focus();
+  }
+
   function editProduct(p) {
     const f = {
       name: h('input', { value: p?.name ?? '', placeholder: 'Name' }),
@@ -611,6 +732,8 @@ async function renderMenuAdmin() {
       stock: h('input', { value: '0', inputmode: 'numeric', style: 'width:80px' }),
       active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
     };
+    const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
+    const groupBoxes = activeGroups.map((g) => ({ g, box: h('input', { type: 'checkbox', checked: linked.has(g.id) }) }));
     f.cat.value = p ? (p.category_id ?? '') : filter.value;
     const data = () => ({
       name: f.name.value, category_id: f.cat.value ? Number(f.cat.value) : null,
@@ -619,8 +742,11 @@ async function renderMenuAdmin() {
       tax_rate_bp: Math.round(Number(f.tax.value || 0) * 100), track_stock: f.track.checked,
     });
     const save = act(async () => {
-      if (p) await call('update_product', { id: p.id, product: { ...data(), active: f.active.checked } });
-      else await call('create_product', { product: { ...data(), stock_qty: parseInt(f.stock.value || '0', 10) } });
+      const saved = p
+        ? await call('update_product', { id: p.id, product: { ...data(), active: f.active.checked } })
+        : await call('create_product', { product: { ...data(), stock_qty: parseInt(f.stock.value || '0', 10) } });
+      const groupIds = groupBoxes.filter((x) => x.box.checked).map((x) => x.g.id);
+      if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds });
       toast('Saved'); await changed();
     });
     const delta = h('input', { placeholder: '+/- qty', style: 'width:90px', inputmode: 'numeric' });
@@ -630,6 +756,8 @@ async function renderMenuAdmin() {
       h('div', { class: 'row' }, f.name, f.cat),
       h('div', { class: 'row' }, 'Price', f.price, 'Tax %', f.tax, 'Cost', f.cost),
       h('div', { class: 'row' }, f.barcode, f.sku),
+      groupBoxes.length > 0 && h('div', { class: 'stack' }, h('strong', {}, 'Options'),
+        h('div', { class: 'row' }, groupBoxes.map(({ g, box }) => h('label', {}, box, ` ${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))))),
       h('div', { class: 'row' }, h('label', {}, f.track, ' Count stock (e.g. bottled drinks)'),
         !p && ['Opening stock', f.stock], p && h('label', {}, f.active, ' On the menu')),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel')),
@@ -650,6 +778,12 @@ async function renderMenuAdmin() {
         h('div', { class: 'row' }, cats.map((c) => h('button', {
           style: `border-left:6px solid ${c.color || '#d9dce1'}${c.active ? '' : ';opacity:.5'}`, onclick: () => editCategory(c),
         }, c.name)))),
+      h('div', { class: 'card stack' },
+        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Options (sizes, extras…)'), h('button', { onclick: () => editGroup(null) }, '+ Option group')),
+        h('div', { class: 'row' }, groups.length ? groups.map((g) => h('button', {
+          style: g.active ? '' : 'opacity:.5', onclick: () => editGroup(g), title: g.options.filter((o) => o.active).map((o) => o.name).join(', '),
+        }, g.name, h('small', { class: 'muted' }, ` ${groupRule(g)}`)))
+          : h('span', { class: 'muted' }, 'Create a group like "Size" or "Extras", then tick it on the menu items that use it.'))),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => editProduct(null) }, '+ Menu item'), filter,
         h('label', {}, showInactive, ' Show removed')),
       list),
@@ -882,16 +1016,70 @@ async function renderReports() {
 
 async function renderSettings() {
   const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
-  screen(h('div', { class: 'card stack', style: 'max-width:640px' },
-    h('h3', {}, 'Restaurant'),
-    h('div', { class: 'row' }, store, h('button', { class: 'primary', onclick: act(async () => {
-      await call('set_setting', { key: 'store_name', value: store.value });
-      toast('Saved');
-      await start();
-    }) }, 'Save')),
-    h('h3', {}, 'Backup'),
-    h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),
-    h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up now'))));
+  const [printer, systemPrinters] = await Promise.all([call('get_kitchen_printer'), call('list_system_printers')]);
+
+  // --- kitchen printer ---
+  const kind = h('select', {},
+    h('option', { value: 'none' }, 'No kitchen printer'),
+    h('option', { value: 'network' }, 'Network printer (IP address)'),
+    h('option', { value: 'windows' }, 'Printer installed in Windows (USB)'),
+    h('option', { value: 'file' }, 'Serial port or shared printer path'));
+  kind.value = printer.kind;
+  const host = h('input', { value: printer.host ?? '', placeholder: '192.168.1.50' });
+  const port = h('input', { value: printer.port ?? 9100, inputmode: 'numeric', style: 'width:90px' });
+  const winName = systemPrinters.length
+    ? h('select', {}, systemPrinters.map((n) => h('option', { value: n }, n)))
+    : h('input', { placeholder: 'Printer name as shown in Windows' });
+  if (printer.name) {
+    if (systemPrinters.length && !systemPrinters.includes(printer.name)) winName.append(h('option', { value: printer.name }, printer.name));
+    winName.value = printer.name;
+  }
+  const path = h('input', { value: printer.path ?? '', placeholder: 'COM3 or \\\\PC-NAME\\Kitchen', style: 'width:260px' });
+  const width = h('select', {}, h('option', { value: 42 }, '80 mm paper'), h('option', { value: 32 }, '58 mm paper'), h('option', { value: 48 }, '80 mm, small font (48)'));
+  width.value = String(printer.width ?? 42);
+  const fields = h('div', { class: 'row' });
+  const drawFields = () => fields.replaceChildren(...{
+    none: [],
+    network: ['IP address', host, 'Port', port],
+    windows: ['Printer', winName],
+    file: ['Port or path', path],
+  }[kind.value]);
+  kind.onchange = drawFields;
+  drawFields();
+  const config = () => ({
+    kind: kind.value, width: Number(width.value),
+    ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
+    ...(kind.value === 'windows' && { name: winName.value }),
+    ...(kind.value === 'file' && { path: path.value.trim() }),
+  });
+
+  screen(h('div', { class: 'stack', style: 'max-width:760px' },
+    h('div', { class: 'card stack' },
+      h('h3', {}, 'Restaurant'),
+      h('div', { class: 'row' }, store, h('button', { class: 'primary', onclick: act(async () => {
+        await call('set_setting', { key: 'store_name', value: store.value });
+        toast('Saved');
+        await start();
+      }) }, 'Save'))),
+    h('div', { class: 'card stack' },
+      h('h3', {}, 'Kitchen printer'),
+      h('div', { class: 'muted' }, 'Tickets print on "Send to kitchen" on any ESC/POS thermal printer (Epson, Star, Xprinter…). ' +
+        'For USB printers choose "installed in Windows"; for network printers use the IP address from its self-test page.'),
+      h('div', { class: 'row' }, kind, width), fields,
+      h('div', { class: 'row' },
+        h('button', { onclick: act(async () => {
+          if (kind.value === 'none') return toast('Choose a printer first', true);
+          const r = await call('test_kitchen_printer', { config: config() });
+          toast(r.error ? `Test failed: ${r.error}` : 'Test ticket sent', !!r.error);
+        }) }, 'Print test ticket'),
+        h('button', { class: 'primary', onclick: act(async () => {
+          await call('set_kitchen_printer', { config: config() });
+          toast('Kitchen printer saved');
+        }) }, 'Save printer'))),
+    h('div', { class: 'card stack' },
+      h('h3', {}, 'Backup'),
+      h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),
+      h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up now')))));
 }
 
 start().catch((e) => toast(String(e), true));

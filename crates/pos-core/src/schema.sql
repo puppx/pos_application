@@ -67,6 +67,38 @@ CREATE TRIGGER products_au AFTER UPDATE OF name, sku, barcode ON products BEGIN
     VALUES (new.id, new.name, new.sku, new.barcode);
 END;
 
+-- Option groups are reusable sets of choices attached to menu items, e.g.
+-- "Burger size" (choose exactly 1) or "Extras" (choose up to 5). An option's
+-- price is added to the item price (it may be negative, e.g. "Small").
+CREATE TABLE option_groups (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL COLLATE NOCASE,
+    min_select INTEGER NOT NULL DEFAULT 0,
+    max_select INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    active     INTEGER NOT NULL DEFAULT 1,
+    CHECK (min_select >= 0 AND max_select >= 1 AND min_select <= max_select)
+);
+CREATE UNIQUE INDEX option_groups_name ON option_groups (name) WHERE active = 1;
+
+CREATE TABLE options (
+    id          INTEGER PRIMARY KEY,
+    group_id    INTEGER NOT NULL REFERENCES option_groups (id),
+    name        TEXT NOT NULL,
+    price_cents INTEGER NOT NULL DEFAULT 0,
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    active      INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX options_group ON options (group_id, sort_order);
+
+CREATE TABLE product_option_groups (
+    product_id INTEGER NOT NULL REFERENCES products (id),
+    group_id   INTEGER NOT NULL REFERENCES option_groups (id),
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (product_id, group_id)
+) WITHOUT ROWID;
+CREATE INDEX product_option_groups_group ON product_option_groups (group_id);
+
 -- ---------------------------------------------------------- floor plan
 
 CREATE TABLE floors (
@@ -137,9 +169,9 @@ CREATE TABLE order_items (
     order_id         INTEGER NOT NULL REFERENCES orders (id),
     product_id       INTEGER NOT NULL REFERENCES products (id),
     -- Snapshot at the time the item was added, so later menu edits do not
-    -- change open bills or past receipts.
+    -- change open bills or past receipts. Includes the chosen options.
     name             TEXT NOT NULL,
-    unit_price_cents INTEGER NOT NULL,
+    unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
     tax_rate_bp      INTEGER NOT NULL,
     qty              INTEGER NOT NULL CHECK (qty > 0),
     discount_cents   INTEGER NOT NULL DEFAULT 0,
@@ -150,6 +182,18 @@ CREATE TABLE order_items (
 );
 CREATE INDEX order_items_order ON order_items (order_id);
 CREATE INDEX order_items_product ON order_items (product_id);
+
+-- Options chosen on an order line, snapshotted like the line itself. The
+-- line's unit_price_cents already includes their prices.
+CREATE TABLE order_item_options (
+    id          INTEGER PRIMARY KEY,
+    item_id     INTEGER NOT NULL REFERENCES order_items (id) ON DELETE CASCADE,
+    option_id   INTEGER NOT NULL REFERENCES options (id),
+    group_name  TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    price_cents INTEGER NOT NULL
+);
+CREATE INDEX order_item_options_item ON order_item_options (item_id);
 
 -- Inventory ledger: every stock change, from orders, voids or manual adjustment.
 CREATE TABLE stock_movements (

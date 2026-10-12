@@ -157,6 +157,46 @@ fn update_category(
     app.with_session(|pos, s| pos.update_category(s, id, &name, color.as_deref(), sort_order, active))
 }
 
+// ---- item options ----
+
+#[tauri::command(async)]
+fn menu_options(app: Cmd<'_>) -> Result<MenuOptions> {
+    app.with_session(|pos, s| pos.menu_options(s))
+}
+
+#[tauri::command(async)]
+fn list_option_groups(app: Cmd<'_>, include_inactive: bool) -> Result<Vec<OptionGroup>> {
+    app.with_session(|pos, s| pos.list_option_groups(s, include_inactive))
+}
+
+#[tauri::command(async)]
+fn create_option_group(app: Cmd<'_>, name: String, min_select: i64, max_select: i64) -> Result<OptionGroup> {
+    app.with_session(|pos, s| pos.create_option_group(s, &name, min_select, max_select))
+}
+
+#[tauri::command(async)]
+fn update_option_group(
+    app: Cmd<'_>,
+    id: i64,
+    name: String,
+    min_select: i64,
+    max_select: i64,
+    sort_order: i64,
+    active: bool,
+) -> Result<OptionGroup> {
+    app.with_session(|pos, s| pos.update_option_group(s, id, &name, min_select, max_select, sort_order, active))
+}
+
+#[tauri::command(async)]
+fn save_group_options(app: Cmd<'_>, group_id: i64, options: Vec<OptionInput>) -> Result<OptionGroup> {
+    app.with_session(|pos, s| pos.save_group_options(s, group_id, &options))
+}
+
+#[tauri::command(async)]
+fn set_product_option_groups(app: Cmd<'_>, product_id: i64, group_ids: Vec<i64>) -> Result<()> {
+    app.with_session(|pos, s| pos.set_product_option_groups(s, product_id, &group_ids))
+}
+
 // ---- floor plan ----
 
 #[tauri::command(async)]
@@ -222,8 +262,16 @@ fn move_order(app: Cmd<'_>, id: i64, table_id: i64) -> Result<Order> {
 }
 
 #[tauri::command(async)]
-fn add_item(app: Cmd<'_>, order_id: i64, product_id: i64, qty: i64, note: Option<String>) -> Result<Order> {
-    app.with_session(|pos, s| pos.add_item(s, order_id, product_id, qty, note.as_deref()))
+fn add_item(
+    app: Cmd<'_>,
+    order_id: i64,
+    product_id: i64,
+    qty: i64,
+    note: Option<String>,
+    option_ids: Option<Vec<i64>>,
+) -> Result<Order> {
+    let option_ids = option_ids.unwrap_or_default();
+    app.with_session(|pos, s| pos.add_item(s, order_id, product_id, qty, note.as_deref(), &option_ids))
 }
 
 #[tauri::command(async)]
@@ -231,9 +279,68 @@ fn update_item(app: Cmd<'_>, item_id: i64, update: ItemUpdate) -> Result<Order> 
     app.with_session(|pos, s| pos.update_item(s, item_id, &update))
 }
 
+/// Result of a print attempt. Printing problems never undo the action
+/// (items stay "sent"); the UI shows the error and offers a reprint.
+#[derive(Serialize)]
+struct PrintOutcome {
+    /// False when no kitchen printer is configured.
+    attempted: bool,
+    error: Option<String>,
+}
+
+/// Send a print job after the database lock has been released, so a slow or
+/// offline printer never blocks other commands.
+fn print(job: Option<PrintJob>) -> PrintOutcome {
+    match job {
+        None => PrintOutcome { attempted: false, error: None },
+        Some(job) => PrintOutcome { attempted: true, error: job.send().err().map(|e| e.to_string()) },
+    }
+}
+
+#[derive(Serialize)]
+struct SendResult {
+    items: Vec<OrderItem>,
+    print: PrintOutcome,
+}
+
 #[tauri::command(async)]
-fn send_to_kitchen(app: Cmd<'_>, order_id: i64) -> Result<Vec<OrderItem>> {
-    app.with_session(|pos, s| pos.send_to_kitchen(s, order_id))
+fn send_to_kitchen(app: Cmd<'_>, order_id: i64) -> Result<SendResult> {
+    let (items, job) = app.with_session(|pos, s| {
+        let items = pos.send_to_kitchen(s, order_id)?;
+        let job = pos.kitchen_job(s, order_id, &items, false)?;
+        Ok((items, job))
+    })?;
+    Ok(SendResult { items, print: print(job) })
+}
+
+#[tauri::command(async)]
+fn reprint_kitchen(app: Cmd<'_>, order_id: i64) -> Result<PrintOutcome> {
+    let job = app.with_session(|pos, s| pos.kitchen_reprint_job(s, order_id))?;
+    Ok(print(job))
+}
+
+// ---- kitchen printer setup (admin) ----
+
+#[tauri::command(async)]
+fn get_kitchen_printer(app: Cmd<'_>) -> Result<PrinterConfig> {
+    app.with_session(|pos, _| pos.kitchen_printer())
+}
+
+#[tauri::command(async)]
+fn set_kitchen_printer(app: Cmd<'_>, config: PrinterConfig) -> Result<()> {
+    app.with_session(|pos, s| pos.set_kitchen_printer(s, &config))
+}
+
+#[tauri::command(async)]
+fn test_kitchen_printer(app: Cmd<'_>, config: PrinterConfig) -> Result<PrintOutcome> {
+    let job = app.with_session(|pos, s| pos.test_print_job(s, &config))?;
+    Ok(print(Some(job)))
+}
+
+#[tauri::command(async)]
+fn list_system_printers(app: Cmd<'_>) -> Result<Vec<String>> {
+    app.with_session(|_, s| s.require(Permission::ManageSettings))?;
+    Ok(system_printers())
 }
 
 #[tauri::command(async)]
@@ -386,6 +493,17 @@ fn main() {
             add_item,
             update_item,
             send_to_kitchen,
+            reprint_kitchen,
+            get_kitchen_printer,
+            set_kitchen_printer,
+            test_kitchen_printer,
+            list_system_printers,
+            menu_options,
+            list_option_groups,
+            create_option_group,
+            update_option_group,
+            save_group_options,
+            set_product_option_groups,
             pay_order,
             cancel_order,
             void_order,

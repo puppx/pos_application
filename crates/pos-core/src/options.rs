@@ -86,7 +86,7 @@ fn load_groups(conn: &Connection, include_inactive: bool) -> Result<Vec<OptionGr
     let mut groups: Vec<OptionGroup> = conn
         .prepare_cached(
             "SELECT id, name, min_select, max_select, sort_order, active FROM option_groups
-             WHERE ?1 OR active = 1 ORDER BY sort_order, name",
+             WHERE deleted = 0 AND (?1 OR active = 1) ORDER BY sort_order, name",
         )?
         .query_map([include_inactive], |r| {
             Ok(OptionGroup {
@@ -213,7 +213,7 @@ impl Pos {
             .conn
             .execute(
                 "UPDATE option_groups SET name = ?2, min_select = ?3, max_select = ?4, sort_order = ?5, active = ?6
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND deleted = 0",
                 params![id, name, min_select, max_select, sort_order, active],
             )
             .map_err(|e| map_unique(e, GROUP_TAKEN))?;
@@ -222,6 +222,26 @@ impl Pos {
         }
         self.audit(Some(s.user_id), "options.group_update", &format!("{id} {name} {min_select}-{max_select} active={active}"))?;
         self.option_group(id)
+    }
+
+    /// Delete a group: it disappears from the menu editor and from every
+    /// item that used it. Past orders keep their own copy of the options.
+    pub fn delete_option_group(&mut self, s: &Session, id: i64) -> Result<()> {
+        s.require(Permission::ManageMenu)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let name: String = tx
+            .query_row("SELECT name FROM option_groups WHERE id = ?1 AND deleted = 0", [id], |r| r.get(0))
+            .optional()?
+            .ok_or(PosError::NotFound)?;
+        tx.execute("DELETE FROM product_option_groups WHERE group_id = ?1", [id])?;
+        tx.execute("UPDATE options SET active = 0 WHERE group_id = ?1", [id])?;
+        tx.execute("UPDATE option_groups SET active = 0, deleted = 1 WHERE id = ?1", [id])?;
+        tx.execute(
+            "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'options.group_delete', ?2)",
+            params![s.user_id, format!("{id} {name}")],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Replace a group's options with the editor's list (in display order):
@@ -249,7 +269,7 @@ impl Pos {
             .query_map([group_id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let exists: bool =
-            tx.query_row("SELECT EXISTS (SELECT 1 FROM option_groups WHERE id = ?1)", [group_id], |r| r.get(0))?;
+            tx.query_row("SELECT EXISTS (SELECT 1 FROM option_groups WHERE id = ?1 AND deleted = 0)", [group_id], |r| r.get(0))?;
         if !exists {
             return Err(PosError::NotFound);
         }

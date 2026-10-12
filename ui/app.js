@@ -50,6 +50,18 @@ function dayRange(iso) {
   return [new Date(y, m - 1, d).getTime() / 1000, new Date(y, m - 1, d + 1).getTime() / 1000];
 }
 const isAdmin = () => state.session?.role === 'admin';
+/// "2026-10-12" -> "Mon 12 Oct"
+function dayLabel(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+/// Show the open business day in the header.
+async function drawBusinessDay() {
+  try {
+    state.day = await invoke('business_day');
+    document.getElementById('bizday').textContent = dayLabel(state.day.date);
+  } catch { /* logged out */ }
+}
 const where = (o) => o.order_type === 'dine_in'
   ? `${o.table_name}${o.floor_name ? ' · ' + o.floor_name : ''}`
   : [o.channel_name && `${o.channel_name}${o.external_ref ? ' ' + o.external_ref : ''}`, o.customer_name]
@@ -231,6 +243,7 @@ function startUpdateChecks() {
 function renderShell() {
   startUpdateChecks();
   drawUpdateBar();
+  drawBusinessDay();
   if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin()))) state.view = 'floor';
   document.getElementById('bar').hidden = false;
   document.getElementById('who').textContent = `${state.session.name} (${state.session.role})`;
@@ -308,6 +321,7 @@ async function renderFloor() {
       const el = tableEl(t, `${t.order_id ? 'busy' : ''} ${t.unsent_count ? 'unsent' : ''}`);
       el.append(h('b', {}, t.name));
       if (t.order_id) el.append(h('span', {}, money(t.total_cents)), h('span', { class: 'muted' }, ago(t.opened_at)));
+      if (t.held_count) el.append(h('span', { class: 'badge held' }, 'mains waiting'));
       el.onclick = act(async () => {
         if (t.order_id) return openOrder(t.order_id);
         try {
@@ -323,7 +337,7 @@ async function renderFloor() {
   };
   screen(h('div', { class: 'stack' },
     h('div', { class: 'row' }, tabs, h('span', { style: 'flex:1' }),
-      h('span', { class: 'muted' }, 'Tap a table to open or continue its order. Red ring = items not sent to kitchen.')),
+      h('span', { class: 'muted' }, 'Tap a table to open or continue its order. Red ring = items not sent to kitchen. "Mains waiting" = call them from the order.')),
     plan));
   await draw();
   live(draw);
@@ -404,8 +418,10 @@ async function renderOrder() {
   // --- ticket side ---
   const lines = h('div', { class: 'lines' });
   const totals = h('table', { class: 'totals' });
-  const sendBtn = h('button', { onclick: act(send) });
-  const tendered = h('input', { placeholder: 'Cash tendered', inputmode: 'decimal', style: 'width:130px' });
+  const sendBtn = h('button', { onclick: act(() => send(allCourses.checked)) });
+  const mainsBtn = h('button', { class: 'primary', onclick: act(() => send(true, 'Mains called')) });
+  // Dine-in: starters go first and the rest waits for "Call mains", unless ticked.
+  const allCourses = h('input', { type: 'checkbox' });
   const extra = h('div');
   let editing = null;
 
@@ -492,34 +508,38 @@ async function renderOrder() {
     });
     draw();
   }
-  async function send() {
-    const r = await call('send_to_kitchen', { orderId });
+  async function send(allCourses = false, what = 'Sent') {
+    const r = await call('send_to_kitchen', { orderId, allCourses });
     order = await call('get_order', { id: orderId });
     draw();
     const n = r.items.reduce((n, i) => n + i.qty, 0);
     if (!n) return toast('Nothing new to send');
-    reportPrint(r.print, `Sent ${n} item(s) to the kitchen`);
+    const waiting = order.items.filter((i) => i.held && !i.sent_at).reduce((n, i) => n + i.qty, 0);
+    reportPrint(r.print, `${what}: ${n} item(s)` + (waiting ? ` · ${waiting} main(s) wait for "Call mains"` : ''));
   }
-  const pay = (method) => act(async () => {
+  const finish = act(async () => {
     if (!order.items.length) return toast('The order is empty', true);
-    const tenderedCents = method === 'cash' ? (tendered.value ? parseMoney(tendered.value) : order.total_cents) : 0;
-    if (method === 'cash' && tenderedCents < order.total_cents) return toast('Cash tendered is less than the total', true);
-    // Anything not yet sent goes to the kitchen with the payment.
-    let printError = null;
-    if (order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId })).print.error;
-    const { order: paid, print: receipt } = await call('pay_order', { orderId, method, tenderedCents });
-    const msg = `Order #${paid.id} paid: ${money(paid.total_cents)}` + (paid.change_cents ? ` · change ${money(paid.change_cents)}` : '');
-    closeOrder();
-    if (printError) toast(`${msg}. Kitchen ticket did not print (${printError}); reprint it from History.`, true);
-    else if (receipt.error) toast(`${msg}. Receipt/drawer did not work (${receipt.error}); reprint from History.`, true);
-    else toast(msg);
+    payDialog(order, async (method, tenderedCents) => {
+      // Anything not yet sent (mains waiting included) goes to the kitchen with the payment.
+      let printError = null;
+      if (order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
+      const { order: paid, print: receipt } = await call('pay_order', { orderId, method, tenderedCents });
+      const msg = `Order #${paid.id} paid: ${money(paid.total_cents)}` + (paid.change_cents ? ` · change ${money(paid.change_cents)}` : '');
+      closeOrder();
+      if (printError) toast(`${msg}. Kitchen ticket did not print (${printError}); reprint it from History.`, true);
+      else if (receipt.error) toast(`${msg}. Receipt/drawer did not work (${receipt.error}); reprint from History.`, true);
+      else toast(msg);
+      return paid;
+    });
   });
 
   function draw() {
     lines.replaceChildren(h('table', {}, order.items.map((it) => {
       const sent = !!it.sent_at;
       const row = h('tr', {},
-        h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : ''),
+        h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
+          it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
+          it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : ''),
           it.options.length > 0 && h('div', { class: 'muted' }, it.options.map((o) => o.name).join(', ')),
           it.note && h('div', { class: 'muted' }, '“', it.note, '”'),
           it.discount_cents ? h('div', { class: 'muted' }, `discount -${money(it.discount_cents)}`) : ''),
@@ -547,11 +567,19 @@ async function renderOrder() {
       order.discount_cents ? h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
       h('tr', {}, h('td', {}, 'Tax'), h('td', { class: 'num' }, money(order.tax_cents))),
       h('tr', { class: 'grand' }, h('td', {}, 'Total'), h('td', { class: 'num' }, money(order.total_cents))));
-    const unsent = order.items.filter((i) => !i.sent_at).reduce((n, i) => n + i.qty, 0);
-    sendBtn.textContent = unsent ? `Send to kitchen (${unsent})` : 'Send to kitchen';
-    sendBtn.disabled = !unsent;
-    sendBtn.className = unsent ? 'primary' : '';
+    const qty = (f) => order.items.filter(f).reduce((n, i) => n + i.qty, 0);
+    const unsent = qty((i) => !i.sent_at && !i.held);
+    const waiting = qty((i) => !i.sent_at && i.held);
+    const starters = qty((i) => !i.sent_at && !i.held && i.starter);
+    const byCourse = order.order_type === 'dine_in' && !allCourses.checked && (starters || waiting);
+    sendBtn.textContent = !unsent ? 'Send to kitchen'
+      : byCourse && starters ? `Send starters (${starters})` : `Send to kitchen (${unsent + (allCourses.checked ? waiting : 0)})`;
+    sendBtn.disabled = !unsent && !(allCourses.checked && waiting);
+    sendBtn.className = sendBtn.disabled ? '' : 'primary';
+    mainsBtn.textContent = `Call mains (${waiting})`;
+    mainsBtn.hidden = !waiting;
   }
+  allCourses.onchange = () => draw();
 
   // --- secondary actions: move table, customer details, cancel ---
   const showMove = act(async () => {
@@ -602,11 +630,10 @@ async function renderOrder() {
     h('div', { class: 'card menu' }, h('div', { class: 'row' }, search), cats, grid, picker),
     h('div', { class: 'card ticket' },
       head, lines, totals,
-      h('div', { class: 'row' }, sendBtn),
-      h('div', { class: 'row' }, tendered,
-        h('button', { class: 'primary', onclick: pay('cash') }, 'Cash'),
-        h('button', { class: 'primary', onclick: pay('card') }, 'Card'),
-        order.channel_id && h('button', { class: 'platform', style: '--c:#374151', onclick: pay('other') }, `Paid by ${order.channel_name}`)),
+      h('div', { class: 'row' }, sendBtn, mainsBtn,
+        order.order_type === 'dine_in' && h('label', { title: 'Otherwise starters go first and the rest waits for "Call mains"' },
+          allCourses, ' All courses together')),
+      h('div', { class: 'row' }, h('button', { class: 'primary pay', onclick: finish }, 'Finish & Pay')),
       h('div', { class: 'row' },
         order.order_type === 'dine_in'
           ? h('button', { onclick: showMove }, 'Move table')
@@ -617,6 +644,125 @@ async function renderOrder() {
         h('button', { class: 'danger', onclick: showCancel }, 'Cancel order')),
       extra)));
   search.focus();
+}
+
+// ---------- payment dialog ----------
+
+function closeModal() {
+  const m = document.getElementById('modal');
+  m.hidden = true;
+  m.replaceChildren();
+  document.removeEventListener('keydown', state.modalKeys);
+}
+
+function showModal(...kids) {
+  const m = document.getElementById('modal');
+  m.replaceChildren(h('div', { class: 'dialog card stack' }, ...kids));
+  m.hidden = false;
+}
+
+/// "Finish & Pay": choose Cash or Card (or the delivery platform); for cash
+/// enter what the customer handed over and see the change. `pay(method,
+/// tenderedCents)` takes the payment and returns the paid order.
+function payDialog(order, pay) {
+  const total = order.total_cents;
+  const title = h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `Order #${order.id}`), h('span', { class: 'muted' }, 'Total'),
+    h('span', { class: 'big' }, money(total)));
+  let busy = false;
+  const take = async (method, tendered) => {
+    if (busy) return;
+    busy = true;
+    try {
+      const paid = await pay(method, tendered);
+      if (method === 'cash' && paid.change_cents > 0) {
+        showModal(h('div', { class: 'center', style: 'margin:0' },
+          h('div', { class: 'muted' }, 'Give change'), h('div', { class: 'huge' }, money(paid.change_cents)),
+          h('div', { class: 'muted' }, `Cash ${money(paid.tendered_cents)} − total ${money(paid.total_cents)}`),
+          h('button', { class: 'primary pay', onclick: closeModal }, 'Done')));
+        setKeys((e) => { if (e.key === 'Enter' || e.key === 'Escape') closeModal(); });
+      } else closeModal();
+    } catch (e) {
+      busy = false;
+      if (!e?.handled) toast(String(e?.message ?? e), true);
+    }
+  };
+  const setKeys = (fn) => {
+    document.removeEventListener('keydown', state.modalKeys);
+    state.modalKeys = fn;
+    document.addEventListener('keydown', fn);
+  };
+  const cancel = h('button', { onclick: closeModal }, 'Cancel');
+
+  const choose = () => {
+    setKeys((e) => { if (e.key === 'Escape') closeModal(); });
+    showModal(title,
+      h('div', { class: 'paygrid' },
+        h('button', { class: 'primary paybig', onclick: cash }, 'Cash'),
+        h('button', { class: 'primary paybig', onclick: card }, 'Card'),
+        order.channel_id && h('button', { class: 'platform paybig', style: '--c:#374151', onclick: () => take('other', 0) },
+          `Paid by ${order.channel_name}`)),
+      h('div', { class: 'row' }, cancel));
+  };
+
+  const card = () => {
+    const confirm = h('button', { class: 'primary paybig', onclick: () => take('card', 0) }, `Card payment taken · ${money(total)}`);
+    setKeys((e) => { if (e.key === 'Enter') take('card', 0); else if (e.key === 'Escape') choose(); });
+    showModal(title, h('div', { class: 'muted' }, 'Take the payment on the card machine, then confirm here.'), confirm,
+      h('div', { class: 'row' }, h('button', { onclick: choose }, '← Back'), cancel));
+  };
+
+  const cash = () => {
+    let typed = '';
+    const amount = h('div', { class: 'amount' });
+    const change = h('div', { class: 'change' });
+    const ok = h('button', { class: 'primary paybig' });
+    const cents = () => {
+      if (!typed) return total;
+      try { return parseMoney(typed); } catch { return null; }
+    };
+    const redraw = () => {
+      const c = cents();
+      amount.textContent = typed ? typed : `${money(total)} (exact)`;
+      const enough = c != null && c >= total;
+      change.textContent = c == null ? 'Enter an amount like 20 or 12.50'
+        : enough ? `Change: ${money(c - total)}` : `Short by ${money(total - c)}`;
+      change.className = `change ${enough ? '' : 'short'}`;
+      ok.textContent = enough ? `Take cash · change ${money(c - total)}` : 'Take cash';
+      ok.disabled = !enough;
+    };
+    const key = (k) => {
+      if (k === '⌫') typed = typed.slice(0, -1);
+      else if (k === 'C') typed = '';
+      else if (k === '.' && typed.includes('.')) return;
+      else if (/\.\d\d$/.test(typed)) return;
+      else if (typed.replace('.', '').length >= 7) return;
+      else typed += k;
+      redraw();
+    };
+    const go = () => { const c = cents(); if (c != null && c >= total) take('cash', c); };
+    ok.onclick = go;
+    // Quick amounts: exact, then the next round notes above the total.
+    const quick = [...new Set([500, 1000, 2000, 5000, Math.ceil(total / 100) * 100, Math.ceil(total / 500) * 500, Math.ceil(total / 1000) * 1000]
+      .filter((c) => c > total))].sort((a, b) => a - b).slice(0, 4);
+    const quickBtn = (c, label) => h('button', { onclick: () => { typed = c === total ? '' : String(c / 100); redraw(); if (c === total) go(); } }, label);
+    setKeys((e) => {
+      if (/^[0-9.]$/.test(e.key)) key(e.key);
+      else if (e.key === 'Backspace') key('⌫');
+      else if (e.key === 'Enter') go();
+      else if (e.key === 'Escape') choose();
+    });
+    showModal(title,
+      h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Cash received'), amount),
+      change,
+      h('div', { class: 'row' }, quickBtn(total, 'Exact'), quick.map((c) => quickBtn(c, money(c)))),
+      h('div', { class: 'keypad' }, ['7', '8', '9', '4', '5', '6', '1', '2', '3', '.', '0', '⌫'].map((k) =>
+        h('button', { onclick: () => key(k) }, k))),
+      ok,
+      h('div', { class: 'row' }, h('button', { onclick: choose }, '← Back'), h('button', { onclick: () => key('C') }, 'Clear'), cancel));
+    redraw();
+  };
+
+  choose();
 }
 
 /// Inputs for customer details, shown according to order type.
@@ -829,7 +975,8 @@ async function renderOrders() {
         h('td', {}, o.id), h('td', {}, h('span', { class: 'badge' }, TYPE[o.order_type])),
         h('td', {}, where(o), o.customer_phone ? h('div', { class: 'muted' }, o.customer_phone) : ''),
         h('td', {}, ago(o.opened_at)), h('td', {}, o.opened_by_name),
-        h('td', { class: 'num' }, o.item_count, o.unsent_count ? h('div', {}, h('span', { class: 'badge warn' }, `${o.unsent_count} not sent`)) : ''),
+        h('td', { class: 'num' }, o.item_count, o.unsent_count ? h('div', {}, h('span', { class: 'badge warn' }, `${o.unsent_count} not sent`)) : '',
+          o.held_count ? h('div', {}, h('span', { class: 'badge held' }, 'mains waiting')) : ''),
         h('td', { class: 'num' }, money(o.total_cents)))))
       : h('p', { class: 'muted' }, 'No open orders.'));
   };
@@ -892,10 +1039,21 @@ async function renderMenuAdmin() {
     let products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
     if (filter.value) products = products.filter((p) => p.category_id === Number(filter.value));
     list.replaceChildren(h('table', {},
-      h('tr', {}, h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
+      h('tr', {}, h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
+        h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
       products.map((p) => h('tr', { class: 'click', style: p.active ? '' : 'opacity:.5', onclick: () => editProduct(p) },
         h('td', {}, p.name, variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
-        h('td', {}, catName[p.category_id] ?? '—'), h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
+        h('td', {}, catName[p.category_id] ?? '—'),
+        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+          type: 'checkbox', checked: p.starter, title: 'Starter: sent to the kitchen first',
+          onchange: act(async (e) => {
+            await call('set_starter', { id: p.id, starter: e.target.checked });
+            p.starter = e.target.checked;
+            state.menu = null;
+            toast(`${p.name}: ${p.starter ? 'starter' : 'not a starter'}`);
+          }),
+        })),
+        h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
         h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—')))));
   });
 
@@ -938,14 +1096,26 @@ async function renderMenuAdmin() {
       await call('save_group_options', { groupId: saved.id, options });
       toast('Saved'); await changed();
     });
+    // Two taps to delete, so a slip of the finger does nothing.
+    const deleteBtn = h('button', { class: 'danger', onclick: act(async () => {
+      if (!deleteBtn.dataset.sure) {
+        deleteBtn.dataset.sure = '1';
+        deleteBtn.textContent = `Tap again to delete "${g.name}"`;
+        return;
+      }
+      await call('delete_option_group', { id: g.id });
+      toast(`${g.name} deleted`); await changed();
+    }) }, 'Delete group');
     form.replaceChildren(h('div', { class: 'card stack' },
       h('h3', {}, g ? `Edit ${g.name}` : 'New option group'),
       h('div', { class: 'row' }, name, g && h('label', {}, active, ' In use')),
       h('div', { class: 'row' }, 'Customer must choose at least', min, 'and at most', max),
-      h('div', { class: 'muted' }, 'Sizes: at least 1, at most 1. Extras: at least 0, at most e.g. 5. Prices are added to the item (use -1.00 for a cheaper option).'),
+      h('div', { class: 'muted' }, 'Sizes: at least 1, at most 1. Extras: at least 0, at most e.g. 5. Prices are added to the item (use -1.00 for a cheaper option). ' +
+        'Untick "In use" to hide it for now; Delete removes it from every item (past orders are not affected).'),
       list,
       h('div', {}, h('button', { onclick: addRow }, '+ Option')),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel'),
+        h('span', { style: 'flex:1' }), g && deleteBtn)));
     drawRows();
     if (!rows.length) addRow();
     name.focus();
@@ -963,6 +1133,7 @@ async function renderMenuAdmin() {
       track: h('input', { type: 'checkbox', checked: p ? p.track_stock : false }),
       stock: h('input', { value: '0', inputmode: 'numeric', style: 'width:80px' }),
       active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
+      starter: h('input', { type: 'checkbox', checked: p ? p.starter : (cats.find((c) => c.id === Number(filter.value))?.name ?? '').toLowerCase().startsWith('starter') }),
     };
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
     // Choices with their own price (e.g. soup: chicken 6.50 / beef 7.50).
@@ -987,6 +1158,7 @@ async function renderMenuAdmin() {
       price_cents: !f.price.value.trim() && choices.some((c) => c.name.trim()) ? 0 : parseMoney(f.price.value),
       cost_cents: parseMoney(f.cost.value || '0'),
       tax_rate_bp: Math.round(Number(f.tax.value || 0) * 100), track_stock: f.track.checked,
+      starter: f.starter.checked,
     });
     const save = act(async () => {
       const saved = p
@@ -1010,6 +1182,7 @@ async function renderMenuAdmin() {
       h('div', { class: 'row' }, f.barcode, f.sku),
       groupBoxes.length > 0 && h('div', { class: 'stack' }, h('strong', {}, 'Options'),
         h('div', { class: 'row' }, groupBoxes.map(({ g, box }) => h('label', {}, box, ` ${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))))),
+      h('label', {}, f.starter, ' Starter ', h('span', { class: 'muted' }, '(dine-in: sent to the kitchen first; the rest waits for "Call mains")')),
       h('div', { class: 'row' }, h('label', {}, f.track, ' Count stock (e.g. bottled drinks)'),
         !p && ['Opening stock', f.stock], p && h('label', {}, f.active, ' On the menu')),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel')),
@@ -1242,7 +1415,50 @@ async function renderUsers() {
 async function renderReports() {
   const date = h('input', { type: 'date', value: today() });
   const out = h('div');
+  const eod = h('div', { class: 'card stack' });
   const rows = (pairs) => h('table', {}, pairs.map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'num' }, v))));
+
+  // End of day: the open business day so far, the close button, past closes.
+  const drawEod = async (shown = null) => {
+    const day = await call('business_day');
+    const now = Math.floor(Date.now() / 1000) + 1;
+    const [s, closes] = await Promise.all([call('sales_summary', { from: day.since, to: now }), call('day_closes', { limit: 30 })]);
+    const report = h('pre', { class: 'report', hidden: !shown }, shown?.text ?? '');
+    const closeBtn = h('button', { class: 'primary', disabled: day.open_orders > 0 }, 'Close day & print summary');
+    closeBtn.onclick = act(async () => {
+      if (!closeBtn.dataset.sure) {
+        closeBtn.dataset.sure = '1';
+        closeBtn.textContent = `Tap again to close ${dayLabel(day.date)}`;
+        return;
+      }
+      closeBtn.disabled = true;
+      const r = await call('close_day');
+      await drawBusinessDay();
+      const c = r.view.close;
+      const msg = `${dayLabel(c.business_date)} closed: ${c.summary.order_count} orders, ${money(c.summary.total_cents)}. Now on ${dayLabel(state.day.date)}`;
+      if (r.print.error) toast(`${msg}. The summary did not print (${r.print.error}); reprint it below.`, true);
+      else toast(r.print.attempted ? `${msg} · summary printed` : `${msg} · no receipt printer, summary shown below`);
+      await drawEod(r.view);
+    });
+    eod.replaceChildren(
+      h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `End of day · ${dayLabel(day.date)}`),
+        h('span', { class: 'muted' }, `since ${fmtTime(day.since)}`)),
+      h('div', { class: 'row' },
+        h('span', {}, `${s.order_count} paid orders · `, h('strong', {}, money(s.total_cents))),
+        ...s.by_payment.map((g) => h('span', { class: 'badge' }, `${g.key === 'other' ? 'platform' : g.key} ${money(g.total_cents)}`)),
+        h('span', { style: 'flex:1' }),
+        day.open_orders > 0 && h('span', { class: 'badge warn' }, `${day.open_orders} open order(s): pay or cancel them first`),
+        closeBtn),
+      h('div', { class: 'muted' }, 'Closing prints the day\'s sales summary on the receipt printer and moves the business day to the next date.'),
+      report,
+      closes.length ? h('details', {}, h('summary', {}, 'Previous days'), h('table', {},
+        closes.map((v) => h('tr', {},
+          h('td', {}, dayLabel(v.close.business_date)), h('td', { class: 'muted' }, `closed ${fmtTime(v.close.to)} by ${v.close.closed_by_name}`),
+          h('td', { class: 'num' }, v.close.summary.order_count), h('td', { class: 'num' }, money(v.close.summary.total_cents)),
+          h('td', {}, h('button', { onclick: () => { report.textContent = v.text; report.hidden = false; } }, 'View'),
+            h('button', { onclick: act(async () => printResult(await call('reprint_day_close', { id: v.close.id }), 'Summary printed')) }, 'Print')))))) : '');
+  };
+
   const load = act(async () => {
     const [from, to] = dayRange(date.value);
     const [s, top] = await Promise.all([call('sales_summary', { from, to }), call('top_products', { from, to, limit: 20 })]);
@@ -1258,12 +1474,15 @@ async function renderReports() {
           rows(s.by_channel.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
         h('div', { class: 'card' }, h('h3', {}, 'By payment'),
           rows(s.by_payment.map((g) => [g.key === 'other' ? 'other / platform' : g.key, `${g.count} · ${money(g.total_cents)}`])))),
-      h('div', { class: 'card' }, h('h3', {}, 'Top items'), h('table', {},
-        top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents))))))));
+      h('div', { class: 'stack' },
+        h('div', { class: 'card' }, h('h3', {}, 'By category (before tax)'),
+          rows(s.by_category.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
+        h('div', { class: 'card' }, h('h3', {}, 'Top items'), h('table', {},
+          top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents)))))))));
   });
   date.onchange = load;
-  screen(h('div', { class: 'stack' }, h('div', { class: 'row' }, 'Day', date), out));
-  await load();
+  screen(h('div', { class: 'stack' }, eod, h('div', { class: 'row' }, h('h3', {}, 'Sales by calendar day'), date), out));
+  await Promise.all([drawEod(), load()]);
 }
 
 // ---------- settings (admin) ----------
@@ -1370,6 +1589,7 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   const width = h('select', {}, h('option', { value: 42 }, '80 mm paper'), h('option', { value: 32 }, '58 mm paper'), h('option', { value: 48 }, '80 mm, small font (48)'));
   width.value = String(cfg.width ?? 42);
   const copies = h('input', { type: 'number', min: 1, max: 9, value: cfg.copies ?? 1, style: 'width:70px' });
+  const delay = h('input', { type: 'number', min: 0, max: 30, value: cfg.copy_delay_secs ?? 2, style: 'width:70px', title: 'Seconds to wait between copies' });
   const fields = h('div', { class: 'row' });
   const drawFields = () => fields.replaceChildren(...{
     none: [],
@@ -1380,10 +1600,11 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   kind.onchange = drawFields;
   drawFields();
   return {
-    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies), fields),
+    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, 'Delay between copies', delay, 'sec'), fields),
     none: () => kind.value === 'none',
     config: () => ({
       kind: kind.value, width: Number(width.value), copies: Math.min(9, Math.max(1, parseInt(copies.value, 10) || 1)),
+      copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
       ...(kind.value === 'file' && { path: path.value.trim() }),

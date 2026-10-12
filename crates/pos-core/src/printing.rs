@@ -43,10 +43,17 @@ pub struct PrinterConfig {
     /// How many copies each automatic print makes (manual reprints make one).
     #[serde(default = "one")]
     pub copies: u8,
+    /// Seconds to wait between copies, so each one can be torn off.
+    #[serde(default = "default_copy_delay")]
+    pub copy_delay_secs: u8,
 }
 
 fn default_width() -> usize {
     42
+}
+
+fn default_copy_delay() -> u8 {
+    2
 }
 
 fn one() -> u8 {
@@ -55,7 +62,7 @@ fn one() -> u8 {
 
 impl Default for PrinterConfig {
     fn default() -> Self {
-        PrinterConfig { target: PrinterTarget::None, width: default_width(), copies: 1 }
+        PrinterConfig { target: PrinterTarget::None, width: default_width(), copies: 1, copy_delay_secs: default_copy_delay() }
     }
 }
 
@@ -66,6 +73,9 @@ impl PrinterConfig {
         }
         if !(1..=9).contains(&self.copies) {
             return invalid("copies must be between 1 and 9");
+        }
+        if self.copy_delay_secs > 30 {
+            return invalid("the delay between copies must be 0 to 30 seconds");
         }
         match &self.target {
             PrinterTarget::Network { host, port } if host.trim().is_empty() || *port == 0 => {
@@ -78,39 +88,92 @@ impl PrinterConfig {
     }
 }
 
-/// Ready-to-send bytes plus their destination.
+/// Ready-to-send bytes plus their destination. A job with several copies
+/// holds one part per copy, sent `gap` apart.
 #[derive(Debug, Clone)]
 pub struct PrintJob {
     pub target: PrinterTarget,
-    pub bytes: Vec<u8>,
+    pub parts: Vec<Vec<u8>>,
+    pub gap: Duration,
 }
 
 impl PrintJob {
+    pub fn new(target: PrinterTarget, bytes: Vec<u8>) -> PrintJob {
+        PrintJob { target, parts: vec![bytes], gap: Duration::ZERO }
+    }
+
+    /// `copies` of `doc`, the first one preceded by `lead` (e.g. the drawer pulse).
+    pub(crate) fn copies(target: PrinterTarget, lead: &[u8], doc: Vec<u8>, copies: u8, delay_secs: u8) -> PrintJob {
+        let mut first = lead.to_vec();
+        first.extend_from_slice(&doc);
+        let mut parts = vec![first];
+        parts.extend(std::iter::repeat_n(doc, usize::from(copies.max(1)) - 1));
+        PrintJob { target, parts, gap: Duration::from_secs(delay_secs.into()) }
+    }
+
+    /// Everything the printer receives, in order.
+    pub fn bytes(&self) -> Vec<u8> {
+        self.parts.concat()
+    }
+
+    /// Send every part, waiting `gap` between them.
     pub fn send(&self) -> Result<()> {
-        let fail = PosError::Printer;
-        match &self.target {
-            PrinterTarget::None => Ok(()),
-            PrinterTarget::Network { host, port } => {
-                let addr = (host.trim(), *port)
-                    .to_socket_addrs()
-                    .map_err(|e| fail(e.to_string()))?
-                    .next()
-                    .ok_or_else(|| fail(format!("cannot resolve {host}")))?;
-                let mut s = TcpStream::connect_timeout(&addr, NET_TIMEOUT)
-                    .map_err(|e| fail(format!("cannot reach {host}:{port} ({e})")))?;
-                s.set_write_timeout(Some(NET_TIMEOUT)).map_err(|e| fail(e.to_string()))?;
-                s.write_all(&self.bytes).and_then(|_| s.flush()).map_err(|e| fail(e.to_string()))
+        for (i, part) in self.parts.iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(self.gap);
             }
-            PrinterTarget::File { path } => {
-                let mut f = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path.trim())
-                    .map_err(|e| fail(format!("{path}: {e}")))?;
-                f.write_all(&self.bytes).map_err(|e| fail(e.to_string()))
-            }
-            PrinterTarget::Windows { name } => windows_spool::print_raw(name, &self.bytes).map_err(fail),
+            send_bytes(&self.target, part)?;
         }
+        Ok(())
+    }
+
+    /// Send the first copy now (its result is returned) and any further
+    /// copies on a background thread, so the till does not wait out the delay.
+    pub fn send_in_background(self) -> Result<()> {
+        let mut parts = self.parts.into_iter();
+        if let Some(first) = parts.next() {
+            send_bytes(&self.target, &first)?;
+        }
+        let rest: Vec<Vec<u8>> = parts.collect();
+        if !rest.is_empty() {
+            let (target, gap) = (self.target, self.gap);
+            std::thread::spawn(move || {
+                for part in rest {
+                    std::thread::sleep(gap);
+                    if send_bytes(&target, &part).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
+fn send_bytes(target: &PrinterTarget, bytes: &[u8]) -> Result<()> {
+    let fail = PosError::Printer;
+    match target {
+        PrinterTarget::None => Ok(()),
+        PrinterTarget::Network { host, port } => {
+            let addr = (host.trim(), *port)
+                .to_socket_addrs()
+                .map_err(|e| fail(e.to_string()))?
+                .next()
+                .ok_or_else(|| fail(format!("cannot resolve {host}")))?;
+            let mut s = TcpStream::connect_timeout(&addr, NET_TIMEOUT)
+                .map_err(|e| fail(format!("cannot reach {host}:{port} ({e})")))?;
+            s.set_write_timeout(Some(NET_TIMEOUT)).map_err(|e| fail(e.to_string()))?;
+            s.write_all(bytes).and_then(|_| s.flush()).map_err(|e| fail(e.to_string()))
+        }
+        PrinterTarget::File { path } => {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path.trim())
+                .map_err(|e| fail(format!("{path}: {e}")))?;
+            f.write_all(bytes).map_err(|e| fail(e.to_string()))
+        }
+        PrinterTarget::Windows { name } => windows_spool::print_raw(name, bytes).map_err(fail),
     }
 }
 
@@ -133,7 +196,7 @@ pub struct TicketItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KitchenTicket {
-    /// "NEW ORDER", "ADDITIONAL" or "REPRINT".
+    /// "NEW ORDER", "ADDITIONAL", "MAINS AWAY" or "REPRINT".
     pub title: String,
     /// "DINE-IN T3", "DELIVERY", ...
     pub heading: String,
@@ -143,6 +206,8 @@ pub struct KitchenTicket {
     pub time: String,
     pub staff: String,
     pub items: Vec<TicketItem>,
+    /// Printed after the items, e.g. "MAINS TO FOLLOW: 3".
+    pub footer: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -204,16 +269,6 @@ pub(crate) fn render_escpos(lines: &[Line]) -> Vec<u8> {
     b.extend_from_slice(&[0x1B, b'd', 4]); // feed past the cutter
     b.extend_from_slice(&[0x1D, b'V', 66, 0]); // partial cut
     b
-}
-
-/// The same document `copies` times (each one cut separately).
-pub(crate) fn repeat_copies(doc: Vec<u8>, copies: u8) -> Vec<u8> {
-    let n = usize::from(copies.max(1));
-    let mut out = Vec::with_capacity(doc.len() * n);
-    for _ in 0..n {
-        out.extend_from_slice(&doc);
-    }
-    out
 }
 
 /// Word-wrap `text` to `width` columns. The first line starts with `first`,
@@ -298,6 +353,11 @@ impl KitchenTicket {
             }
         }
         push(Size::Normal, false, false, "-".repeat(width));
+        if let Some(f) = &self.footer {
+            for t in wrap(f, big, "", "") {
+                push(Size::Big, true, true, t);
+            }
+        }
         v
     }
 
@@ -401,8 +461,18 @@ impl Pos {
         if let Some(n) = &o.notes {
             details.push(format!("NOTE: {n}"));
         }
+        let waiting = o.items.iter().filter(|i| i.held && i.sent_at.is_none()).map(|i| i.qty).sum::<i64>();
+        let title = if reprint {
+            "REPRINT"
+        } else if first_round {
+            "NEW ORDER"
+        } else if items.iter().any(|i| i.held) {
+            "MAINS AWAY"
+        } else {
+            "ADDITIONAL"
+        };
         Ok(KitchenTicket {
-            title: if reprint { "REPRINT" } else if first_round { "NEW ORDER" } else { "ADDITIONAL" }.into(),
+            title: title.into(),
             heading: heading(&o),
             details,
             order_id,
@@ -419,6 +489,7 @@ impl Pos {
                     note: i.note.clone(),
                 })
                 .collect(),
+            footer: (!reprint && waiting > 0).then(|| format!("MAINS TO FOLLOW: {waiting}")),
         })
     }
 
@@ -430,7 +501,7 @@ impl Pos {
         }
         let ticket = self.kitchen_ticket(s, order_id, items, reprint)?;
         let copies = if reprint { 1 } else { cfg.copies };
-        Ok(Some(PrintJob { target: cfg.target, bytes: repeat_copies(ticket.to_escpos(cfg.width), copies) }))
+        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width), copies, cfg.copy_delay_secs)))
     }
 
     /// Everything already sent on an order, for "Reprint".
@@ -470,8 +541,9 @@ impl Pos {
                     note: Some("no onions".into()),
                 },
             ],
+            footer: None,
         };
-        Ok(PrintJob { target: cfg.target.clone(), bytes: repeat_copies(ticket.to_escpos(cfg.width), cfg.copies) })
+        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos(cfg.width), cfg.copies, cfg.copy_delay_secs))
     }
 }
 
@@ -585,6 +657,7 @@ mod tests {
                 TicketItem { category: None, qty: 2, name: "Burger".into(), options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
                 TicketItem { category: None, qty: 1, name: "Crème brûlée".into(), options: vec![], note: None },
             ],
+            footer: None,
         }
     }
 
@@ -625,18 +698,15 @@ mod tests {
             std::io::Read::read_to_end(&mut s, &mut buf).unwrap();
             buf
         });
-        let job = PrintJob {
-            target: PrinterTarget::Network { host: "127.0.0.1".into(), port },
-            bytes: ticket().to_escpos(42),
-        };
+        let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, ticket().to_escpos(42));
         job.send().unwrap();
-        assert_eq!(reader.join().unwrap(), job.bytes);
+        assert_eq!(reader.join().unwrap(), job.bytes());
     }
 
     #[test]
     fn unreachable_printer_is_an_error_not_a_hang() {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let job = PrintJob { target: PrinterTarget::Network { host: "127.0.0.1".into(), port }, bytes: vec![1] };
+        let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, vec![1]);
         assert!(job.send().is_err());
     }
 
@@ -645,7 +715,11 @@ mod tests {
         let cfg: PrinterConfig = serde_json::from_str(r#"{"kind":"network","host":"192.168.1.50","port":9100}"#).unwrap();
         assert_eq!(cfg.width, 42);
         assert_eq!(cfg.target, PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 });
-        assert!(PrinterConfig { target: PrinterTarget::Windows { name: " ".into() }, width: 42, copies: 1 }.validate().is_err());
-        assert!(PrinterConfig { target: PrinterTarget::None, width: 10, copies: 1 }.validate().is_err());
+        assert_eq!(cfg.copy_delay_secs, 2);
+        let ok = PrinterConfig::default();
+        assert!(PrinterConfig { target: PrinterTarget::Windows { name: " ".into() }, ..ok.clone() }.validate().is_err());
+        assert!(PrinterConfig { width: 10, ..ok.clone() }.validate().is_err());
+        assert!(PrinterConfig { copy_delay_secs: 31, ..ok.clone() }.validate().is_err());
+        assert!(PrinterConfig { copy_delay_secs: 0, ..ok }.validate().is_ok());
     }
 }

@@ -6,6 +6,7 @@
 mod auth;
 mod channels;
 mod customers;
+mod dayclose;
 mod error;
 mod floors;
 mod menu;
@@ -26,6 +27,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 pub use auth::LoginThrottle;
 pub use channels::{Channel, ChannelInput};
+pub use dayclose::{BusinessDay, DayClose};
 pub use customers::{normalize_postcode, phone_digits, Customer, CustomerInput};
 pub use error::{PosError, Result};
 pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_HEIGHT, PLAN_WIDTH};
@@ -52,6 +54,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema.sql"),
     include_str!("migrations/0002_delivery_customers.sql"),
     include_str!("migrations/0003_item_choices.sql"),
+    include_str!("migrations/0004_courses_day_close.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

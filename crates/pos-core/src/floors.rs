@@ -70,7 +70,10 @@ pub struct TableStatus {
     pub opened_at: Option<i64>,
     pub total_cents: i64,
     pub item_count: i64,
+    /// New lines not yet sent (mains waiting for "Call mains" excluded).
     pub unsent_count: i64,
+    /// Mains waiting for "Call mains".
+    pub held_count: i64,
 }
 
 fn table_from_row(r: &Row) -> rusqlite::Result<DiningTable> {
@@ -204,7 +207,7 @@ impl Pos {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT t.id, t.floor_id, t.name, t.shape, t.x, t.y, t.w, t.h, o.id, o.opened_at,
-                    COALESCE(i.total, 0), COALESCE(i.items, 0), COALESCE(i.unsent, 0)
+                    COALESCE(i.total, 0), COALESCE(i.items, 0), COALESCE(i.unsent, 0), COALESCE(i.held, 0)
              FROM dining_tables t
              LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'
              LEFT JOIN (
@@ -212,7 +215,8 @@ impl Pos {
                         SUM(unit_price_cents * qty - discount_cents
                             + ((unit_price_cents * qty - discount_cents) * tax_rate_bp + 5000) / 10000) AS total,
                         SUM(qty) AS items,
-                        SUM(sent_at IS NULL) AS unsent
+                        SUM(sent_at IS NULL AND held = 0) AS unsent,
+                        SUM(sent_at IS NULL AND held = 1) AS held
                  FROM order_items
                  WHERE order_id IN (SELECT id FROM orders WHERE status = 'open')
                  GROUP BY order_id
@@ -228,6 +232,7 @@ impl Pos {
                 total_cents: r.get(10)?,
                 item_count: r.get(11)?,
                 unsent_count: r.get(12)?,
+                held_count: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -118,7 +118,7 @@ impl Pos {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents,
-                    p.tax_rate_bp, p.stock_qty, p.track_stock, p.active
+                    p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter
              FROM products p LEFT JOIN categories c ON c.id = p.category_id AND c.active = 1
              WHERE p.active = 1
              ORDER BY c.sort_order IS NULL, c.sort_order, c.name, p.name",

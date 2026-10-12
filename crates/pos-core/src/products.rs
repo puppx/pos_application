@@ -17,6 +17,8 @@ pub struct Product {
     pub stock_qty: i64,
     pub track_stock: bool,
     pub active: bool,
+    /// Sent to the kitchen first on dine-in orders (see `send_to_kitchen`).
+    pub starter: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +40,8 @@ pub struct NewProduct {
     /// Off by default: most dishes are not counted; bottled drinks may be.
     #[serde(default)]
     pub track_stock: bool,
+    #[serde(default)]
+    pub starter: bool,
 }
 
 /// Stock is not editable here: it only changes through sales and
@@ -60,6 +64,8 @@ pub struct ProductUpdate {
     pub track_stock: bool,
     #[serde(default = "yes")]
     pub active: bool,
+    #[serde(default)]
+    pub starter: bool,
 }
 
 fn yes() -> bool {
@@ -67,7 +73,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -84,6 +90,7 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         stock_qty: r.get(8)?,
         track_stock: r.get(9)?,
         active: r.get(10)?,
+        starter: r.get(11)?,
     })
 }
 
@@ -181,8 +188,8 @@ impl Pos {
         self.check_category(p.category_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 clean_code(p.sku),
                 clean_code(p.barcode),
@@ -192,7 +199,8 @@ impl Pos {
                 p.tax_rate_bp,
                 p.stock_qty,
                 p.track_stock,
-                p.category_id
+                p.category_id,
+                p.starter
             ],
         )
         .map_err(|e| map_unique(e, CODE_TAKEN))?;
@@ -219,7 +227,7 @@ impl Pos {
             .conn
             .execute(
                 "UPDATE products SET sku = ?2, barcode = ?3, name = ?4, price_cents = ?5, cost_cents = ?6,
-                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, updated_at = unixepoch()
+                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, starter = ?11, updated_at = unixepoch()
                  WHERE id = ?1",
                 params![
                     id,
@@ -231,7 +239,8 @@ impl Pos {
                     p.tax_rate_bp,
                     p.track_stock,
                     p.active,
-                    p.category_id
+                    p.category_id,
+                    p.starter
                 ],
             )
             .map_err(|e| map_unique(e, CODE_TAKEN))?;
@@ -240,6 +249,18 @@ impl Pos {
         }
         self.audit(Some(s.user_id), "product.update", &format!("{id} {name}"))?;
         self.get_product(s, id)
+    }
+
+    /// Quick "Starter" toggle from the menu list.
+    pub fn set_starter(&self, s: &Session, id: i64, starter: bool) -> Result<()> {
+        s.require(Permission::ManageMenu)?;
+        let changed = self
+            .conn
+            .execute("UPDATE products SET starter = ?2, updated_at = unixepoch() WHERE id = ?1", params![id, starter])?;
+        if changed == 0 {
+            return Err(PosError::NotFound);
+        }
+        self.audit(Some(s.user_id), "product.starter", &format!("{id} {starter}"))
     }
 
     /// Manual stock change (delivery, count correction, damage...).

@@ -127,6 +127,11 @@ fn update_product(app: Cmd<'_>, id: i64, product: ProductUpdate) -> Result<Produ
 }
 
 #[tauri::command(async)]
+fn set_starter(app: Cmd<'_>, id: i64, starter: bool) -> Result<()> {
+    app.with_session(|pos, s| pos.set_starter(s, id, starter))
+}
+
+#[tauri::command(async)]
 fn adjust_stock(app: Cmd<'_>, id: i64, delta: i64, reason: String) -> Result<Product> {
     app.with_session(|pos, s| pos.adjust_stock(s, id, delta, &reason))
 }
@@ -229,6 +234,11 @@ fn list_option_groups(app: Cmd<'_>, include_inactive: bool) -> Result<Vec<Option
 #[tauri::command(async)]
 fn create_option_group(app: Cmd<'_>, name: String, min_select: i64, max_select: i64) -> Result<OptionGroup> {
     app.with_session(|pos, s| pos.create_option_group(s, &name, min_select, max_select))
+}
+
+#[tauri::command(async)]
+fn delete_option_group(app: Cmd<'_>, id: i64) -> Result<()> {
+    app.with_session(|pos, s| pos.delete_option_group(s, id))
 }
 
 #[tauri::command(async)]
@@ -347,11 +357,12 @@ struct PrintOutcome {
 }
 
 /// Send a print job after the database lock has been released, so a slow or
-/// offline printer never blocks other commands.
+/// offline printer never blocks other commands. Extra copies follow in the
+/// background, spaced by the configured delay.
 fn print(job: Option<PrintJob>) -> PrintOutcome {
     match job {
         None => PrintOutcome { attempted: false, error: None },
-        Some(job) => PrintOutcome { attempted: true, error: job.send().err().map(|e| e.to_string()) },
+        Some(job) => PrintOutcome { attempted: true, error: job.send_in_background().err().map(|e| e.to_string()) },
     }
 }
 
@@ -362,9 +373,11 @@ struct SendResult {
 }
 
 #[tauri::command(async)]
-fn send_to_kitchen(app: Cmd<'_>, order_id: i64) -> Result<SendResult> {
+/// `all_courses`: also send mains held behind the starters ("Call mains",
+/// or "send all courses together").
+fn send_to_kitchen(app: Cmd<'_>, order_id: i64, all_courses: Option<bool>) -> Result<SendResult> {
     let (items, job) = app.with_session(|pos, s| {
-        let items = pos.send_to_kitchen(s, order_id)?;
+        let items = if all_courses.unwrap_or(false) { pos.call_mains(s, order_id)? } else { pos.send_to_kitchen(s, order_id)? };
         let job = pos.kitchen_job(s, order_id, &items, false)?;
         Ok((items, job))
     })?;
@@ -466,6 +479,59 @@ fn list_open_orders(app: Cmd<'_>) -> Result<Vec<OrderSummary>> {
 #[tauri::command(async)]
 fn list_orders(app: Cmd<'_>, from: i64, to: i64, limit: i64, offset: i64) -> Result<Vec<OrderSummary>> {
     app.with_session(|pos, s| pos.list_orders(s, from, to, limit, offset))
+}
+
+// ---- end of day ----
+
+#[tauri::command(async)]
+fn business_day(app: Cmd<'_>) -> Result<BusinessDay> {
+    app.with_session(|pos, s| pos.business_day(s))
+}
+
+#[derive(Serialize)]
+struct DayCloseView {
+    close: DayClose,
+    /// The report laid out like the printout.
+    text: String,
+}
+
+#[derive(Serialize)]
+struct CloseResult {
+    view: DayCloseView,
+    print: PrintOutcome,
+}
+
+#[tauri::command(async)]
+fn close_day(app: Cmd<'_>) -> Result<CloseResult> {
+    let (view, job) = app.with_session(|pos, s| {
+        let close = pos.close_day(s)?;
+        let text = pos.day_close_text(&close)?;
+        let job = pos.day_close_job(s, &close)?;
+        Ok((DayCloseView { close, text }, job))
+    })?;
+    Ok(CloseResult { view, print: print(job) })
+}
+
+#[tauri::command(async)]
+fn day_closes(app: Cmd<'_>, limit: i64) -> Result<Vec<DayCloseView>> {
+    app.with_session(|pos, s| {
+        pos.day_closes(s, limit)?
+            .into_iter()
+            .map(|close| Ok(DayCloseView { text: pos.day_close_text(&close)?, close }))
+            .collect()
+    })
+}
+
+#[tauri::command(async)]
+fn reprint_day_close(app: Cmd<'_>, id: i64) -> Result<PrintOutcome> {
+    let job = app.with_session(|pos, s| {
+        let close = pos.day_close(s, id)?;
+        pos.day_close_job(s, &close)
+    })?;
+    if job.is_none() {
+        return Err(PosError::Validation("no receipt printer is set up (Settings → Receipt printer)".into()));
+    }
+    Ok(print(job))
 }
 
 // ---- users ----
@@ -622,6 +688,7 @@ fn main() {
             list_products,
             create_product,
             update_product,
+            set_starter,
             adjust_stock,
             menu,
             list_categories,
@@ -666,6 +733,7 @@ fn main() {
             list_option_groups,
             create_option_group,
             update_option_group,
+            delete_option_group,
             save_group_options,
             set_product_option_groups,
             pay_order,
@@ -679,6 +747,10 @@ fn main() {
             reset_pin,
             sales_summary,
             top_products,
+            business_day,
+            close_day,
+            day_closes,
+            reprint_day_close,
             set_setting,
             backup_now,
             check_update,

@@ -28,7 +28,7 @@ fn setup() -> (Pos, Session, Menu) {
     let mut item = |name: &str, price, cat: Option<i64>| {
         pos.create_product(&admin, NewProduct {
             category_id: cat, sku: None, barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false,
+            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false,
         })
         .unwrap()
     };
@@ -122,7 +122,7 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
     let (mut pos, admin, m) = setup();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("receipt.bin");
-    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2 };
+    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0 };
     let mut settings = ReceiptSettings { printer: printer.clone(), ..Default::default() };
 
     // No receipt printer: nothing to print, drawer button explains why.
@@ -136,16 +136,16 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
 
     // Cash: drawer pulse first, then 2 copies.
     let job = pos.payment_print_job(&admin, &paid).unwrap().unwrap();
-    assert!(job.bytes.starts_with(&[0x1B, b'@']) && job.bytes[2..7] == KICK);
-    assert_eq!(count(&job.bytes, &CUT), 2);
+    assert!(job.bytes().starts_with(&[0x1B, b'@']) && job.bytes()[2..7] == KICK);
+    assert_eq!(count(&job.bytes(), &CUT), 2);
     job.send().unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), job.bytes);
+    assert_eq!(std::fs::read(&path).unwrap(), job.bytes());
 
     // Card: receipts only.
     let o = order_everything(&mut pos, &admin, &m);
     let paid = pos.pay_order(&admin, o.id, PaymentMethod::Card, 0).unwrap();
     let job = pos.payment_print_job(&admin, &paid).unwrap().unwrap();
-    assert_eq!((count(&job.bytes, &KICK), count(&job.bytes, &CUT)), (0, 2));
+    assert_eq!((count(&job.bytes(), &KICK), count(&job.bytes(), &CUT)), (0, 2));
 
     // Automatic receipts off: cash still opens the drawer, nothing printed.
     settings.auto_print = false;
@@ -153,7 +153,7 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
     let o = order_everything(&mut pos, &admin, &m);
     let paid = pos.pay_order(&admin, o.id, PaymentMethod::Cash, 5000).unwrap();
     let job = pos.payment_print_job(&admin, &paid).unwrap().unwrap();
-    assert_eq!((count(&job.bytes, &KICK), count(&job.bytes, &CUT)), (1, 0));
+    assert_eq!((count(&job.bytes(), &KICK), count(&job.bytes(), &CUT)), (1, 0));
     // ...and with the drawer off too, there is nothing to send.
     settings.drawer_on_cash = false;
     pos.set_receipt_settings(&admin, &settings).unwrap();
@@ -161,22 +161,22 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
 
     // Manual reprint: always one copy, never the drawer.
     let job = pos.receipt_job(&admin, paid.id).unwrap();
-    assert_eq!((count(&job.bytes, &KICK), count(&job.bytes, &CUT)), (0, 1));
+    assert_eq!((count(&job.bytes(), &KICK), count(&job.bytes(), &CUT)), (0, 1));
 
     // Staff can open the drawer; it is a pulse only.
     pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
     let staff = pos.login("2222").unwrap();
     let job = pos.drawer_job(&staff).unwrap();
-    assert_eq!((count(&job.bytes, &KICK), count(&job.bytes, &CUT)), (1, 0));
+    assert_eq!((count(&job.bytes(), &KICK), count(&job.bytes(), &CUT)), (1, 0));
     // Only admins change receipt settings.
     assert!(matches!(pos.set_receipt_settings(&staff, &settings), Err(PosError::Forbidden)));
     assert!(matches!(pos.test_receipt_job(&staff, &settings, true), Err(PosError::Forbidden)));
 
     // Settings tests: the drawer test is the pulse only; the receipt test has no pulse.
     let drawer_test = pos.test_receipt_job(&admin, &settings, true).unwrap();
-    assert_eq!((count(&drawer_test.bytes, &KICK), count(&drawer_test.bytes, &CUT)), (1, 0));
+    assert_eq!((count(&drawer_test.bytes(), &KICK), count(&drawer_test.bytes(), &CUT)), (1, 0));
     let receipt_test = pos.test_receipt_job(&admin, &settings, false).unwrap();
-    assert_eq!((count(&receipt_test.bytes, &KICK), count(&receipt_test.bytes, &CUT)), (0, 2));
+    assert_eq!((count(&receipt_test.bytes(), &KICK), count(&receipt_test.bytes(), &CUT)), (0, 2));
 }
 
 #[test]
@@ -192,12 +192,12 @@ fn kitchen_copies_and_old_settings_still_load() {
     let o = order_everything(&mut pos, &admin, &m);
     let sent = pos.send_to_kitchen(&admin, o.id).unwrap();
     let job = pos.kitchen_job(&admin, o.id, &sent, false).unwrap().unwrap();
-    assert_eq!(count(&job.bytes, &CUT), 3);
+    assert_eq!(count(&job.bytes(), &CUT), 3);
     let reprint = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
-    assert_eq!(count(&reprint.bytes, &CUT), 1);
+    assert_eq!(count(&reprint.bytes(), &CUT), 1);
 
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0 }).is_err());
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10 }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0 }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0 }).is_err());
 
     // Receipt settings JSON shape (as the UI sends it).
     let rs: ReceiptSettings = serde_json::from_str(

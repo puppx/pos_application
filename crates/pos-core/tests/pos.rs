@@ -25,6 +25,7 @@ fn item(pos: &mut Pos, admin: &Session, name: &str, price: i64, tax_bp: i64, sto
             tax_rate_bp: tax_bp,
             stock_qty: stock.unwrap_or(0),
             track_stock: stock.is_some(),
+            starter: false,
         },
     )
     .unwrap()
@@ -342,7 +343,7 @@ fn price_is_fixed_when_item_is_added() {
     pos.add_item(&admin, o.id, p.id, 1, None, None, &[]).unwrap();
     let upd = ProductUpdate {
         category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 900,
-        cost_cents: 0, tax_rate_bp: 0, track_stock: false, active: true,
+        cost_cents: 0, tax_rate_bp: 0, track_stock: false, active: true, starter: false,
     };
     pos.update_product(&admin, p.id, upd).unwrap();
     // Existing line keeps 5.00; a new tap at 9.00 becomes its own line.
@@ -363,7 +364,7 @@ fn categories_and_menu_order() {
     for (name, cat) in [("Water", Some(drinks.id)), ("Steak", Some(mains.id)), ("Bread", None), ("Cola", Some(drinks.id))] {
         pos.create_product(&admin, NewProduct {
             category_id: cat, sku: None, barcode: None, name: name.into(), price_cents: 100,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false,
+            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false,
         }).unwrap();
     }
     let names: Vec<_> = pos.menu(&admin).unwrap().into_iter().map(|p| p.name).collect();
@@ -371,7 +372,7 @@ fn categories_and_menu_order() {
     assert_eq!(pos.list_categories(&admin, false).unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Mains", "Drinks"]);
     let bad = NewProduct {
         category_id: Some(999), sku: None, barcode: None, name: "X".into(), price_cents: 1,
-        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false,
+        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false,
     };
     assert!(pos.create_product(&admin, bad).is_err());
 }
@@ -382,7 +383,7 @@ fn search_and_barcode_lookup() {
     for (name, code) in [("Coca Cola 330ml", "500"), ("Chocolate Cake", "501"), ("100% Juice", "502")] {
         pos.create_product(&admin, NewProduct {
             category_id: None, sku: None, barcode: Some(code.into()), name: name.into(), price_cents: 100,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false,
+            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false,
         }).unwrap();
     }
     let names = |v: Vec<Product>| v.into_iter().map(|p| p.name).collect::<Vec<_>>();

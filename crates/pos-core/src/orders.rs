@@ -113,6 +113,11 @@ pub struct OrderItem {
     pub options: Vec<ItemOption>,
     /// None until sent to the kitchen.
     pub sent_at: Option<i64>,
+    /// A starter: goes to the kitchen before the rest of a dine-in order.
+    pub starter: bool,
+    /// Held back behind the starters. Unsent and held = waiting for
+    /// "Call mains"; sent and held = it went out in the "MAINS AWAY" round.
+    pub held: bool,
     /// unit price x qty - discount, before tax.
     pub line_total_cents: i64,
     pub tax_cents: i64,
@@ -168,7 +173,10 @@ pub struct OrderSummary {
     pub paid_at: Option<i64>,
     pub total_cents: i64,
     pub item_count: i64,
+    /// Lines not yet sent, excluding mains waiting for "Call mains".
     pub unsent_count: i64,
+    /// Lines waiting for "Call mains".
+    pub held_count: i64,
 }
 
 /// Tax on a pre-tax amount, rounded half up. Prices are tax-exclusive.
@@ -251,7 +259,7 @@ fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
 const TABLE_BUSY: &str = "that table already has an open order";
 
 const ITEM_COLS: &str =
-    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id";
+    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held";
 
 fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
     let (price, rate, qty, disc): (i64, i64, i64, i64) = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
@@ -268,6 +276,8 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         variant_id: r.get(9)?,
         options: Vec::new(),
         sent_at: r.get(8)?,
+        starter: r.get(10)?,
+        held: r.get(11)?,
         line_total_cents: net,
         tax_cents: tax_of(net, rate),
     })
@@ -325,7 +335,8 @@ pub(crate) const SUMMARY_SQL: &str = "
                           + ((i.unit_price_cents * i.qty - i.discount_cents) * i.tax_rate_bp + 5000) / 10000)
                FROM order_items i WHERE i.order_id = o.id), 0),
            (SELECT COALESCE(SUM(qty), 0) FROM order_items i WHERE i.order_id = o.id),
-           (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL)
+           (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 0),
+           (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 1)
     FROM orders o
     JOIN users u ON u.id = o.opened_by
     LEFT JOIN dining_tables t ON t.id = o.table_id
@@ -349,6 +360,7 @@ pub(crate) fn summary_from_row(r: &Row) -> rusqlite::Result<OrderSummary> {
         total_cents: r.get(12)?,
         item_count: r.get(13)?,
         unsent_count: r.get(14)?,
+        held_count: r.get(15)?,
     })
 }
 
@@ -542,9 +554,9 @@ impl Pos {
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, base, rate): (String, i64, i64) = tx
-            .prepare_cached("SELECT name, price_cents, tax_rate_bp FROM products WHERE id = ?1 AND active = 1")?
-            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        let (name, base, rate, starter): (String, i64, i64, bool) = tx
+            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter FROM products WHERE id = ?1 AND active = 1")?
+            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available".into()))?;
         let variant = resolve_variant(&tx, product_id, variant_id)?;
@@ -588,10 +600,10 @@ impl Pos {
                 return invalid("this order has too many lines");
             }
             tx.prepare_cached(
-                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id, starter)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?
-            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id])?;
+            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id, starter])?;
             let item_id = tx.last_insert_rowid();
             let mut ins = tx.prepare_cached(
                 "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents)
@@ -627,6 +639,8 @@ impl Pos {
                     variant_id: r.get(10)?,
                     options: Vec::new(),
                     sent_at: r.get(9)?,
+                    starter: r.get(11)?,
+                    held: r.get(12)?,
                     line_total_cents: 0,
                     tax_cents: 0,
                 };
@@ -670,17 +684,50 @@ impl Pos {
         self.get_order(s, order_id)
     }
 
-    /// Mark all unsent lines as sent. Returns just the newly sent lines,
-    /// i.e. the kitchen ticket for this round.
+    /// Send the next course to the kitchen and return the lines sent, i.e.
+    /// the kitchen ticket for this round.
+    ///
+    /// Dine-in orders are sent course by course: while there are new
+    /// starters to send, or mains are already waiting, only starters go and
+    /// every other new line is held for [`Pos::call_mains`]. Without starters
+    /// everything goes at once. Other order types always send everything.
     pub fn send_to_kitchen(&mut self, s: &Session, order_id: i64) -> Result<Vec<OrderItem>> {
+        self.send_round(s, order_id, false)
+    }
+
+    /// Send everything not yet sent, including mains held behind the
+    /// starters ("Call mains", or "send all courses together").
+    pub fn call_mains(&mut self, s: &Session, order_id: i64) -> Result<Vec<OrderItem>> {
+        self.send_round(s, order_id, true)
+    }
+
+    fn send_round(&mut self, s: &Session, order_id: i64, all: bool) -> Result<Vec<OrderItem>> {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
+        let dine_in: bool =
+            tx.query_row("SELECT order_type = 'dine_in' FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+        let by_course = dine_in && !all && {
+            let (new_starters, waiting): (bool, bool) = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM order_items WHERE order_id = ?1 AND sent_at IS NULL AND held = 0 AND starter = 1),
+                        EXISTS (SELECT 1 FROM order_items WHERE order_id = ?1 AND sent_at IS NULL AND held = 1)",
+                [order_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            new_starters || waiting
+        };
+        if by_course {
+            tx.execute(
+                "UPDATE order_items SET held = 1 WHERE order_id = ?1 AND sent_at IS NULL AND starter = 0",
+                [order_id],
+            )?;
+        }
         let ids: Vec<i64> = tx
             .prepare_cached(
-                "UPDATE order_items SET sent_at = unixepoch() WHERE order_id = ?1 AND sent_at IS NULL RETURNING id",
+                "UPDATE order_items SET sent_at = unixepoch()
+                 WHERE order_id = ?1 AND sent_at IS NULL AND (?2 OR held = 0) RETURNING id",
             )?
-            .query_map([order_id], |r| r.get(0))?
+            .query_map(params![order_id, !by_course], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let sent: Vec<OrderItem> = if ids.is_empty() {
             Vec::new()

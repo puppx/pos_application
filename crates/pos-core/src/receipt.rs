@@ -9,7 +9,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::printing::{category_heading, heading, render_escpos, render_text, repeat_copies, wrap, Line, Size};
+use crate::printing::{category_heading, heading, render_escpos, render_text, wrap, Line, Size};
 use crate::{Order, OrderType, Permission, Pos, PosError, PrintJob, PrinterConfig, PrinterTarget, Result, Session};
 
 const SETTING_KEY: &str = "_receipt_printer";
@@ -106,30 +106,36 @@ pub struct Receipt {
     pub payment: Vec<(String, i64)>,
 }
 
+/// Left text and right-aligned amount on one line; long text wraps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn two_col(v: &mut Vec<Line>, size: Size, bold: bool, left: &str, right: &str, w: usize, indent: &str) {
+    let room = w.saturating_sub(right.chars().count() + 1).max(8);
+    let parts = wrap(left, room, "", indent);
+    let last = parts.len() - 1;
+    for (i, p) in parts.into_iter().enumerate() {
+        let text = if i == last {
+            let pad = w.saturating_sub(p.chars().count() + right.chars().count());
+            format!("{p}{}{right}", " ".repeat(pad))
+        } else {
+            p
+        };
+        v.push(Line::new(size, bold, false, text));
+    }
+}
+
+pub(crate) fn money(currency: &str, cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    format!("{sign}{currency}{}.{:02}", cents.abs() / 100, cents.abs() % 100)
+}
+
 impl Receipt {
     fn money(&self, cents: i64) -> String {
-        let sign = if cents < 0 { "-" } else { "" };
-        format!("{sign}{}{}.{:02}", self.currency, cents.abs() / 100, cents.abs() % 100)
+        money(&self.currency, cents)
     }
 
     fn layout(&self, width: usize) -> Vec<Line> {
         let mut v = Vec::new();
         let big = width / 2;
-        // Left text and right-aligned amount on one line; long text wraps.
-        let two_col = |v: &mut Vec<Line>, size: Size, bold: bool, left: &str, right: &str, w: usize, indent: &str| {
-            let room = w.saturating_sub(right.chars().count() + 1).max(8);
-            let parts = wrap(left, room, "", indent);
-            let last = parts.len() - 1;
-            for (i, p) in parts.into_iter().enumerate() {
-                let text = if i == last {
-                    let pad = w.saturating_sub(p.chars().count() + right.chars().count());
-                    format!("{p}{}{right}", " ".repeat(pad))
-                } else {
-                    p
-                };
-                v.push(Line::new(size, bold, false, text));
-            }
-        };
         for t in wrap(&self.store_name, big, "", "") {
             v.push(Line::new(Size::Big, true, true, t));
         }
@@ -209,7 +215,7 @@ fn lines_of(s: &Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn local_time(ts: i64) -> String {
+pub(crate) fn local_time(ts: i64) -> String {
     chrono::Local
         .timestamp_opt(ts, 0)
         .single()
@@ -321,7 +327,7 @@ impl Pos {
             return invalid("no receipt printer is set up (Settings → Receipt printer)");
         }
         let r = self.receipt(s, order_id)?;
-        Ok(PrintJob { target: cfg.printer.target.clone(), bytes: r.to_escpos(cfg.printer.width) })
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.to_escpos(cfg.printer.width)))
     }
 
     /// What to print right after a payment: the receipt (if automatic,
@@ -332,18 +338,18 @@ impl Pos {
             return Ok(None);
         }
         let drawer = cfg.drawer_on_cash && order.payment_method.as_deref() == Some("cash");
-        let mut bytes = Vec::new();
-        if drawer {
-            bytes.extend_from_slice(&DRAWER_KICK);
-        }
-        if cfg.auto_print {
+        let lead: &[u8] = if drawer { &DRAWER_KICK } else { &[] };
+        let job = if cfg.auto_print {
             let r = self.build_receipt(order, &cfg)?;
-            bytes.extend(repeat_copies(r.to_escpos(cfg.printer.width), cfg.printer.copies));
-        }
+            let p = &cfg.printer;
+            Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width), p.copies, p.copy_delay_secs))
+        } else {
+            drawer.then(|| PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()))
+        };
         if drawer {
             self.audit(Some(s.user_id), "drawer.open", &format!("cash payment, order {}", order.id))?;
         }
-        Ok((!bytes.is_empty()).then_some(PrintJob { target: cfg.printer.target, bytes }))
+        Ok(job)
     }
 
     /// "Open drawer" button (no sale). Logged, so it can be checked later.
@@ -354,7 +360,7 @@ impl Pos {
             return invalid("no receipt printer is set up, so the drawer cannot be opened");
         }
         self.audit(Some(s.user_id), "drawer.open", "no sale")?;
-        Ok(PrintJob { target: cfg.printer.target, bytes: DRAWER_KICK.to_vec() })
+        Ok(PrintJob::new(cfg.printer.target, DRAWER_KICK.to_vec()))
     }
 
     /// Check the settings: a sample receipt (with the configured copies), or
@@ -363,7 +369,7 @@ impl Pos {
         s.require(Permission::ManageSettings)?;
         cfg.validate()?;
         if drawer_only {
-            return Ok(PrintJob { target: cfg.printer.target.clone(), bytes: DRAWER_KICK.to_vec() });
+            return Ok(PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()));
         }
         let r = Receipt {
             store_name: self.setting("store_name")?.unwrap_or_else(|| "POS".into()),
@@ -386,6 +392,7 @@ impl Pos {
             total_cents: 3135,
             payment: vec![("Cash".into(), 4000), ("Change".into(), 865)],
         };
-        Ok(PrintJob { target: cfg.printer.target.clone(), bytes: repeat_copies(r.to_escpos(cfg.printer.width), cfg.printer.copies) })
+        let p = &cfg.printer;
+        Ok(PrintJob::copies(p.target.clone(), &[], r.to_escpos(p.width), p.copies, p.copy_delay_secs))
     }
 }

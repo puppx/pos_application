@@ -10,16 +10,18 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Orders stay open** while you add items over several rounds. *Send to kitchen* marks what has gone; *Move table* moves an order to any free table on any floor.
 - **Menu** with coloured categories, a tap-to-add item grid, notes per item ("no onions"), line discounts and optional stock counting (for example bottled drinks)
 - **Item choices with their own prices**: one menu item sold in versions, e.g. *Tom Yum Soup*: Chicken 6.50 / Beef 7.50 / Prawn 8.50. Set them up in the item's own editor (no option groups needed); the menu shows "from 6.50", staff tap the soup then the meat, and the bill, kitchen ticket and reports show *Tom Yum Soup (Beef)*.
-- **Item options with prices**: sizes, extras and choices such as "Burger size" (pick exactly one), "Extras" (pick up to 5) or "Cooking". Option groups are reusable across items, and each option's price (+ or −) is added to the item.
+- **Item options with prices**: sizes, extras and choices such as "Burger size" (pick exactly one), "Extras" (pick up to 5) or "Cooking". Option groups are reusable across items, and each option's price (+ or −) is added to the item. A group can be paused ("In use") or deleted; deleting removes it from every item, and past orders keep what was chosen.
+- **Starters first, then "Call mains"**: tick **Starter** on menu items (in the menu list or the item editor). On a dine-in order, *Send starters* prints only the starters, with *MAINS TO FOLLOW* at the bottom; everything else waits until you tap **Call mains**, which prints a *MAINS AWAY* ticket. Tick **All courses together** to send everything at once. Takeaway, collection and delivery orders always go in one ticket.
 - **Delivery platforms**: one-tap buttons for Uber Eats, Just Eat and Deliveroo (add, rename, recolour or remove them in Settings). They record the platform's order number, have a *Paid by Uber Eats* button, a ticket heading such as `UBER EATS #7F3K2`, and their own line in reports.
 - **Saved customers** for delivery and collection: find them by any part of their phone number, name or postcode and fill the order in one tap. Edit them on the **Customers** screen, which also shows each customer's recent orders.
 - **Postcode suggestions, free and offline**: typing a postcode lists the addresses already saved there (door number and street), so streets you deliver to often come up instantly. No paid address service or internet connection is used.
 - **Customer receipts and cash drawer**: a receipt prints automatically after payment (your name, address/VAT header and footer), **Print bill** prints the bill before paying, and receipts can be reprinted from History. The cash drawer (plugged into the receipt printer) opens on cash payments and with **Open drawer**, which is logged.
-- **Copies and category grouping**: Settings sets how many copies the kitchen and receipt printers make, and every ticket and receipt lists items under their menu category (STARTERS, MAINS, DRINKS…) in menu order.
+- **Copies, delay and category grouping**: Settings sets how many copies the kitchen and receipt printers make and how many seconds to wait between copies (default 2, so each can be torn off); the first copy prints straight away. Every ticket and receipt lists items under their menu category (STARTERS, MAINS, DRINKS…) in menu order.
 - **Kitchen ticket printing** on *Send to kitchen*, to any ESC/POS thermal printer (USB through Windows, network/IP, or a serial port). Tickets show only the new round, marked *NEW ORDER* or *ADDITIONAL*, with options and notes. A **Reprint** button covers paper jams.
-- **Payment**: cash (with change) or card. Unsent items go to the kitchen automatically when paid.
+- **Finish & Pay**: one button opens the payment screen. Choose **Cash** or **Card** (or *Paid by Uber Eats* for platform orders). For cash, type or tap the amount received (with quick buttons for exact and common notes) and the change is shown as you type, then again in large figures after payment. Unsent items go to the kitchen automatically when paid.
+- **End of day**: **Reports → Close day & print summary** prints the day's sales summary (orders, totals, tax, cash/card, order types, platforms, categories, voids) on the receipt printer and moves to the next business date, shown at the top of the screen. A day runs from one close to the next, so service after midnight still counts for the day it started. All orders must be paid or cancelled first. Previous days can be viewed and reprinted.
 - **PIN login** with **admin** and **staff** roles
-- **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, top items
+- **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items
 - **Backups**: automatic daily copy at startup (last 14 kept), plus "Back up now"
 - **Audit log** of logins, voids, discounts, removed items, menu, floor and user changes
 
@@ -38,7 +40,9 @@ so the UI can be redesigned without touching them.
 
 1. Tap items to add them. Items with options open a picker first; required choices (such as size) must be made. Tapping the same item with the same choices again increases the quantity.
 2. **Send to kitchen** sends only the new items and prints their ticket. You can do this any number of times per order. If the printer is offline, the items still count as sent and the app tells you to use **Reprint kitchen**.
-3. Take payment by cash or card. A table becomes free as soon as its order is paid.
+   On dine-in orders with starters, the button reads **Send starters**: the rest waits (shown as *waits for mains* on the order and *mains waiting* on the table) until you tap **Call mains**.
+3. **Finish & Pay**, then Cash or Card. A table becomes free as soon as its order is paid.
+4. At closing time an admin uses **Reports → Close day & print summary**.
 
 Prices are fixed when an item is added, so menu price changes never alter an open bill.
 Each table can have only one open order at a time.
@@ -216,6 +220,7 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
   src/migrations/    Database upgrades applied on start (never edit a shipped one)
   src/printing.rs    Kitchen tickets: layout, ESC/POS, network/Windows/serial printing
   src/receipt.rs     Customer receipts/bills and the cash drawer pulse
+  src/dayclose.rs    End of day: business date, close, sales summary printout
   src/schema.sql     Database schema (migrations via PRAGMA user_version)
   tests/             Integration tests and the performance benchmark
   examples/          demo_data: a sample restaurant for trying the app
@@ -227,8 +232,7 @@ ui/                  Placeholder UI (index.html, app.js, style.css)
 
 - Final UI design
 - Several kitchen printers with routing by category (e.g. drinks to the bar printer)
-- Courses and "hold/fire"
 - Split bill and partial payments, service charge and tips
 - Delivery status tracking (preparing, out for delivery, delivered) and driver assignment
-- Shifts / cash-up (opening float, end-of-day report per shift)
+- Shifts / cash-up (opening float, counted cash vs expected, report per shift)
 - Code signing for the installer (avoids the Windows SmartScreen warning)

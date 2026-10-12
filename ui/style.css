@@ -68,3 +68,25 @@ button.platform { background:var(--c); border-color:var(--c); color:#fff; }
 .chips button { padding:6px 10px; }
 #update { background:#ecfdf5; border:1px solid var(--accent); border-radius:6px; padding:4px 4px 4px 10px; display:flex; gap:8px; align-items:center; }
 #update button { padding:4px 10px; }
+
+/* courses */
+.badge.held { background:#e0e7ff; color:#3730a3; }
+.tbl .badge { font-size:11px; }
+.lines .badge { margin-left:6px; }
+/* payment dialog */
+#modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:5; }
+.dialog { width:min(460px, calc(100vw - 32px)); max-height:calc(100vh - 32px); overflow:auto; box-shadow:0 10px 40px rgba(0,0,0,.3); }
+.dialog h3 { margin:0; }
+.big { font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
+.huge { font-size:56px; font-weight:800; font-variant-numeric:tabular-nums; color:var(--accent); }
+button.pay { width:100%; font-size:20px; padding:14px; }
+.paygrid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.paybig { font-size:22px; padding:22px 10px; }
+.paygrid .platform { grid-column:span 2; }
+.amount { flex:1; text-align:right; font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; }
+.change { font-size:24px; font-weight:700; color:var(--accent); text-align:right; }
+.change.short { color:var(--danger); font-size:18px; }
+.keypad { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; }
+.keypad button { height:54px; font-size:22px; }
+/* end of day */
+pre.report { background:#fff; border:1px dashed var(--line); padding:10px; font:13px/1.35 Consolas, "Courier New", monospace; max-height:420px; overflow:auto; user-select:text; }

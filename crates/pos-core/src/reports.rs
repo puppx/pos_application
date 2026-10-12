@@ -1,9 +1,9 @@
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Permission, Pos, Result, Session};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupTotal {
     /// Payment method ("cash", "card"...) or order type ("dine_in", "delivery"...).
     pub key: String,
@@ -11,7 +11,7 @@ pub struct GroupTotal {
     pub total_cents: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SalesSummary {
     pub from: i64,
     pub to: i64,
@@ -27,6 +27,10 @@ pub struct SalesSummary {
     pub by_type: Vec<GroupTotal>,
     /// Delivery platforms; orders taken directly are under "Direct".
     pub by_channel: Vec<GroupTotal>,
+    /// Menu categories: `count` is items sold, `total_cents` is sales after
+    /// discounts and before tax (so they add up to subtotal - discount).
+    #[serde(default)]
+    pub by_category: Vec<GroupTotal>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +74,7 @@ impl Pos {
                     by_payment: Vec::new(),
                     by_type: Vec::new(),
                     by_channel: Vec::new(),
+                    by_category: Vec::new(),
                 })
             })?;
         sum.cancelled_count = self
@@ -99,6 +104,18 @@ impl Pos {
             Ok(GroupTotal { key: r.get(0)?, count: r.get(1)?, total_cents: r.get(2)? })
         })?;
         sum.by_channel = rows.collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT COALESCE(c.name, 'Other'), SUM(i.qty), SUM(i.unit_price_cents * i.qty - i.discount_cents)
+             FROM orders o JOIN order_items i ON i.order_id = o.id
+             JOIN products p ON p.id = i.product_id
+             LEFT JOIN categories c ON c.id = p.category_id
+             WHERE o.paid_at >= ?1 AND o.paid_at < ?2 AND o.status = 'paid'
+             GROUP BY c.id ORDER BY c.id IS NULL, c.sort_order, c.name",
+        )?;
+        let rows = stmt.query_map(params![from, to], |r| {
+            Ok(GroupTotal { key: r.get(0)?, count: r.get(1)?, total_cents: r.get(2)? })
+        })?;
+        sum.by_category = rows.collect::<rusqlite::Result<_>>()?;
         Ok(sum)
     }
 

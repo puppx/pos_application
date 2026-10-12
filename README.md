@@ -14,6 +14,8 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Delivery platforms**: one-tap buttons for Uber Eats, Just Eat and Deliveroo (add, rename, recolour or remove them in Settings). They record the platform's order number, have a *Paid by Uber Eats* button, a ticket heading such as `UBER EATS #7F3K2`, and their own line in reports.
 - **Saved customers** for delivery and collection: find them by any part of their phone number, name or postcode and fill the order in one tap. Edit them on the **Customers** screen, which also shows each customer's recent orders.
 - **Postcode suggestions, free and offline**: typing a postcode lists the addresses already saved there (door number and street), so streets you deliver to often come up instantly. No paid address service or internet connection is used.
+- **Customer receipts and cash drawer**: a receipt prints automatically after payment (your name, address/VAT header and footer), **Print bill** prints the bill before paying, and receipts can be reprinted from History. The cash drawer (plugged into the receipt printer) opens on cash payments and with **Open drawer**, which is logged.
+- **Copies and category grouping**: Settings sets how many copies the kitchen and receipt printers make, and every ticket and receipt lists items under their menu category (STARTERS, MAINS, DRINKS…) in menu order.
 - **Kitchen ticket printing** on *Send to kitchen*, to any ESC/POS thermal printer (USB through Windows, network/IP, or a serial port). Tickets show only the new round, marked *NEW ORDER* or *ADDITIONAL*, with options and notes. A **Reprint** button covers paper jams.
 - **Payment**: cash (with change) or card. Unsent items go to the kitchen automatically when paid.
 - **PIN login** with **admin** and **staff** roles
@@ -72,6 +74,15 @@ Ground
 
 Printing happens after the order is saved and never blocks the till. A printer
 that is off or unreachable gives up after 4 seconds and shows an error.
+
+### Receipt printer and cash drawer
+
+**Settings → Receipt printer & cash drawer** works the same way (it can be the same
+printer as the kitchen one). Also set the number of copies, whether a receipt prints
+automatically after payment, whether the drawer opens for cash, the currency symbol,
+and the header (address, phone, VAT number) and footer lines. Use **Print test receipt**
+and **Test cash drawer** before saving. The drawer must be cabled to the receipt
+printer's drawer (RJ11/DK) port.
 
 ## Try it with demo data
 
@@ -189,6 +200,7 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
   src/variants.rs    Item choices with their own prices (soup: chicken / beef)
   src/migrations/    Database upgrades applied on start (never edit a shipped one)
   src/printing.rs    Kitchen tickets: layout, ESC/POS, network/Windows/serial printing
+  src/receipt.rs     Customer receipts/bills and the cash drawer pulse
   src/schema.sql     Database schema (migrations via PRAGMA user_version)
   tests/             Integration tests and the performance benchmark
   examples/          demo_data: a sample restaurant for trying the app
@@ -199,7 +211,6 @@ ui/                  Placeholder UI (index.html, app.js, style.css)
 ## Next steps (not built yet)
 
 - Final UI design
-- Customer receipts / bills on the same printers, plus cash-drawer kick
 - Several kitchen printers with routing by category (e.g. drinks to the bar printer)
 - Courses and "hold/fire"
 - Split bill and partial payments, service charge and tips

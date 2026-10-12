@@ -457,10 +457,11 @@ async function renderOrder() {
     // Anything not yet sent goes to the kitchen with the payment.
     let printError = null;
     if (order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId })).print.error;
-    const paid = await call('pay_order', { orderId, method, tenderedCents });
+    const { order: paid, print: receipt } = await call('pay_order', { orderId, method, tenderedCents });
     const msg = `Order #${paid.id} paid: ${money(paid.total_cents)}` + (paid.change_cents ? ` · change ${money(paid.change_cents)}` : '');
     closeOrder();
     if (printError) toast(`${msg}. Kitchen ticket did not print (${printError}); reprint it from History.`, true);
+    else if (receipt.error) toast(`${msg}. Receipt/drawer did not work (${receipt.error}); reprint from History.`, true);
     else toast(msg);
   });
 
@@ -561,6 +562,8 @@ async function renderOrder() {
           ? h('button', { onclick: showMove }, 'Move table')
           : h('button', { onclick: showDetails }, 'Customer'),
         h('button', { onclick: act(async () => reportPrint(await call('reprint_kitchen', { orderId }), 'Kitchen ticket reprinted', true)) }, 'Reprint kitchen'),
+        h('button', { onclick: act(async () => printResult(await call('print_receipt', { orderId }), 'Bill printed')) }, 'Print bill'),
+        h('button', { onclick: act(async () => printResult(await call('open_drawer'), 'Drawer opened')) }, 'Open drawer'),
         h('button', { class: 'danger', onclick: showCancel }, 'Cancel order')),
       extra)));
   search.focus();
@@ -714,6 +717,9 @@ function orderDetail(o, onChange) {
     h('div', {}, `Tax ${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
       o.tendered_cents != null ? ` · Tendered ${money(o.tendered_cents)} · Change ${money(o.change_cents)}` : ''),
     o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
+    o.status !== 'cancelled' && h('div', {}, h('button', { onclick: act(async () => {
+      printResult(await call('print_receipt', { orderId: o.id }), o.status === 'paid' ? 'Receipt printed' : 'Printed');
+    }) }, o.status === 'paid' ? 'Reprint receipt' : 'Print')),
     o.status === 'paid' && h('div', {}, h('button', { onclick: act(async () => {
       const p = await call('reprint_kitchen', { orderId: o.id });
       if (p.error) toast(`Did not print: ${p.error}`, true);
@@ -783,7 +789,8 @@ async function renderOrders() {
       h('button', { class: 'primary', onclick: newOrder('collection') }, '+ Collection'),
       h('button', { class: 'primary', onclick: newOrder('delivery') }, '+ Delivery'),
       channels.map((ch) => h('button', { class: 'platform', style: `--c:${ch.color || '#374151'}`, onclick: platformOrder(ch) }, `+ ${ch.name}`)),
-      h('span', { class: 'muted' }, 'Dine-in orders start from the Tables screen.')),
+      h('span', { class: 'muted', style: 'flex:1' }, 'Dine-in orders start from the Tables screen.'),
+      h('button', { onclick: act(async () => printResult(await call('open_drawer'), 'Drawer opened')) }, 'Open drawer')),
     form, h('h3', {}, 'Open orders'), board));
   await draw();
   live(draw);
@@ -1292,29 +1299,27 @@ function platformsCard() {
   return card;
 }
 
-async function renderSettings() {
-  const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
-  const [printer, systemPrinters] = await Promise.all([call('get_kitchen_printer'), call('list_system_printers')]);
-
-  // --- kitchen printer ---
+/// Connection, paper and copies for one printer (kitchen or receipt).
+function printerForm(cfg, systemPrinters, noneLabel) {
   const kind = h('select', {},
-    h('option', { value: 'none' }, 'No kitchen printer'),
+    h('option', { value: 'none' }, noneLabel),
     h('option', { value: 'network' }, 'Network printer (IP address)'),
     h('option', { value: 'windows' }, 'Printer installed in Windows (USB)'),
     h('option', { value: 'file' }, 'Serial port or shared printer path'));
-  kind.value = printer.kind;
-  const host = h('input', { value: printer.host ?? '', placeholder: '192.168.1.50' });
-  const port = h('input', { value: printer.port ?? 9100, inputmode: 'numeric', style: 'width:90px' });
+  kind.value = cfg.kind;
+  const host = h('input', { value: cfg.host ?? '', placeholder: '192.168.1.50' });
+  const port = h('input', { value: cfg.port ?? 9100, inputmode: 'numeric', style: 'width:90px' });
   const winName = systemPrinters.length
     ? h('select', {}, systemPrinters.map((n) => h('option', { value: n }, n)))
     : h('input', { placeholder: 'Printer name as shown in Windows' });
-  if (printer.name) {
-    if (systemPrinters.length && !systemPrinters.includes(printer.name)) winName.append(h('option', { value: printer.name }, printer.name));
-    winName.value = printer.name;
+  if (cfg.name) {
+    if (systemPrinters.length && !systemPrinters.includes(cfg.name)) winName.append(h('option', { value: cfg.name }, cfg.name));
+    winName.value = cfg.name;
   }
-  const path = h('input', { value: printer.path ?? '', placeholder: 'COM3 or \\\\PC-NAME\\Kitchen', style: 'width:260px' });
+  const path = h('input', { value: cfg.path ?? '', placeholder: 'COM3 or \\\\PC-NAME\\Kitchen', style: 'width:260px' });
   const width = h('select', {}, h('option', { value: 42 }, '80 mm paper'), h('option', { value: 32 }, '58 mm paper'), h('option', { value: 48 }, '80 mm, small font (48)'));
-  width.value = String(printer.width ?? 42);
+  width.value = String(cfg.width ?? 42);
+  const copies = h('input', { type: 'number', min: 1, max: 9, value: cfg.copies ?? 1, style: 'width:70px' });
   const fields = h('div', { class: 'row' });
   const drawFields = () => fields.replaceChildren(...{
     none: [],
@@ -1324,11 +1329,38 @@ async function renderSettings() {
   }[kind.value]);
   kind.onchange = drawFields;
   drawFields();
-  const config = () => ({
-    kind: kind.value, width: Number(width.value),
-    ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
-    ...(kind.value === 'windows' && { name: winName.value }),
-    ...(kind.value === 'file' && { path: path.value.trim() }),
+  return {
+    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies), fields),
+    none: () => kind.value === 'none',
+    config: () => ({
+      kind: kind.value, width: Number(width.value), copies: Math.min(9, Math.max(1, parseInt(copies.value, 10) || 1)),
+      ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
+      ...(kind.value === 'windows' && { name: winName.value }),
+      ...(kind.value === 'file' && { path: path.value.trim() }),
+    }),
+  };
+}
+
+const printResult = (r, ok) => toast(r.error ? `Did not print: ${r.error}` : ok, !!r.error);
+
+async function renderSettings() {
+  const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
+  const [kitchenCfg, receiptCfg, systemPrinters] = await Promise.all([
+    call('get_kitchen_printer'), call('get_receipt_settings'), call('list_system_printers'),
+  ]);
+
+  const kitchen = printerForm(kitchenCfg, systemPrinters, 'No kitchen printer');
+
+  const receipt = printerForm(receiptCfg, systemPrinters, 'No receipt printer');
+  const autoPrint = h('input', { type: 'checkbox', checked: receiptCfg.auto_print });
+  const drawer = h('input', { type: 'checkbox', checked: receiptCfg.drawer_on_cash });
+  const header = h('textarea', { rows: 3, style: 'width:100%', placeholder: 'Address, phone, VAT number… (one per line)' });
+  header.value = receiptCfg.header ?? '';
+  const footer = h('input', { value: receiptCfg.footer ?? '', placeholder: 'e.g. Thank you for your visit!', style: 'flex:1' });
+  const currency = h('input', { value: receiptCfg.currency ?? '£', style: 'width:60px' });
+  const receiptSettings = () => ({
+    ...receipt.config(), auto_print: autoPrint.checked, drawer_on_cash: drawer.checked,
+    header: header.value.trim() || null, footer: footer.value.trim() || null, currency: currency.value,
   });
 
   screen(h('div', { class: 'stack', style: 'max-width:760px' },
@@ -1341,19 +1373,41 @@ async function renderSettings() {
       }) }, 'Save'))),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Kitchen printer'),
-      h('div', { class: 'muted' }, 'Tickets print on "Send to kitchen" on any ESC/POS thermal printer (Epson, Star, Xprinter…). ' +
+      h('div', { class: 'muted' }, 'Tickets print on "Send to kitchen", grouped by menu category, on any ESC/POS thermal printer (Epson, Star, Xprinter…). ' +
         'For USB printers choose "installed in Windows"; for network printers use the IP address from its self-test page.'),
-      h('div', { class: 'row' }, kind, width), fields,
+      kitchen.el,
       h('div', { class: 'row' },
         h('button', { onclick: act(async () => {
-          if (kind.value === 'none') return toast('Choose a printer first', true);
-          const r = await call('test_kitchen_printer', { config: config() });
-          toast(r.error ? `Test failed: ${r.error}` : 'Test ticket sent', !!r.error);
+          if (kitchen.none()) return toast('Choose a printer first', true);
+          printResult(await call('test_kitchen_printer', { config: kitchen.config() }), 'Test ticket sent');
         }) }, 'Print test ticket'),
         h('button', { class: 'primary', onclick: act(async () => {
-          await call('set_kitchen_printer', { config: config() });
+          await call('set_kitchen_printer', { config: kitchen.config() });
           toast('Kitchen printer saved');
-        }) }, 'Save printer'))),
+        }) }, 'Save kitchen printer'))),
+    h('div', { class: 'card stack' },
+      h('h3', {}, 'Receipt printer & cash drawer'),
+      h('div', { class: 'muted' }, 'Customer receipts and bills, grouped by menu category. The cash drawer plugs into this printer. ' +
+        'It can be the same printer as the kitchen one.'),
+      receipt.el,
+      h('label', {}, autoPrint, ' Print a receipt automatically after payment'),
+      h('label', {}, drawer, ' Open the cash drawer for cash payments'),
+      h('div', { class: 'row' }, 'Currency symbol', currency),
+      header,
+      h('div', { class: 'row' }, footer),
+      h('div', { class: 'row' },
+        h('button', { onclick: act(async () => {
+          if (receipt.none()) return toast('Choose a printer first', true);
+          printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: false }), 'Test receipt sent');
+        }) }, 'Print test receipt'),
+        h('button', { onclick: act(async () => {
+          if (receipt.none()) return toast('Choose a printer first', true);
+          printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: true }), 'Drawer opened');
+        }) }, 'Test cash drawer'),
+        h('button', { class: 'primary', onclick: act(async () => {
+          await call('set_receipt_settings', { settings: receiptSettings() });
+          toast('Receipt settings saved');
+        }) }, 'Save receipt settings'))),
     platformsCard(),
     h('div', { class: 'card stack' },
       h('h3', {}, 'About'),

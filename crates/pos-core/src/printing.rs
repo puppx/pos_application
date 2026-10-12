@@ -1,5 +1,6 @@
 //! Kitchen tickets for ESC/POS thermal printers (Epson TM, Star, Xprinter and
-//! the many compatibles).
+//! the many compatibles), plus the shared layout and printer transports used
+//! by customer receipts (see `receipt.rs`).
 //!
 //! Building a ticket needs the database; sending it does not. Callers build a
 //! [`PrintJob`] while holding the database, release it, then call
@@ -39,22 +40,32 @@ pub struct PrinterConfig {
     /// Characters per line in the normal font: 42 for 80 mm paper, 32 for 58 mm.
     #[serde(default = "default_width")]
     pub width: usize,
+    /// How many copies each automatic print makes (manual reprints make one).
+    #[serde(default = "one")]
+    pub copies: u8,
 }
 
 fn default_width() -> usize {
     42
 }
 
+fn one() -> u8 {
+    1
+}
+
 impl Default for PrinterConfig {
     fn default() -> Self {
-        PrinterConfig { target: PrinterTarget::None, width: default_width() }
+        PrinterConfig { target: PrinterTarget::None, width: default_width(), copies: 1 }
     }
 }
 
 impl PrinterConfig {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if !(24..=64).contains(&self.width) {
             return invalid("paper width must be between 24 and 64 characters");
+        }
+        if !(1..=9).contains(&self.copies) {
+            return invalid("copies must be between 1 and 9");
         }
         match &self.target {
             PrinterTarget::Network { host, port } if host.trim().is_empty() || *port == 0 => {
@@ -112,6 +123,8 @@ pub fn system_printers() -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketItem {
+    /// Menu category, used to group the ticket ("STARTERS", "MAINS"...).
+    pub category: Option<String>,
     pub qty: i64,
     pub name: String,
     pub options: Vec<String>,
@@ -133,7 +146,7 @@ pub struct KitchenTicket {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Size {
+pub(crate) enum Size {
     Normal,
     /// Double height: same characters per line, easy to read from a distance.
     Tall,
@@ -141,16 +154,71 @@ enum Size {
     Big,
 }
 
-struct Line {
-    size: Size,
-    bold: bool,
-    center: bool,
-    text: String,
+pub(crate) struct Line {
+    pub size: Size,
+    pub bold: bool,
+    pub center: bool,
+    pub text: String,
+}
+
+impl Line {
+    pub fn new(size: Size, bold: bool, center: bool, text: impl Into<String>) -> Line {
+        Line { size, bold, center, text: text.into() }
+    }
+}
+
+/// Category heading such as "-- STARTERS --".
+pub(crate) fn category_heading(name: Option<&str>) -> String {
+    format!("-- {} --", name.unwrap_or("Other").to_uppercase())
+}
+
+/// Plain-text rendering of laid-out lines (previews and tests).
+pub(crate) fn render_text(lines: &[Line], width: usize) -> String {
+    let mut s = String::new();
+    for l in lines {
+        let w = if l.size == Size::Big { width / 2 } else { width };
+        let pad = if l.center { w.saturating_sub(l.text.chars().count()) / 2 } else { 0 };
+        s.push_str(&" ".repeat(pad));
+        s.push_str(l.text.trim_end());
+        s.push('\n');
+    }
+    s
+}
+
+/// ESC/POS bytes for laid-out lines, code page 437, ending with a feed and
+/// partial cut.
+pub(crate) fn render_escpos(lines: &[Line]) -> Vec<u8> {
+    let mut b = vec![0x1B, b'@', 0x1B, b't', 0]; // init, code page 437
+    for l in lines {
+        b.extend_from_slice(&[0x1B, b'a', u8::from(l.center)]);
+        b.extend_from_slice(&[0x1D, b'!', match l.size {
+            Size::Normal => 0x00,
+            Size::Tall => 0x01,
+            Size::Big => 0x11,
+        }]);
+        b.extend_from_slice(&[0x1B, b'E', u8::from(l.bold)]);
+        b.extend(l.text.trim_end().chars().map(cp437));
+        b.push(b'\n');
+    }
+    b.extend_from_slice(&[0x1D, b'!', 0, 0x1B, b'E', 0, 0x1B, b'a', 0]);
+    b.extend_from_slice(&[0x1B, b'd', 4]); // feed past the cutter
+    b.extend_from_slice(&[0x1D, b'V', 66, 0]); // partial cut
+    b
+}
+
+/// The same document `copies` times (each one cut separately).
+pub(crate) fn repeat_copies(doc: Vec<u8>, copies: u8) -> Vec<u8> {
+    let n = usize::from(copies.max(1));
+    let mut out = Vec::with_capacity(doc.len() * n);
+    for _ in 0..n {
+        out.extend_from_slice(&doc);
+    }
+    out
 }
 
 /// Word-wrap `text` to `width` columns. The first line starts with `first`,
 /// continuation lines with `indent`; over-long words are split.
-fn wrap(text: &str, width: usize, first: &str, indent: &str) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize, first: &str, indent: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = first.to_string();
     let mut start = first.chars().count();
@@ -204,7 +272,17 @@ impl KitchenTicket {
         }
         push(Size::Normal, false, false, format!("#{}  {}  {}", self.order_id, self.time, self.staff));
         push(Size::Normal, false, false, "-".repeat(width));
+        let grouped = self.items.iter().any(|i| i.category.is_some());
+        let mut current: Option<Option<&str>> = None;
         for it in &self.items {
+            let cat = it.category.as_deref();
+            if grouped && current != Some(cat) {
+                if current.is_some() {
+                    push(Size::Normal, false, false, String::new());
+                }
+                push(Size::Normal, true, true, category_heading(cat));
+                current = Some(cat);
+            }
             for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), width, "", "    ").into_iter().enumerate() {
                 push(Size::Tall, i == 0, false, t);
             }
@@ -225,40 +303,17 @@ impl KitchenTicket {
 
     /// Plain-text rendering (previews and tests).
     pub fn to_text(&self, width: usize) -> String {
-        let mut s = String::new();
-        for l in self.lines(width) {
-            let w = if l.size == Size::Big { width / 2 } else { width };
-            let pad = if l.center { w.saturating_sub(l.text.chars().count()) / 2 } else { 0 };
-            s.push_str(&" ".repeat(pad));
-            s.push_str(l.text.trim_end());
-            s.push('\n');
-        }
-        s
+        render_text(&self.lines(width), width)
     }
 
     /// ESC/POS bytes, code page 437, ending with a feed and partial cut.
     pub fn to_escpos(&self, width: usize) -> Vec<u8> {
-        let mut b = vec![0x1B, b'@', 0x1B, b't', 0]; // init, code page 437
-        for l in self.lines(width) {
-            b.extend_from_slice(&[0x1B, b'a', u8::from(l.center)]);
-            b.extend_from_slice(&[0x1D, b'!', match l.size {
-                Size::Normal => 0x00,
-                Size::Tall => 0x01,
-                Size::Big => 0x11,
-            }]);
-            b.extend_from_slice(&[0x1B, b'E', u8::from(l.bold)]);
-            b.extend(l.text.trim_end().chars().map(cp437));
-            b.push(b'\n');
-        }
-        b.extend_from_slice(&[0x1D, b'!', 0, 0x1B, b'E', 0, 0x1B, b'a', 0]);
-        b.extend_from_slice(&[0x1B, b'd', 4]); // feed past the cutter
-        b.extend_from_slice(&[0x1D, b'V', 66, 0]); // partial cut
-        b
+        render_escpos(&self.lines(width))
     }
 }
 
 /// Map a character to code page 437, the default on ESC/POS printers.
-fn cp437(c: char) -> u8 {
+pub(crate) fn cp437(c: char) -> u8 {
     if c.is_ascii() && !c.is_ascii_control() {
         return c as u8;
     }
@@ -273,7 +328,7 @@ fn cp437(c: char) -> u8 {
     }
 }
 
-fn heading(o: &Order) -> String {
+pub(crate) fn heading(o: &Order) -> String {
     if let Some(ch) = &o.channel_name {
         let r = o.external_ref.as_deref().map(|r| format!(" {r}")).unwrap_or_default();
         return format!("{}{r}", ch.to_uppercase());
@@ -287,6 +342,24 @@ fn heading(o: &Order) -> String {
 }
 
 impl Pos {
+    /// Items in menu-category order (category position, then name; items
+    /// without a category last), each with its category name. Within a
+    /// category the order they were added is kept.
+    pub(crate) fn by_category<'a>(&self, items: &'a [OrderItem]) -> Result<Vec<(Option<String>, &'a OrderItem)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT c.name, c.sort_order FROM products p LEFT JOIN categories c ON c.id = p.category_id
+             WHERE p.id = ?1",
+        )?;
+        let mut keyed = Vec::with_capacity(items.len());
+        for (i, it) in items.iter().enumerate() {
+            let (name, sort): (Option<String>, Option<i64>) =
+                stmt.query_row([it.product_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.unwrap_or((None, None));
+            keyed.push(((name.is_none(), sort.unwrap_or(0), name.clone().unwrap_or_default(), i), name, it));
+        }
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(keyed.into_iter().map(|(_, n, it)| (n, it)).collect())
+    }
+
     pub fn kitchen_printer(&self) -> Result<PrinterConfig> {
         let raw: Option<String> = self
             .conn
@@ -335,9 +408,11 @@ impl Pos {
             order_id,
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: s.name.clone(),
-            items: items
-                .iter()
-                .map(|i| TicketItem {
+            items: self
+                .by_category(items)?
+                .into_iter()
+                .map(|(category, i)| TicketItem {
+                    category,
                     qty: i.qty,
                     name: i.name.clone(),
                     options: i.options.iter().map(|o| o.name.clone()).collect(),
@@ -354,7 +429,8 @@ impl Pos {
             return Ok(None);
         }
         let ticket = self.kitchen_ticket(s, order_id, items, reprint)?;
-        Ok(Some(PrintJob { target: cfg.target, bytes: ticket.to_escpos(cfg.width) }))
+        let copies = if reprint { 1 } else { cfg.copies };
+        Ok(Some(PrintJob { target: cfg.target, bytes: repeat_copies(ticket.to_escpos(cfg.width), copies) }))
     }
 
     /// Everything already sent on an order, for "Reprint".
@@ -378,14 +454,24 @@ impl Pos {
             order_id: 0,
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: s.name.clone(),
-            items: vec![TicketItem {
-                qty: 2,
-                name: "Example burger".into(),
-                options: vec!["Large".into(), "Extra cheese".into()],
-                note: Some("no onions".into()),
-            }],
+            items: vec![
+                TicketItem {
+                    category: Some("Starters".into()),
+                    qty: 1,
+                    name: "Soup of the day".into(),
+                    options: vec![],
+                    note: None,
+                },
+                TicketItem {
+                    category: Some("Mains".into()),
+                    qty: 2,
+                    name: "Example burger".into(),
+                    options: vec!["Large".into(), "Extra cheese".into()],
+                    note: Some("no onions".into()),
+                },
+            ],
         };
-        Ok(PrintJob { target: cfg.target.clone(), bytes: ticket.to_escpos(cfg.width) })
+        Ok(PrintJob { target: cfg.target.clone(), bytes: repeat_copies(ticket.to_escpos(cfg.width), cfg.copies) })
     }
 }
 
@@ -496,8 +582,8 @@ mod tests {
             time: "19:05".into(),
             staff: "Sam".into(),
             items: vec![
-                TicketItem { qty: 2, name: "Burger".into(), options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
-                TicketItem { qty: 1, name: "Crème brûlée".into(), options: vec![], note: None },
+                TicketItem { category: None, qty: 2, name: "Burger".into(), options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
+                TicketItem { category: None, qty: 1, name: "Crème brûlée".into(), options: vec![], note: None },
             ],
         }
     }
@@ -559,7 +645,7 @@ mod tests {
         let cfg: PrinterConfig = serde_json::from_str(r#"{"kind":"network","host":"192.168.1.50","port":9100}"#).unwrap();
         assert_eq!(cfg.width, 42);
         assert_eq!(cfg.target, PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 });
-        assert!(PrinterConfig { target: PrinterTarget::Windows { name: " ".into() }, width: 42 }.validate().is_err());
-        assert!(PrinterConfig { target: PrinterTarget::None, width: 10 }.validate().is_err());
+        assert!(PrinterConfig { target: PrinterTarget::Windows { name: " ".into() }, width: 42, copies: 1 }.validate().is_err());
+        assert!(PrinterConfig { target: PrinterTarget::None, width: 10, copies: 1 }.validate().is_err());
     }
 }

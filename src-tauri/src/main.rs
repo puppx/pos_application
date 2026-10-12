@@ -376,6 +376,36 @@ fn reprint_kitchen(app: Cmd<'_>, order_id: i64) -> Result<PrintOutcome> {
     Ok(print(job))
 }
 
+// ---- receipts and cash drawer ----
+
+#[tauri::command(async)]
+fn print_receipt(app: Cmd<'_>, order_id: i64) -> Result<PrintOutcome> {
+    let job = app.with_session(|pos, s| pos.receipt_job(s, order_id))?;
+    Ok(print(Some(job)))
+}
+
+#[tauri::command(async)]
+fn open_drawer(app: Cmd<'_>) -> Result<PrintOutcome> {
+    let job = app.with_session(|pos, s| pos.drawer_job(s))?;
+    Ok(print(Some(job)))
+}
+
+#[tauri::command(async)]
+fn get_receipt_settings(app: Cmd<'_>) -> Result<ReceiptSettings> {
+    app.with_session(|pos, _| pos.receipt_settings())
+}
+
+#[tauri::command(async)]
+fn set_receipt_settings(app: Cmd<'_>, settings: ReceiptSettings) -> Result<()> {
+    app.with_session(|pos, s| pos.set_receipt_settings(s, &settings))
+}
+
+#[tauri::command(async)]
+fn test_receipt_printer(app: Cmd<'_>, settings: ReceiptSettings, drawer_only: bool) -> Result<PrintOutcome> {
+    let job = app.with_session(|pos, s| pos.test_receipt_job(s, &settings, drawer_only))?;
+    Ok(print(Some(job)))
+}
+
 // ---- kitchen printer setup (admin) ----
 
 #[tauri::command(async)]
@@ -400,9 +430,21 @@ fn list_system_printers(app: Cmd<'_>) -> Result<Vec<String>> {
     Ok(system_printers())
 }
 
+#[derive(Serialize)]
+struct PayResult {
+    order: Order,
+    /// Receipt and/or cash drawer, per Settings > Receipt printer.
+    print: PrintOutcome,
+}
+
 #[tauri::command(async)]
-fn pay_order(app: Cmd<'_>, order_id: i64, method: PaymentMethod, tendered_cents: i64) -> Result<Order> {
-    app.with_session(|pos, s| pos.pay_order(s, order_id, method, tendered_cents))
+fn pay_order(app: Cmd<'_>, order_id: i64, method: PaymentMethod, tendered_cents: i64) -> Result<PayResult> {
+    let (order, job) = app.with_session(|pos, s| {
+        let order = pos.pay_order(s, order_id, method, tendered_cents)?;
+        let job = pos.payment_print_job(s, &order)?;
+        Ok((order, job))
+    })?;
+    Ok(PayResult { order, print: print(job) })
 }
 
 #[tauri::command(async)]
@@ -551,6 +593,11 @@ fn main() {
             update_item,
             send_to_kitchen,
             reprint_kitchen,
+            print_receipt,
+            open_drawer,
+            get_receipt_settings,
+            set_receipt_settings,
+            test_receipt_printer,
             get_kitchen_printer,
             set_kitchen_printer,
             test_kitchen_printer,

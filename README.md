@@ -151,10 +151,12 @@ PC that lacks it (Windows 10/11 normally have it).
 
 1. Bump the version in **both** `Cargo.toml` (`[workspace.package]`) and `src-tauri/tauri.conf.json`.
 2. If the database changes, **append** a migration (never edit `schema.sql`, it has shipped). See `MIGRATIONS` in `crates/pos-core/src/lib.rs`.
-3. Commit, then tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
+3. Commit and push to `main`.
+4. On GitHub open **Actions → Windows build → Run workflow**, tick **Publish a release** and run it
+   (or push a tag such as `v0.2.0`).
 
 The **Windows build** workflow tests, builds the installers and publishes the
-release. Every push to `main` also builds installers you can download from the
+release, tagged `v` + the app version. Every push to `main` also builds installers you can download from the
 run's *Artifacts* section without making a release.
 
 ### On a Windows PC

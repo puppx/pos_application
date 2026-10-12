@@ -180,7 +180,57 @@ function go(view) {
   renderShell();
 }
 
+// ---------- automatic updates ----------
+
+let updateTimer;
+/// Check GitHub Releases for a newer signed version; show it in the header.
+/// Silent when offline. Returns the check result (or null on failure).
+async function checkForUpdate(quiet = true) {
+  let info;
+  try {
+    info = await invoke('check_update');
+  } catch (e) {
+    if (!quiet) toast(String(e?.message ?? e), true);
+    return null;
+  }
+  state.update = info;
+  drawUpdateBar();
+  return info;
+}
+
+/// Header bar for an available update; the install button is for admins.
+function drawUpdateBar() {
+  const bar = document.getElementById('update');
+  const v = state.update?.available;
+  bar.hidden = !v || !state.session;
+  if (v) {
+    bar.replaceChildren(`Update ${v} available `,
+      isAdmin()
+        ? h('button', { class: 'primary', onclick: installUpdate }, 'Install update')
+        : h('span', { class: 'muted' }, '(ask an admin to install)'));
+  }
+}
+
+const installUpdate = act(async (ev) => {
+  const btn = ev?.target;
+  if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+  toast('Downloading the update. The app will close and reopen by itself in a moment.');
+  try {
+    await call('install_update');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Install update'; }
+  }
+});
+
+function startUpdateChecks() {
+  if (updateTimer) return;
+  checkForUpdate();
+  updateTimer = setInterval(checkForUpdate, 6 * 60 * 60 * 1000);
+}
+
 function renderShell() {
+  startUpdateChecks();
+  drawUpdateBar();
   if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin()))) state.view = 'floor';
   document.getElementById('bar').hidden = false;
   document.getElementById('who').textContent = `${state.session.name} (${state.session.role})`;
@@ -1412,7 +1462,12 @@ async function renderSettings() {
     h('div', { class: 'card stack' },
       h('h3', {}, 'About'),
       h('div', {}, `POS version ${state.version}`),
-      h('div', { class: 'muted' }, 'To update, download the newer POS_x.y.z_x64-setup.exe from the GitHub Releases page and run it. Your data is kept.')),
+      h('div', { class: 'muted' }, 'The app checks for updates when it starts and every few hours. Installing one takes about a minute: ' +
+        'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
+      h('div', { class: 'row' }, h('button', { onclick: act(async () => {
+        const info = await checkForUpdate(false);
+        if (info && !info.available) toast(`You have the latest version (${info.current})`);
+      }) }, 'Check for updates'))),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Backup'),
       h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),

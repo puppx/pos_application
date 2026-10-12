@@ -66,3 +66,5 @@ tr.click:hover { background:#f9fafb; }
 button.platform { background:var(--c); border-color:var(--c); color:#fff; }
 .chips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 .chips button { padding:6px 10px; }
+#update { background:#ecfdf5; border:1px solid var(--accent); border-radius:6px; padding:4px 4px 4px 10px; display:flex; gap:8px; align-items:center; }
+#update button { padding:4px 10px; }

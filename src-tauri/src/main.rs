@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use pos_core::*;
 use serde::Serialize;
 use tauri::{Manager, RunEvent, State};
+use tauri_plugin_updater::UpdaterExt;
 
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const BACKUPS_KEPT: usize = 14;
@@ -514,6 +515,54 @@ fn backup_now(app: Cmd<'_>) -> Result<String> {
     Ok(path.display().to_string())
 }
 
+// ---- automatic updates ----
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    current: String,
+    /// Newer version on GitHub Releases, if any.
+    available: Option<String>,
+    notes: Option<String>,
+}
+
+fn update_error(e: tauri_plugin_updater::Error) -> PosError {
+    PosError::Internal(format!("update failed: {e}"))
+}
+
+/// Ask GitHub Releases whether a newer, correctly signed version exists.
+#[tauri::command]
+async fn check_update(app: Cmd<'_>, handle: tauri::AppHandle) -> Result<UpdateInfo> {
+    app.with_session(|_, _| Ok(()))?;
+    let update = handle.updater().map_err(update_error)?.check().await.map_err(update_error)?;
+    Ok(UpdateInfo {
+        current: handle.package_info().version.to_string(),
+        available: update.as_ref().map(|u| u.version.clone()),
+        notes: update.and_then(|u| u.body),
+    })
+}
+
+/// Back up the database, download the update (its signature is checked
+/// against the public key built into the app), install it and restart.
+/// On Windows the installer closes the app and reopens it when done.
+#[tauri::command]
+async fn install_update(app: Cmd<'_>, handle: tauri::AppHandle) -> Result<()> {
+    app.with_session(|pos, s| {
+        s.require(Permission::ManageSettings)?;
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        pos.backup_unchecked(app.backup_dir.join(format!("pos-before-update-{ts}.db")))?;
+        pos.optimize()
+    })?;
+    let update = handle
+        .updater()
+        .map_err(update_error)?
+        .check()
+        .await
+        .map_err(update_error)?
+        .ok_or_else(|| PosError::Validation("already up to date".into()))?;
+    update.download_and_install(|_, _| {}, || {}).await.map_err(update_error)?;
+    handle.restart()
+}
+
 fn backup_path(dir: &Path) -> PathBuf {
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     dir.join(format!("pos-{ts}.db"))
@@ -553,6 +602,7 @@ fn auto_backup(pos: &Pos, dir: &Path) {
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let backup_dir = data_dir.join("backups");
@@ -631,6 +681,8 @@ fn main() {
             top_products,
             set_setting,
             backup_now,
+            check_update,
+            install_update,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start POS");

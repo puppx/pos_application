@@ -15,5 +15,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 pos-core = { path = "../crates/pos-core" }
 tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"
 serde.workspace = true
 serde_json.workspace = true

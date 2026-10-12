@@ -150,16 +150,23 @@ To restore a backup, close the app and copy the backup over `pos.db`.
 
 ## Install and update
 
-1. Open **Releases** on the GitHub page of this repository (you must be logged in while it is private).
+1. Open **Releases** on this repository's GitHub page.
 2. Download `POS_x.y.z_x64-setup.exe` from the newest release and run it.
    Because the installer is not code-signed yet, Windows may say "Windows protected
    your PC": click **More info → Run anyway**.
-3. To **update**, download the newer setup file and run it over the installed version.
-   All data is kept: it lives in `%APPDATA%\com.puppx.pos`, separate from the program.
-   **Settings → About** shows the installed version.
 
-The installer works offline: it includes the WebView2 runtime installer for the rare
-PC that lacks it (Windows 10/11 normally have it).
+**Automatic updates (v0.5.0 and later):** the app checks GitHub Releases when it starts
+and every 6 hours. When a new version is out, a bar appears at the top:
+*Update x.y.z available*. An admin taps **Install update**: the database is backed up
+(`backups\pos-before-update-*.db`), the app closes, updates and reopens. Orders, menu
+and settings are kept, as they live in `%APPDATA%\com.puppx.pos`. **Settings → About**
+shows the version and has **Check for updates**.
+
+Updates are signed: the app only installs files signed with the project's private key,
+so a tampered download is refused. Updates need the repository to be **public**
+(the app downloads releases without logging in to GitHub).
+
+Versions before 0.5.0 cannot update themselves: install 0.5.0 once by hand.
 
 ## Building
 
@@ -172,7 +179,15 @@ PC that lacks it (Windows 10/11 normally have it).
    (or push a tag such as `v0.2.0`).
 
 The **Windows build** workflow tests, builds the installers and publishes the
-release, tagged `v` + the app version. Every push to `main` also builds installers you can download from the
+release, tagged `v` + the app version.
+
+**One-time setup for automatic updates:** add the update-signing private key as a
+repository secret named `TAURI_SIGNING_PRIVATE_KEY` (Settings → Secrets and variables →
+Actions → New repository secret). The matching public key is in
+`src-tauri/tauri.conf.json`. Releases built without the secret still have installers,
+but no `latest.json`, so installed apps won't see them as updates. **Keep a backup of the
+private key**: if it is lost, installed apps cannot accept new updates until they are
+reinstalled with a new key. Every push to `main` also builds installers you can download from the
 run's *Artifacts* section without making a release.
 
 ### On a Windows PC

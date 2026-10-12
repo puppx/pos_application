@@ -44,7 +44,7 @@ fn floors(pos: &mut Pos, admin: &Session) -> (Floor, Vec<DiningTable>, Floor, Ve
 }
 
 fn dine_in(table_id: i64) -> NewOrder {
-    NewOrder { order_type: OrderType::DineIn, table_id: Some(table_id), details: OrderDetails::default() }
+    NewOrder { order_type: OrderType::DineIn, table_id: Some(table_id), channel_id: None, details: OrderDetails::default() }
 }
 
 // ------------------------------------------------------------------ auth
@@ -270,12 +270,14 @@ fn takeaway_collection_delivery() {
 
     let new = |t, name: Option<&str>, phone: Option<&str>, addr: Option<&str>| NewOrder {
         order_type: t,
-        table_id: None,
+        table_id: None, channel_id: None,
         details: OrderDetails {
             customer_name: name.map(Into::into),
             customer_phone: phone.map(Into::into),
             delivery_address: addr.map(Into::into),
             notes: None,
+            external_ref: None,
+            customer_id: None,
         },
     };
     // Takeaway needs nothing; collection needs a name; delivery needs name+phone+address.
@@ -289,7 +291,7 @@ fn takeaway_collection_delivery() {
     let mut bad = new(OrderType::Takeaway, None, None, None);
     bad.table_id = Some(g[0].id);
     assert!(pos.open_order(&s, &bad).is_err());
-    assert!(pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: None, details: Default::default() }).is_err());
+    assert!(pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: None, channel_id: None, details: Default::default() }).is_err());
     assert!(pos.move_order(&s, ta.id, g[0].id).is_err());
 
     // Editing details re-validates for the order type.
@@ -317,7 +319,7 @@ fn staff_history_is_own_orders_only() {
     let (mut pos, admin) = setup();
     let s = staff(&mut pos, &admin);
     let p = item(&mut pos, &admin, "Tea", 200, 0, None);
-    let ta = NewOrder { order_type: OrderType::Takeaway, table_id: None, details: Default::default() };
+    let ta = NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() };
     let mine = pos.open_order(&s, &ta).unwrap();
     let theirs = pos.open_order(&admin, &ta).unwrap();
     // Open orders are shared: staff can work on the admin's open order.
@@ -336,7 +338,7 @@ fn staff_history_is_own_orders_only() {
 fn price_is_fixed_when_item_is_added() {
     let (mut pos, admin) = setup();
     let p = item(&mut pos, &admin, "Soup", 500, 0, None);
-    let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, details: Default::default() }).unwrap();
+    let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
     pos.add_item(&admin, o.id, p.id, 1, None, &[]).unwrap();
     let upd = ProductUpdate {
         category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 900,

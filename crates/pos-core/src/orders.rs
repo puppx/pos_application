@@ -64,6 +64,12 @@ pub struct OrderDetails {
     pub delivery_address: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// The delivery platform's order number, e.g. "#A1B2C".
+    #[serde(default)]
+    pub external_ref: Option<String>,
+    /// Saved customer this order is for (details above are a copy).
+    #[serde(default)]
+    pub customer_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +78,10 @@ pub struct NewOrder {
     /// Required for dine-in, must be empty otherwise.
     #[serde(default)]
     pub table_id: Option<i64>,
+    /// Delivery platform (Uber Eats...). The platform has the customer's
+    /// details, so none are required.
+    #[serde(default)]
+    pub channel_id: Option<i64>,
     #[serde(flatten)]
     pub details: OrderDetails,
 }
@@ -117,6 +127,10 @@ pub struct Order {
     pub customer_phone: Option<String>,
     pub delivery_address: Option<String>,
     pub notes: Option<String>,
+    pub channel_id: Option<i64>,
+    pub channel_name: Option<String>,
+    pub external_ref: Option<String>,
+    pub customer_id: Option<i64>,
     pub opened_by: i64,
     pub opened_by_name: String,
     pub opened_at: i64,
@@ -144,6 +158,8 @@ pub struct OrderSummary {
     pub floor_name: Option<String>,
     pub customer_name: Option<String>,
     pub customer_phone: Option<String>,
+    pub channel_name: Option<String>,
+    pub external_ref: Option<String>,
     pub opened_by_name: String,
     pub opened_at: i64,
     pub paid_at: Option<i64>,
@@ -181,15 +197,20 @@ struct CleanDetails {
     phone: Option<String>,
     address: Option<String>,
     notes: Option<String>,
+    external_ref: Option<String>,
 }
 
-fn clean_details(t: OrderType, d: &OrderDetails) -> Result<CleanDetails> {
+fn clean_details(t: OrderType, via_platform: bool, d: &OrderDetails) -> Result<CleanDetails> {
     let c = CleanDetails {
         name: opt_text(&d.customer_name, 60, "customer name")?,
         phone: opt_text(&d.customer_phone, 30, "phone number")?,
-        address: opt_text(&d.delivery_address, 200, "address")?,
+        address: opt_text(&d.delivery_address, 300, "address")?,
         notes: opt_text(&d.notes, 200, "notes")?,
+        external_ref: opt_text(&d.external_ref, 30, "platform order number")?,
     };
+    if via_platform {
+        return Ok(c);
+    }
     match t {
         OrderType::Delivery if c.name.is_none() || c.phone.is_none() || c.address.is_none() => {
             invalid("delivery orders need a customer name, phone number and address")
@@ -291,9 +312,9 @@ fn totals(items: &[OrderItem]) -> Totals {
     Totals { subtotal, discount, tax, total: subtotal - discount + tax }
 }
 
-const SUMMARY_SQL: &str = "
+pub(crate) const SUMMARY_SQL: &str = "
     SELECT o.id, o.order_type, o.status, t.name, f.name, o.customer_name, o.customer_phone, u.name,
-           o.opened_at, o.paid_at,
+           o.opened_at, o.paid_at, ch.name, o.external_ref,
            COALESCE(o.total_cents, (
                SELECT SUM(i.unit_price_cents * i.qty - i.discount_cents
                           + ((i.unit_price_cents * i.qty - i.discount_cents) * i.tax_rate_bp + 5000) / 10000)
@@ -303,9 +324,10 @@ const SUMMARY_SQL: &str = "
     FROM orders o
     JOIN users u ON u.id = o.opened_by
     LEFT JOIN dining_tables t ON t.id = o.table_id
-    LEFT JOIN floors f ON f.id = t.floor_id";
+    LEFT JOIN floors f ON f.id = t.floor_id
+    LEFT JOIN delivery_channels ch ON ch.id = o.channel_id";
 
-fn summary_from_row(r: &Row) -> rusqlite::Result<OrderSummary> {
+pub(crate) fn summary_from_row(r: &Row) -> rusqlite::Result<OrderSummary> {
     Ok(OrderSummary {
         id: r.get(0)?,
         order_type: parse_type(&r.get::<_, String>(1)?),
@@ -317,9 +339,11 @@ fn summary_from_row(r: &Row) -> rusqlite::Result<OrderSummary> {
         opened_by_name: r.get(7)?,
         opened_at: r.get(8)?,
         paid_at: r.get(9)?,
-        total_cents: r.get(10)?,
-        item_count: r.get(11)?,
-        unsent_count: r.get(12)?,
+        channel_name: r.get(10)?,
+        external_ref: r.get(11)?,
+        total_cents: r.get(12)?,
+        item_count: r.get(13)?,
+        unsent_count: r.get(14)?,
     })
 }
 
@@ -332,21 +356,43 @@ fn audit_tx(tx: &Transaction, user_id: i64, action: &str, detail: &str) -> Resul
 impl Pos {
     pub fn open_order(&self, s: &Session, new: &NewOrder) -> Result<Order> {
         s.require(Permission::Sell)?;
-        let d = clean_details(new.order_type, &new.details)?;
+        let d = clean_details(new.order_type, new.channel_id.is_some(), &new.details)?;
         match (new.order_type, new.table_id) {
             (OrderType::DineIn, Some(t)) => check_table(&self.conn, t)?,
             (OrderType::DineIn, None) => return invalid("choose a table for a dine-in order"),
             (_, Some(_)) => return invalid("only dine-in orders have a table"),
             (_, None) => {}
         }
-        self.conn
-            .prepare_cached(
-                "INSERT INTO orders (order_type, table_id, customer_name, customer_phone, delivery_address, notes, opened_by)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )?
-            .execute(params![new.order_type.as_str(), new.table_id, d.name, d.phone, d.address, d.notes, s.user_id])
-            .map_err(|e| map_unique(e, TABLE_BUSY))?;
-        let id = self.conn.last_insert_rowid();
+        if let Some(ch) = new.channel_id {
+            if new.order_type == OrderType::DineIn {
+                return invalid("dine-in orders cannot come from a delivery platform");
+            }
+            self.check_channel(ch)?;
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(c) = new.details.customer_id {
+            self.touch_customer(c)?;
+        }
+        tx.prepare_cached(
+            "INSERT INTO orders (order_type, table_id, customer_name, customer_phone, delivery_address, notes,
+                                 channel_id, external_ref, customer_id, opened_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?
+        .execute(params![
+            new.order_type.as_str(),
+            new.table_id,
+            d.name,
+            d.phone,
+            d.address,
+            d.notes,
+            new.channel_id,
+            d.external_ref,
+            new.details.customer_id,
+            s.user_id
+        ])
+        .map_err(|e| map_unique(e, TABLE_BUSY))?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
         self.get_order(s, id)
     }
 
@@ -367,10 +413,12 @@ impl Pos {
             .prepare_cached(
                 "SELECT o.id, o.order_type, o.status, o.table_id, t.name, f.name, o.customer_name, o.customer_phone,
                         o.delivery_address, o.notes, o.opened_by, u.name, o.opened_at, o.payment_method,
-                        o.tendered_cents, o.change_cents, o.paid_by, o.paid_at, o.closed_at, o.close_reason
+                        o.tendered_cents, o.change_cents, o.paid_by, o.paid_at, o.closed_at, o.close_reason,
+                        o.channel_id, ch.name, o.external_ref, o.customer_id
                  FROM orders o JOIN users u ON u.id = o.opened_by
                  LEFT JOIN dining_tables t ON t.id = o.table_id
                  LEFT JOIN floors f ON f.id = t.floor_id
+                 LEFT JOIN delivery_channels ch ON ch.id = o.channel_id
                  WHERE o.id = ?1",
             )?
             .query_row([id], |r| {
@@ -395,6 +443,10 @@ impl Pos {
                     paid_at: r.get(17)?,
                     closed_at: r.get(18)?,
                     close_reason: r.get(19)?,
+                    channel_id: r.get(20)?,
+                    channel_name: r.get(21)?,
+                    external_ref: r.get(22)?,
+                    customer_id: r.get(23)?,
                     subtotal_cents: 0,
                     discount_cents: 0,
                     tax_cents: 0,
@@ -423,12 +475,23 @@ impl Pos {
     pub fn update_order_details(&self, s: &Session, id: i64, details: &OrderDetails) -> Result<Order> {
         s.require(Permission::Sell)?;
         require_open(&self.conn, id)?;
-        let t: String = self.conn.query_row("SELECT order_type FROM orders WHERE id = ?1", [id], |r| r.get(0))?;
-        let d = clean_details(parse_type(&t), details)?;
-        self.conn.execute(
-            "UPDATE orders SET customer_name = ?2, customer_phone = ?3, delivery_address = ?4, notes = ?5 WHERE id = ?1",
-            params![id, d.name, d.phone, d.address, d.notes],
+        let (t, channel, customer): (String, Option<i64>, Option<i64>) = self.conn.query_row(
+            "SELECT order_type, channel_id, customer_id FROM orders WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        let d = clean_details(parse_type(&t), channel.is_some(), details)?;
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(c) = details.customer_id.filter(|c| Some(*c) != customer) {
+            self.touch_customer(c)?;
+        }
+        tx.execute(
+            "UPDATE orders SET customer_name = ?2, customer_phone = ?3, delivery_address = ?4, notes = ?5,
+                 external_ref = ?6, customer_id = ?7
+             WHERE id = ?1",
+            params![id, d.name, d.phone, d.address, d.notes, d.external_ref, details.customer_id],
+        )?;
+        tx.commit()?;
         self.get_order(s, id)
     }
 

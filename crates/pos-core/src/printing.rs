@@ -274,6 +274,10 @@ fn cp437(c: char) -> u8 {
 }
 
 fn heading(o: &Order) -> String {
+    if let Some(ch) = &o.channel_name {
+        let r = o.external_ref.as_deref().map(|r| format!(" {r}")).unwrap_or_default();
+        return format!("{}{r}", ch.to_uppercase());
+    }
     match o.order_type {
         OrderType::DineIn => format!("DINE-IN {}", o.table_name.as_deref().unwrap_or("?")),
         OrderType::Takeaway => "TAKEAWAY".into(),
@@ -315,6 +319,11 @@ impl Pos {
         let who: Vec<&str> = [o.customer_name.as_deref(), o.customer_phone.as_deref()].into_iter().flatten().collect();
         if !who.is_empty() {
             details.push(who.join("  "));
+        }
+        if o.channel_name.is_none() && o.order_type == OrderType::Delivery {
+            if let Some(a) = &o.delivery_address {
+                details.push(a.clone());
+            }
         }
         if let Some(n) = &o.notes {
             details.push(format!("NOTE: {n}"));

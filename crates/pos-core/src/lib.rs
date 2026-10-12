@@ -4,6 +4,8 @@
 //! authorisation take a [`Session`], which only `Pos::login` can produce.
 
 mod auth;
+mod channels;
+mod customers;
 mod error;
 mod floors;
 mod menu;
@@ -21,6 +23,8 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension};
 
 pub use auth::LoginThrottle;
+pub use channels::{Channel, ChannelInput};
+pub use customers::{normalize_postcode, phone_digits, Customer, CustomerInput};
 pub use error::{PosError, Result};
 pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_HEIGHT, PLAN_WIDTH};
 pub use menu::Category;
@@ -38,9 +42,12 @@ pub use users::User;
 ///
 /// Released installs already contain these, so NEVER edit an entry once it has
 /// shipped (v0.1.0 shipped `schema.sql`). To change the schema, append a new
-/// file (e.g. `migrations/0002_xxx.sql`) holding only the ALTER/CREATE
+/// file (e.g. `migrations/0003_xxx.sql`) holding only the ALTER/CREATE
 /// statements; existing databases are upgraded on the next start.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("schema.sql"),
+    include_str!("migrations/0002_delivery_customers.sql"),
+];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
 pub struct Pos {

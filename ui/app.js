@@ -52,7 +52,9 @@ function dayRange(iso) {
 const isAdmin = () => state.session?.role === 'admin';
 const where = (o) => o.order_type === 'dine_in'
   ? `${o.table_name}${o.floor_name ? ' · ' + o.floor_name : ''}`
-  : (o.customer_name || '—');
+  : [o.channel_name && `${o.channel_name}${o.external_ref ? ' ' + o.external_ref : ''}`, o.customer_name]
+    .filter(Boolean).join(' · ') || '—';
+const addressText = (c) => [c.address_line1, c.address_line2, c.town, c.postcode].filter(Boolean).join(', ');
 
 let toastTimer;
 function toast(msg, err = false) {
@@ -163,6 +165,7 @@ const VIEWS = [
   ['floor', 'Tables', false],
   ['orders', 'Orders', false],
   ['history', 'History', false],
+  ['customers', 'Customers', false],
   ['menuAdmin', 'Menu', true],
   ['plan', 'Floor plan', true],
   ['users', 'Users', true],
@@ -186,6 +189,7 @@ function renderShell() {
   const view = state.orderId ? renderOrder : {
     floor: renderFloor, orders: renderOrders, history: renderHistory, menuAdmin: renderMenuAdmin,
     plan: renderPlan, users: renderUsers, reports: renderReports, settings: renderSettings,
+    customers: renderCustomers,
   }[state.view];
   view().catch((e) => { if (!e?.handled) toast(String(e?.message ?? e), true); });
 }
@@ -518,7 +522,8 @@ async function renderOrder() {
       h('div', { class: 'row' }, sendBtn),
       h('div', { class: 'row' }, tendered,
         h('button', { class: 'primary', onclick: pay('cash') }, 'Cash'),
-        h('button', { class: 'primary', onclick: pay('card') }, 'Card')),
+        h('button', { class: 'primary', onclick: pay('card') }, 'Card'),
+        order.channel_id && h('button', { class: 'platform', style: '--c:#374151', onclick: pay('other') }, `Paid by ${order.channel_name}`)),
       h('div', { class: 'row' },
         order.order_type === 'dine_in'
           ? h('button', { onclick: showMove }, 'Move table')
@@ -536,13 +541,128 @@ function customerFields(type, o = {}) {
   const addr = h('textarea', { placeholder: 'Delivery address', rows: 2, style: 'width:100%' });
   addr.value = o.delivery_address ?? '';
   const notes = h('input', { value: o.notes ?? '', placeholder: 'Notes (optional)', style: 'flex:1' });
+  const ref = h('input', { value: o.external_ref ?? '', placeholder: `${o.channel_name ?? 'Platform'} order number` });
   return {
-    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, name, phone), type === 'delivery' && addr, h('div', { class: 'row' }, notes)),
+    el: h('div', { class: 'stack' }, o.channel_id && h('div', { class: 'row' }, ref),
+      h('div', { class: 'row' }, name, phone), type === 'delivery' && addr, h('div', { class: 'row' }, notes)),
     value: () => ({
       customer_name: name.value || null, customer_phone: phone.value || null,
       delivery_address: type === 'delivery' ? addr.value || null : null, notes: notes.value || null,
+      external_ref: o.channel_id ? ref.value || null : null, customer_id: o.customer_id ?? null,
     }),
   };
+}
+
+/// Saved-customer search + editable details. Typing a postcode lists the
+/// addresses already saved there (door numbers), all offline.
+/// Used for new delivery/collection orders and on the Customers screen.
+function customerEditor({ type = 'delivery', customer = null, search = true, saveToggle = true, onPick = () => {} } = {}) {
+  let selected = customer;
+  const input = (ph, attrs = {}) => h('input', { placeholder: ph, ...attrs });
+  const f = {
+    name: input('Customer name'),
+    phone: input('Phone', { inputmode: 'tel' }),
+    line1: input('House number and street', { style: 'flex:1; min-width:220px' }),
+    line2: input('Flat, building (optional)'),
+    town: input('Town'),
+    postcode: input('Postcode', { style: 'width:120px; text-transform:uppercase' }),
+    notes: input('Customer notes, e.g. gate code (saved)', { style: 'flex:1' }),
+  };
+  const picked = h('div');
+  const results = h('div', { class: 'stack' });
+  const suggestions = h('div', { class: 'chips' });
+  const save = h('input', { type: 'checkbox', checked: true });
+  const find = input('Find saved customer: phone, name or postcode', { style: 'flex:1' });
+
+  const fill = (c, addressOnly = false) => {
+    if (!addressOnly) {
+      selected = c;
+      f.name.value = c?.name ?? '';
+      f.phone.value = c?.phone ?? '';
+      f.notes.value = c?.notes ?? '';
+      onPick(c);
+    }
+    f.line1.value = c?.address_line1 ?? '';
+    f.line2.value = c?.address_line2 ?? '';
+    f.town.value = c?.town ?? '';
+    f.postcode.value = c?.postcode ?? '';
+    drawPicked();
+  };
+  const drawPicked = () => picked.replaceChildren(selected
+    ? h('div', { class: 'row muted' }, `Saved customer · ${selected.order_count} order(s)`,
+      search && h('button', { onclick: () => { selected = null; drawPicked(); } }, 'Treat as new customer'))
+    : '');
+  const row = (c) => h('tr', { class: 'click', onclick: () => { fill(c); results.replaceChildren(); find.value = ''; } },
+    h('td', {}, h('strong', {}, c.name)), h('td', {}, c.phone ?? ''), h('td', { class: 'muted' }, addressText(c)));
+
+  let t1, t2;
+  find.addEventListener('input', () => {
+    clearTimeout(t1);
+    t1 = setTimeout(async () => {
+      const q = find.value.trim();
+      if (!q) return results.replaceChildren();
+      const list = await call('search_customers', { query: q, limit: 8 });
+      results.replaceChildren(list.length ? h('table', {}, list.map(row)) : h('div', { class: 'muted' }, 'No saved customer found: fill in the details below.'));
+    }, 150);
+  });
+  f.postcode.addEventListener('input', () => {
+    clearTimeout(t2);
+    t2 = setTimeout(async () => {
+      const list = f.postcode.value.trim().length >= 5 ? await call('customers_at_postcode', { postcode: f.postcode.value }) : [];
+      suggestions.replaceChildren(...(list.length ? [h('span', { class: 'muted' }, 'Saved at this postcode:')] : []),
+        ...list.map((c) => h('button', {
+          title: c.name,
+          // With no name typed yet, pick the whole customer; otherwise just the address.
+          onclick: () => fill(c, f.name.value.trim() !== '' && selected?.id !== c.id),
+        }, [c.address_line1, c.address_line2].filter(Boolean).join(', '), h('small', { class: 'muted' }, ` ${c.name}`))));
+    }, 150);
+  });
+  if (customer) fill(customer);
+  const delivery = type === 'delivery';
+
+  return {
+    el: h('div', { class: 'stack' },
+      search && h('div', { class: 'row' }, find), results, picked,
+      h('div', { class: 'row' }, f.name, f.phone),
+      delivery && h('div', { class: 'row' }, f.postcode, f.line1),
+      delivery && suggestions,
+      delivery && h('div', { class: 'row' }, f.line2, f.town),
+      h('div', { class: 'row' }, f.notes),
+      saveToggle && h('label', {}, save, ' Save / update this customer for next time')),
+    focus: () => (search ? find : f.name).focus(),
+    details: () => ({
+      name: f.name.value, phone: f.phone.value || null, address_line1: f.line1.value || null,
+      address_line2: f.line2.value || null, town: f.town.value || null, postcode: f.postcode.value || null,
+      notes: f.notes.value || null,
+    }),
+    selected: () => selected,
+    /// Save (create or update) when asked to; returns the customer, if any.
+    async commit(force = false) {
+      if (force || (saveToggle && save.checked)) {
+        const d = this.details();
+        selected = selected
+          ? await call('update_customer', { id: selected.id, customer: d })
+          : await call('create_customer', { customer: d });
+        drawPicked();
+      }
+      return selected;
+    },
+  };
+}
+
+/// Open a delivery/collection order for the details in a customerEditor.
+async function startCustomerOrder(type, ce, orderNotes) {
+  const c = await ce.commit();
+  const d = ce.details();
+  const o = await call('open_order', { order: {
+    order_type: type,
+    customer_name: d.name || null,
+    customer_phone: d.phone,
+    delivery_address: type === 'delivery' ? addressText(d) || null : null,
+    notes: orderNotes || d.notes || null,
+    customer_id: c?.id ?? null,
+  } });
+  openOrder(o.id);
 }
 
 /// Read-only view of a closed order, with void for admins.
@@ -585,16 +705,33 @@ async function renderOrders() {
       const o = await call('open_order', { order: { order_type: 'takeaway' } });
       return openOrder(o.id);
     }
-    const f = customerFields(type);
-    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, `New ${TYPE[type].toLowerCase()} order`), f.el,
+    const notes = h('input', { placeholder: 'Notes for this order (optional)', style: 'flex:1' });
+    const ce = customerEditor({ type });
+    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, `New ${TYPE[type].toLowerCase()} order`), ce.el,
+      h('div', { class: 'row' }, notes),
       h('div', { class: 'row' },
-        h('button', { class: 'primary', onclick: act(async () => {
-          const o = await call('open_order', { order: { order_type: type, ...f.value() } });
-          openOrder(o.id);
-        }) }, 'Start order'),
+        h('button', { class: 'primary', onclick: act(() => startCustomerOrder(type, ce, notes.value)) }, 'Start order'),
         h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
-    form.querySelector('input').focus();
+    ce.focus();
   });
+  const platformOrder = (ch) => act(async () => {
+    const ref = h('input', { placeholder: `${ch.name} order number (optional)` });
+    const name = h('input', { placeholder: 'Customer name (optional)' });
+    const collects = h('input', { type: 'checkbox' });
+    const start = act(async () => {
+      const o = await call('open_order', { order: {
+        order_type: collects.checked ? 'collection' : 'delivery', channel_id: ch.id,
+        external_ref: ref.value || null, customer_name: name.value || null,
+      } });
+      openOrder(o.id);
+    });
+    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, `New ${ch.name} order`),
+      h('div', { class: 'row' }, ref, name), h('label', {}, collects, ' Customer collects (no platform rider)'),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: start }, 'Start order'),
+        h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+    ref.focus();
+  });
+  const channels = await call('list_channels');
   const draw = async () => {
     const orders = await call('list_open_orders');
     board.replaceChildren(orders.length ? h('table', {},
@@ -613,6 +750,7 @@ async function renderOrders() {
       h('button', { class: 'primary', onclick: newOrder('takeaway') }, '+ Takeaway'),
       h('button', { class: 'primary', onclick: newOrder('collection') }, '+ Collection'),
       h('button', { class: 'primary', onclick: newOrder('delivery') }, '+ Delivery'),
+      channels.map((ch) => h('button', { class: 'platform', style: `--c:${ch.color || '#374151'}`, onclick: platformOrder(ch) }, `+ ${ch.name}`)),
       h('span', { class: 'muted' }, 'Dine-in orders start from the Tables screen.')),
     form, h('h3', {}, 'Open orders'), board));
   await draw();
@@ -1003,8 +1141,10 @@ async function renderReports() {
           ['Voided / refunded', `${s.voided_count} (${money(s.voided_total_cents)})`], ['Cancelled', s.cancelled_count]])),
         h('div', { class: 'card' }, h('h3', {}, 'By order type'),
           rows(s.by_type.map((g) => [TYPE[g.key] ?? g.key, `${g.count} · ${money(g.total_cents)}`]))),
+        h('div', { class: 'card' }, h('h3', {}, 'By platform'),
+          rows(s.by_channel.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
         h('div', { class: 'card' }, h('h3', {}, 'By payment'),
-          rows(s.by_payment.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`])))),
+          rows(s.by_payment.map((g) => [g.key === 'other' ? 'other / platform' : g.key, `${g.count} · ${money(g.total_cents)}`])))),
       h('div', { class: 'card' }, h('h3', {}, 'Top items'), h('table', {},
         top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents))))))));
   });
@@ -1014,6 +1154,87 @@ async function renderReports() {
 }
 
 // ---------- settings (admin) ----------
+
+// ---------- customers ----------
+
+async function renderCustomers() {
+  const q = h('input', { placeholder: 'Search: phone, name or postcode', style: 'flex:1' });
+  const list = h('div');
+  const panel = h('div');
+  let timer;
+  const load = async () => {
+    const found = await call('search_customers', { query: q.value, limit: 100 });
+    list.replaceChildren(found.length ? h('table', {},
+      h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Phone'), h('th', {}, 'Address'), h('th', { class: 'num' }, 'Orders')),
+      found.map((c) => h('tr', { class: 'click', onclick: () => edit(c) },
+        h('td', {}, c.name), h('td', {}, c.phone ?? ''), h('td', { class: 'muted' }, addressText(c)),
+        h('td', { class: 'num' }, c.order_count))))
+      : h('p', { class: 'muted' }, q.value ? 'No customers match.' : 'No saved customers yet. They are added when you take delivery or collection orders, or with + Customer.'));
+  };
+  q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => load().catch(() => {}), 150); });
+
+  async function edit(c) {
+    const ce = customerEditor({ customer: c, search: false, saveToggle: false });
+    const history = h('div');
+    const orderFor = (type) => act(async () => {
+      await ce.commit(true);
+      await startCustomerOrder(type, ce, null);
+    });
+    panel.replaceChildren(h('div', { class: 'card stack' },
+      h('h3', {}, c ? c.name : 'New customer'), ce.el,
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: act(async () => { const saved = await ce.commit(true); toast('Saved'); await load(); await edit(saved); }) }, 'Save'),
+        h('button', { onclick: orderFor('delivery') }, 'New delivery order'),
+        h('button', { onclick: orderFor('collection') }, 'New collection order'),
+        c && isAdmin() && h('button', { class: 'danger', onclick: act(async () => {
+          await call('delete_customer', { id: c.id }); toast('Customer removed'); panel.replaceChildren(); await load();
+        }) }, 'Delete')),
+      history));
+    if (c) {
+      const orders = await call('customer_orders', { id: c.id });
+      history.replaceChildren(orders.length ? h('div', { class: 'stack' }, h('strong', {}, 'Recent orders'), h('table', {},
+        orders.map((o) => h('tr', { class: 'click', onclick: () => openOrder(o.id) },
+          h('td', {}, `#${o.id}`), h('td', {}, fmtTime(o.opened_at)), h('td', {}, TYPE[o.order_type]),
+          h('td', {}, o.status), h('td', { class: 'num' }, money(o.total_cents)))))) : '');
+    }
+    if (!c) ce.focus();
+  }
+
+  screen(h('div', { class: 'grid2' },
+    h('div', { class: 'stack' }, h('div', { class: 'row' }, q, h('button', { class: 'primary', onclick: () => edit(null) }, '+ Customer')), list),
+    panel));
+  await load();
+  q.focus();
+}
+
+/// Settings card for the delivery platform buttons (Uber Eats...).
+function platformsCard() {
+  const card = h('div', { class: 'card stack' });
+  let rows = [];
+  const list = h('div', { class: 'stack' });
+  const draw = () => list.replaceChildren(...rows.map((r, i) => h('div', { class: 'row' },
+    h('input', { value: r.name, placeholder: 'Platform name', oninput: (e) => (r.name = e.target.value) }),
+    h('input', { type: 'color', value: r.color || '#374151', oninput: (e) => (r.color = e.target.value) }),
+    h('button', { disabled: i === 0, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '↑'),
+    h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); draw(); } }, '×'))));
+  const load = async () => {
+    rows = (await call('list_channels')).map((c) => ({ id: c.id, name: c.name, color: c.color }));
+    draw();
+  };
+  card.append(
+    h('h3', {}, 'Delivery platforms'),
+    h('div', { class: 'muted' }, 'Each platform gets a quick button on the Orders screen, its own heading on kitchen tickets and a line in reports.'),
+    list,
+    h('div', { class: 'row' },
+      h('button', { onclick: () => { rows.push({ id: null, name: '', color: '#374151' }); draw(); list.lastChild.querySelector('input').focus(); } }, '+ Platform'),
+      h('button', { class: 'primary', onclick: act(async () => {
+        await call('save_channels', { channels: rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, color: r.color })) });
+        toast('Platforms saved');
+        await load();
+      }) }, 'Save platforms')));
+  load().catch(() => {});
+  return card;
+}
 
 async function renderSettings() {
   const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
@@ -1077,6 +1298,7 @@ async function renderSettings() {
           await call('set_kitchen_printer', { config: config() });
           toast('Kitchen printer saved');
         }) }, 'Save printer'))),
+    platformsCard(),
     h('div', { class: 'card stack' },
       h('h3', {}, 'About'),
       h('div', {}, `POS version ${state.version}`),

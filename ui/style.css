@@ -63,3 +63,6 @@ tr.click:hover { background:#f9fafb; }
 .opts { display:flex; flex-wrap:wrap; gap:6px; }
 .opts button { min-width:120px; min-height:52px; display:flex; flex-direction:column; align-items:center; justify-content:center; }
 .opts button small { opacity:.75; }
+button.platform { background:var(--c); border-color:var(--c); color:#fff; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.chips button { padding:6px 10px; }

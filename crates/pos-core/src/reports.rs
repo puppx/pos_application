@@ -25,6 +25,8 @@ pub struct SalesSummary {
     pub cancelled_count: i64,
     pub by_payment: Vec<GroupTotal>,
     pub by_type: Vec<GroupTotal>,
+    /// Delivery platforms; orders taken directly are under "Direct".
+    pub by_channel: Vec<GroupTotal>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +69,7 @@ impl Pos {
                     cancelled_count: 0,
                     by_payment: Vec::new(),
                     by_type: Vec::new(),
+                    by_channel: Vec::new(),
                 })
             })?;
         sum.cancelled_count = self
@@ -86,6 +89,16 @@ impl Pos {
             })?;
             *out = rows.collect::<rusqlite::Result<_>>()?;
         }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT COALESCE(ch.name, 'Direct'), COUNT(*), SUM(o.total_cents)
+             FROM orders o LEFT JOIN delivery_channels ch ON ch.id = o.channel_id
+             WHERE o.paid_at >= ?1 AND o.paid_at < ?2 AND o.status = 'paid'
+             GROUP BY o.channel_id ORDER BY 3 DESC",
+        )?;
+        let rows = stmt.query_map(params![from, to], |r| {
+            Ok(GroupTotal { key: r.get(0)?, count: r.get(1)?, total_cents: r.get(2)? })
+        })?;
+        sum.by_channel = rows.collect::<rusqlite::Result<_>>()?;
         Ok(sum)
     }
 

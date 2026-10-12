@@ -66,7 +66,7 @@ fn busy_restaurant() {
     let mut add_time = std::time::Duration::ZERO;
     let mut pay_time = std::time::Duration::ZERO;
     for n in 0..history {
-        let o = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, details: Default::default() }).unwrap();
+        let o = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
         let a = Instant::now();
         for j in 0..6 {
             pos.add_item(&s, o.id, items[(n * 7 + j * 13) % items.len()], 1, None, &[]).unwrap();
@@ -83,7 +83,7 @@ fn busy_restaurant() {
 
     // Full house: every table has an open order with 8 lines.
     for (i, (_, table)) in tables.iter().enumerate() {
-        let o = pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: Some(*table), details: Default::default() }).unwrap();
+        let o = pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: Some(*table), channel_id: None, details: Default::default() }).unwrap();
         for j in 0..8 {
             pos.add_item(&s, o.id, items[(i * 11 + j * 17) % items.len()], 1, None, &[]).unwrap();
         }

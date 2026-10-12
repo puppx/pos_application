@@ -31,7 +31,7 @@ fn burger_with_options(pos: &mut Pos, admin: &Session) -> (Product, OptionGroup,
 }
 
 fn takeaway(pos: &Pos, s: &Session) -> Order {
-    pos.open_order(s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, details: Default::default() }).unwrap()
+    pos.open_order(s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap()
 }
 
 fn id(g: &OptionGroup, name: &str) -> i64 {
@@ -130,7 +130,7 @@ fn kitchen_tickets_per_round() {
     let t = pos
         .save_floor_layout(&admin, floor.id, &[TableLayout { id: None, name: "T3".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
-    let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t[0].id), details: Default::default() }).unwrap();
+    let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t[0].id), channel_id: None, details: Default::default() }).unwrap();
     pos.add_item(&admin, o.id, burger.id, 2, Some("no onions"), &[id(&size, "Large"), id(&extras, "Cheese")]).unwrap();
 
     // No printer configured: sending still works, nothing to print.

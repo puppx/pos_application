@@ -159,6 +159,48 @@ fn update_category(
     app.with_session(|pos, s| pos.update_category(s, id, &name, color.as_deref(), sort_order, active))
 }
 
+// ---- delivery platforms & customers ----
+
+#[tauri::command(async)]
+fn list_channels(app: Cmd<'_>) -> Result<Vec<Channel>> {
+    app.with_session(|pos, s| pos.list_channels(s))
+}
+
+#[tauri::command(async)]
+fn save_channels(app: Cmd<'_>, channels: Vec<ChannelInput>) -> Result<Vec<Channel>> {
+    app.with_session(|pos, s| pos.save_channels(s, &channels))
+}
+
+#[tauri::command(async)]
+fn search_customers(app: Cmd<'_>, query: String, limit: Option<i64>) -> Result<Vec<Customer>> {
+    app.with_session(|pos, s| pos.search_customers(s, &query, limit.unwrap_or(20)))
+}
+
+#[tauri::command(async)]
+fn customers_at_postcode(app: Cmd<'_>, postcode: String) -> Result<Vec<Customer>> {
+    app.with_session(|pos, s| pos.customers_at_postcode(s, &postcode))
+}
+
+#[tauri::command(async)]
+fn create_customer(app: Cmd<'_>, customer: CustomerInput) -> Result<Customer> {
+    app.with_session(|pos, s| pos.create_customer(s, &customer))
+}
+
+#[tauri::command(async)]
+fn update_customer(app: Cmd<'_>, id: i64, customer: CustomerInput) -> Result<Customer> {
+    app.with_session(|pos, s| pos.update_customer(s, id, &customer))
+}
+
+#[tauri::command(async)]
+fn delete_customer(app: Cmd<'_>, id: i64) -> Result<()> {
+    app.with_session(|pos, s| pos.delete_customer(s, id))
+}
+
+#[tauri::command(async)]
+fn customer_orders(app: Cmd<'_>, id: i64) -> Result<Vec<OrderSummary>> {
+    app.with_session(|pos, s| pos.customer_orders(s, id, 10))
+}
+
 // ---- item options ----
 
 #[tauri::command(async)]
@@ -501,6 +543,14 @@ fn main() {
             test_kitchen_printer,
             list_system_printers,
             menu_options,
+            list_channels,
+            save_channels,
+            search_customers,
+            customers_at_postcode,
+            create_customer,
+            update_customer,
+            delete_customer,
+            customer_orders,
             list_option_groups,
             create_option_group,
             update_option_group,

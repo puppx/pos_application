@@ -10,6 +10,9 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Orders stay open** while you add items over several rounds. *Send to kitchen* marks what has gone; *Move table* moves an order to any free table on any floor.
 - **Menu** with coloured categories, a tap-to-add item grid, notes per item ("no onions"), line discounts and optional stock counting (for example bottled drinks)
 - **Item options with prices**: sizes, extras and choices such as "Burger size" (pick exactly one), "Extras" (pick up to 5) or "Cooking". Option groups are reusable across items, and each option's price (+ or −) is added to the item.
+- **Delivery platforms**: one-tap buttons for Uber Eats, Just Eat and Deliveroo (add, rename, recolour or remove them in Settings). They record the platform's order number, have a *Paid by Uber Eats* button, a ticket heading such as `UBER EATS #7F3K2`, and their own line in reports.
+- **Saved customers** for delivery and collection: find them by any part of their phone number, name or postcode and fill the order in one tap. Edit them on the **Customers** screen, which also shows each customer's recent orders.
+- **Postcode suggestions, free and offline**: typing a postcode lists the addresses already saved there (door number and street), so streets you deliver to often come up instantly. No paid address service or internet connection is used.
 - **Kitchen ticket printing** on *Send to kitchen*, to any ESC/POS thermal printer (USB through Windows, network/IP, or a serial port). Tickets show only the new round, marked *NEW ORDER* or *ADDITIONAL*, with options and notes. A **Reprint** button covers paper jams.
 - **Payment**: cash (with change) or card. Unsent items go to the kitchen automatically when paid.
 - **PIN login** with **admin** and **staff** roles
@@ -27,7 +30,8 @@ so the UI can be redesigned without touching them.
 | Dine-in | Tap a table on the **Tables** screen | none |
 | Takeaway | **Orders → + Takeaway** | optional |
 | Collection | **Orders → + Collection** | name required, phone optional |
-| Delivery | **Orders → + Delivery** | name, phone and address required |
+| Delivery | **Orders → + Delivery** | name, phone and address required (or pick a saved customer) |
+| Uber Eats / Just Eat / Deliveroo… | **Orders → + Uber Eats** etc. | none (the platform has them); platform order number optional |
 
 1. Tap items to add them. Items with options open a picker first; required choices (such as size) must be made. Tapping the same item with the same choices again increases the quantity.
 2. **Send to kitchen** sends only the new items and prints their ticket. You can do this any number of times per order. If the printer is offline, the items still count as sent and the app tells you to use **Reprint kitchen**.
@@ -179,6 +183,9 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
   src/floors.rs      Floors, tables, layout editing, live floor status
   src/menu.rs        Categories and the menu grid
   src/options.rs     Option groups (sizes, extras) and validation of choices
+  src/channels.rs    Delivery platforms (Uber Eats, Just Eat, Deliveroo…)
+  src/customers.rs   Saved customers, phone/postcode search
+  src/migrations/    Database upgrades applied on start (never edit a shipped one)
   src/printing.rs    Kitchen tickets: layout, ESC/POS, network/Windows/serial printing
   src/schema.sql     Database schema (migrations via PRAGMA user_version)
   tests/             Integration tests and the performance benchmark

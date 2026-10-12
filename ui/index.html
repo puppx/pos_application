@@ -2,21 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
   <title>POS</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
-  <!-- Placeholder UI: functional and lightweight. All rules live in Rust. -->
-  <header id="bar" hidden>
-    <strong id="store">POS</strong>
-    <span id="bizday" class="badge" title="Business day (changes at End of day)"></span>
+<body class="locked">
+  <!-- All business rules live in Rust; this page only draws and calls commands. -->
+  <aside id="rail" hidden>
+    <div id="brand" class="brand-mark"></div>
     <nav id="nav"></nav>
-    <span id="update" hidden></span>
-    <span id="who"></span>
-    <button id="logout">Log out</button>
-  </header>
-  <main id="app"></main>
+    <button id="logout" title="Log out"></button>
+  </aside>
+  <div class="frame">
+    <header id="bar" hidden>
+      <div id="title" class="title"></div>
+      <span id="bizday" class="chip" title="Business day (changes at End of day)"></span>
+      <span id="mode" class="chip info" hidden>Browser terminal</span>
+      <span class="spacer"></span>
+      <span id="update" hidden></span>
+      <span id="clock" class="clock"></span>
+      <div id="who" class="who"></div>
+    </header>
+    <main id="app"></main>
+  </div>
   <div id="modal" hidden></div>
   <div id="toast" hidden></div>
   <script src="app.js"></script>

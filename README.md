@@ -20,13 +20,16 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Kitchen ticket printing** on *Send to kitchen*, to any ESC/POS thermal printer (USB through Windows, network/IP, or a serial port). Tickets show only the new round, marked *NEW ORDER* or *ADDITIONAL*, with options and notes. A **Reprint** button covers paper jams.
 - **Finish & Pay**: one button opens the payment screen. Choose **Cash** or **Card** (or *Paid by Uber Eats* for platform orders). For cash, type or tap the amount received (with quick buttons for exact and common notes) and the change is shown as you type, then again in large figures after payment. Unsent items go to the kitchen automatically when paid.
 - **End of day**: **Reports → Close day & print summary** prints the day's sales summary (orders, totals, tax, cash/card, order types, platforms, categories, voids) on the receipt printer and moves to the next business date, shown at the top of the screen. A day runs from one close to the next, so service after midnight still counts for the day it started. All orders must be paid or cancelled first. Previous days can be viewed and reprinted.
+- **Use it on other devices (optional local server)**: turn on **Settings → Local server** and open the address it shows (e.g. `http://192.168.1.20:8080`) in a browser on any tablet, laptop or phone on the same Wi-Fi. Each device logs in with its own PIN and shares the same orders, tables, menu and printers. Tick *Start automatically when the POS opens* to have it always on. See [Other devices](#other-devices-local-server).
 - **PIN login** with **admin** and **staff** roles
 - **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items
 - **Backups**: automatic daily copy at startup (last 14 kept), plus "Back up now"
 - **Audit log** of logins, voids, discounts, removed items, menu, floor and user changes
 
-The current UI is a functional placeholder. All business rules live in Rust,
-so the UI can be redesigned without touching them.
+The interface is built for touch terminals: a dark side rail, large tiles, a
+category column, a running ticket with *Finish & Pay*, and a PIN pad lock
+screen. It also adapts to tablets and phones. All business rules live in
+Rust, so the UI can change without touching them.
 
 ## How service works
 
@@ -128,7 +131,7 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 - On first launch the app asks you to create the first **admin** (name and PIN).
 - PINs are 4–8 digits and identify the user, so each PIN must be unique.
 - PINs are stored as Argon2id hashes with a per-install salt, never in plain text.
-- After 5 wrong PINs in a row the terminal locks for 30 s. The lock doubles with each further failure, up to 15 min.
+- After 5 wrong PINs in a row the terminal locks for 30 s. The lock doubles with each further failure, up to 15 min. Devices using the local server share one lock of their own, so wrong PINs typed on the network never lock out the main till.
 - Permissions are checked in Rust on every command, and the user is re-checked against the database each time. A disabled or demoted user loses access immediately.
 - There must always be at least one active admin.
 
@@ -143,6 +146,22 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 | Menu, options, stock, floor plan, users | ✔ | |
 | Kitchen printer setup | ✔ | |
 | Reports, settings, backup | ✔ | |
+
+## Other devices (local server)
+
+The main till (the PC with the app installed) can share the POS with other
+devices on the same network, with nothing to install on them.
+
+1. On the main till, open **Settings → Local server**, choose a port (8080 unless something else uses it) and tap **Start server**. Tick **Start automatically when the POS opens** to keep it on.
+2. The first time, Windows asks whether to allow *POS* on the network: choose **Allow** for private networks.
+3. On the tablet, laptop or phone, open the address shown in the card (for example `http://192.168.1.20:8080`) in Chrome, Edge or Safari and log in with a PIN. Add it to the home screen for one-tap access.
+
+How it works:
+- Each device is its own terminal with its own login, so a waiter can use a phone while the till is in use. Logins on devices expire after 12 hours idle.
+- Everything is stored and printed by the main till: kitchen tickets and receipts go to the printers set up there, and **Open drawer** opens the till's drawer.
+- The main till must be on with the app open. Devices only work on the local network (no internet connection is used).
+- Updates, backups and the server itself are managed on the main till.
+- The connection is plain HTTP on your local network, as with most local POS and printer setups. Use it on your own secured Wi-Fi, not on public networks.
 
 ## Data location
 
@@ -221,16 +240,18 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
   src/printing.rs    Kitchen tickets: layout, ESC/POS, network/Windows/serial printing
   src/receipt.rs     Customer receipts/bills and the cash drawer pulse
   src/dayclose.rs    End of day: business date, close, sales summary printout
+  src/lan.rs         Local server settings (port, start automatically)
   src/schema.sql     Database schema (migrations via PRAGMA user_version)
   tests/             Integration tests and the performance benchmark
   examples/          demo_data: a sample restaurant for trying the app
-src-tauri/           Desktop shell: window, IPC commands, backups, installer config
-ui/                  Placeholder UI (index.html, app.js, style.css)
+src-tauri/           Desktop shell: window, backups, updates, installer config
+  src/commands.rs    Every command, shared by the window and the local server
+  src/server.rs      Optional local network server (browsers on other devices)
+ui/                  Touch UI (index.html, app.js, style.css), no build step
 ```
 
 ## Next steps (not built yet)
 
-- Final UI design
 - Several kitchen printers with routing by category (e.g. drinks to the bar printer)
 - Split bill and partial payments, service charge and tips
 - Delivery status tracking (preparing, out for delivery, delivered) and driver assignment

@@ -18,3 +18,4 @@ tauri = { version = "2", features = [] }
 tauri-plugin-updater = "2"
 serde.workspace = true
 serde_json.workspace = true
+tiny_http = "0.12"

@@ -230,3 +230,15 @@ fn copies_are_separate_parts_sent_with_a_delay() {
     let old: PrinterConfig = serde_json::from_str(r#"{"kind":"none","copies":2}"#).unwrap();
     assert_eq!(old.copy_delay_secs, 2);
 }
+
+#[test]
+fn server_settings_round_trip() {
+    let (pos, s, _, _) = setup();
+    assert_eq!(pos.server_settings().unwrap(), ServerSettings { auto_start: false, port: 8080 });
+    let cfg = ServerSettings { auto_start: true, port: 9000 };
+    pos.set_server_settings(&s, &cfg).unwrap();
+    assert_eq!(pos.server_settings().unwrap(), cfg);
+    assert!(pos.set_server_settings(&s, &ServerSettings { auto_start: true, port: 80 }).is_err());
+    // Reserved: not readable or writable as a plain setting.
+    assert_eq!(pos.setting("_lan_server").unwrap(), None);
+}

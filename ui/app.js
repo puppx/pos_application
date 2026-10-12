@@ -1,8 +1,35 @@
 'use strict';
-// Minimal placeholder UI. Every rule (prices, tax, permissions, stock, table
+// POS terminal UI. Every rule (prices, tax, permissions, stock, table
 // occupancy) is enforced in Rust; this file only calls commands and draws.
+// It runs in the desktop window and, through the optional local server, in
+// any browser on the network.
 
-const invoke = window.__TAURI__.core.invoke;
+const TAURI = window.__TAURI__?.core;
+/// Commands only the desktop window has (they act on this PC itself).
+const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server']);
+/// A browser's own random id: its login belongs to this id only.
+const terminalId = (() => {
+  const make = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  try {
+    let id = localStorage.getItem('pos-terminal');
+    if (!id) localStorage.setItem('pos-terminal', (id = make()));
+    return id;
+  } catch { return make(); }
+})();
+async function invoke(cmd, args = {}) {
+  if (TAURI) return DESKTOP_ONLY.has(cmd) ? TAURI.invoke(cmd, args) : TAURI.invoke('call', { cmd, args });
+  let r;
+  try {
+    r = await fetch(`/api/${cmd}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Terminal': terminalId }, body: JSON.stringify(args),
+    });
+  } catch {
+    throw 'Cannot reach the POS. Check the main till is on and its server is running.';
+  }
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw body || `server error ${r.status}`;
+  return body;
+}
 const app = document.getElementById('app');
 const state = {
   session: null, storeName: null, plan: { w: 1000, h: 700 },
@@ -10,6 +37,7 @@ const state = {
   menu: null, cats: null, catId: null, planDirty: false,
 };
 const TYPE = { dine_in: 'Dine-in', takeaway: 'Takeaway', collection: 'Collection', delivery: 'Delivery' };
+const typeChip = (t) => h('span', { class: `chip type-${t}` }, TYPE[t]);
 
 // ---------- helpers ----------
 
@@ -25,6 +53,39 @@ function h(tag, attrs = {}, ...kids) {
   for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
   return el;
 }
+/// Replace an element's children, skipping null/false like h() does.
+function setKids(el, ...kids) {
+  el.replaceChildren(...kids.flat(Infinity).filter((c) => c != null && c !== false).map((c) => (c instanceof Node ? c : String(c))));
+}
+/// Line icons (24px grid, stroke = currentColor).
+const ICONS = {
+  floor: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  orders: '<path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
+  history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  customers: '<circle cx="9" cy="8" r="4"/><path d="M1 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/><path d="M16 3.5a4 4 0 0 1 0 8M19 14a6 6 0 0 1 4 6v1"/>',
+  menuAdmin: '<path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/>',
+  plan: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>',
+  users: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>',
+  reports: '<path d="M18 20V10M12 20V4M6 20v-6"/>',
+  settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
+  back: '<path d="M15 18l-6-6 6-6"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  printer: '<path d="M6 9V2h12v7"/><rect x="2" y="9" width="20" height="9" rx="2"/><path d="M6 14h12v8H6z"/>',
+  bag: '<path d="M6 7h12l1 14H5z"/><path d="M9 7a3 3 0 0 1 6 0"/>',
+  bike: '<circle cx="5.5" cy="17.5" r="3.5"/><circle cx="18.5" cy="17.5" r="3.5"/><path d="M15 6h3l3 11.5M5.5 17.5L9 9h6l-3 8.5h3.5"/>',
+  walk: '<circle cx="13" cy="4" r="2"/><path d="M10 22l2-7 3 3v4M7 12l3-4 4 1 3 3"/>',
+  drawer: '<rect x="2" y="13" width="20" height="8" rx="2"/><path d="M5 13l2-9h10l2 9M10 17h4"/>',
+  wifi: '<path d="M2 8.8a15 15 0 0 1 20 0M5 12.6a10 10 0 0 1 14 0M8.5 16.4a5 5 0 0 1 7 0"/><circle cx="12" cy="20" r="1"/>',
+  check: '<path d="M20 6L9 17l-5-5"/>',
+};
+function icon(name, size = 22) {
+  const el = h('span', { class: 'icon' });
+  el.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] ?? ''}</svg>`;
+  return el;
+}
+const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
 const money = (c) => (c / 100).toFixed(2);
 function parseMoney(s) {
   s = String(s).trim();
@@ -98,7 +159,7 @@ const act = (fn) => async (ev) => {
 let refreshTimer;
 function screen(...kids) {
   clearInterval(refreshTimer);
-  app.replaceChildren(...kids);
+  setKids(app, ...kids);
 }
 // Poll a live view (floor, open orders). Each refresh is well under 1 ms.
 function live(fn, ms = 10000) {
@@ -113,14 +174,36 @@ async function start() {
   state.storeName = st.store_name;
   state.plan = { w: st.plan_width, h: st.plan_height };
   state.version = st.version;
-  document.getElementById('store').textContent = st.store_name || 'POS';
+  state.remote = st.remote;
+  document.title = st.store_name || 'POS';
   if (st.needs_setup) return renderSetup();
   if (!st.session) return renderLogin();
   renderShell();
 }
 
+/// Full-screen layout for setup and login (no side rail).
+function lockScreen(...kids) {
+  document.body.classList.add('locked');
+  clearInterval(state.clockTimer);
+  const clock = h('div', { class: 'lock-clock' });
+  const date = h('div', { class: 'lock-date' });
+  const tick = () => {
+    const d = new Date();
+    clock.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    date.textContent = d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+  };
+  tick();
+  state.clockTimer = setInterval(tick, 10000);
+  screen(h('div', { class: 'lock' },
+    h('div', { class: 'lock-side' },
+      h('div', { class: 'brand-mark' }, initials(state.storeName || 'POS') || 'P'),
+      h('div', { class: 'lock-store' }, state.storeName || 'POS'),
+      clock, date,
+      h('div', { class: 'lock-foot' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`)),
+    h('div', { class: 'lock-main' }, ...kids)));
+}
+
 function renderSetup() {
-  document.getElementById('bar').hidden = true;
   const name = h('input', { placeholder: 'Your name' });
   const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: 'PIN (4-8 digits)' });
   const pin2 = h('input', { type: 'password', inputmode: 'numeric', placeholder: 'Repeat PIN' });
@@ -131,21 +214,29 @@ function renderSetup() {
     renderShell();
     toast('Welcome! Start by drawing your floor plan, then add your menu.');
   });
-  screen(h('div', { class: 'center' },
-    h('h2', {}, 'Welcome. Create the admin account'),
-    name, pin, pin2, h('button', { class: 'primary', onclick: go }, 'Create admin')));
+  lockScreen(h('div', { class: 'lock-card stack' },
+    h('h2', {}, 'Welcome'), h('p', { class: 'muted' }, 'Create the admin account to get started.'),
+    name, pin, pin2, h('button', { class: 'primary lg', onclick: go }, 'Create admin')));
   name.focus();
 }
 
 function renderLogin() {
-  document.getElementById('bar').hidden = true;
   let pin = '';
   const dots = h('div', { class: 'pindots' });
-  const show = () => (dots.textContent = '•'.repeat(pin.length));
+  const show = (err = false) => {
+    setKids(dots, ...Array.from({ length: Math.max(4, pin.length) }, (_, i) => h('span', { class: i < pin.length ? 'on' : '' })));
+    dots.classList.toggle('shake', err);
+  };
   const submit = act(async () => {
     const p = pin;
-    pin = ''; show();
-    state.session = await call('login', { pin: p });
+    pin = '';
+    show();
+    try {
+      state.session = await call('login', { pin: p });
+    } catch (e) {
+      show(true);
+      throw e;
+    }
     document.removeEventListener('keydown', onKey);
     renderShell();
   });
@@ -165,10 +256,11 @@ function renderLogin() {
   state.pinKeys = onKey;
   document.addEventListener('keydown', onKey);
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'OK'];
-  screen(h('div', { class: 'center' },
-    h('h2', {}, state.storeName || 'POS'), h('div', {}, 'Enter your PIN'), dots,
+  show();
+  lockScreen(h('div', { class: 'lock-card' },
+    h('h2', {}, 'Enter your PIN'), dots,
     h('div', { class: 'pinpad' }, keys.map((k) =>
-      h('button', { class: k === 'OK' ? 'primary' : '', onclick: () => press(k) }, k)))));
+      h('button', { class: k === 'OK' ? 'go' : k === 'C' ? 'ghost' : '', onclick: () => press(k) }, k)))));
 }
 
 // ---------- shell ----------
@@ -180,7 +272,7 @@ const VIEWS = [
   ['customers', 'Customers', false],
   ['menuAdmin', 'Menu', true],
   ['plan', 'Floor plan', true],
-  ['users', 'Users', true],
+  ['users', 'Staff', true],
   ['reports', 'Reports', true],
   ['settings', 'Settings', true],
 ];
@@ -216,7 +308,7 @@ function drawUpdateBar() {
   const v = state.update?.available;
   bar.hidden = !v || !state.session;
   if (v) {
-    bar.replaceChildren(`Update ${v} available `,
+    setKids(bar, `Update ${v} available `,
       isAdmin()
         ? h('button', { class: 'primary', onclick: installUpdate }, 'Install update')
         : h('span', { class: 'muted' }, '(ask an admin to install)'));
@@ -241,20 +333,39 @@ function startUpdateChecks() {
 }
 
 function renderShell() {
-  startUpdateChecks();
-  drawUpdateBar();
-  drawBusinessDay();
+  document.body.classList.remove('locked');
+  clearInterval(state.clockTimer);
+  if (!state.remote) startUpdateChecks();
   if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin()))) state.view = 'floor';
   document.getElementById('bar').hidden = false;
-  document.getElementById('who').textContent = `${state.session.name} (${state.session.role})`;
+  document.getElementById('rail').hidden = false;
+  document.getElementById('brand').textContent = initials(state.storeName || 'POS') || 'P';
+  document.getElementById('brand').title = state.storeName || 'POS';
   document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , adm]) => !adm || isAdmin()).map(([id, label]) =>
-    h('button', { class: !state.orderId && id === state.view ? 'on' : '', onclick: () => go(id) }, label)));
+    h('button', { class: !state.orderId && id === state.view ? 'on' : '', onclick: () => go(id), title: label }, icon(id), h('span', {}, label))));
+  const title = state.orderId ? 'Order' : VIEWS.find(([id]) => id === state.view)?.[1];
+  document.getElementById('title').replaceChildren(h('span', {}, state.storeName || 'POS'), h('span', { class: 'sep' }, '/'), title);
+  document.getElementById('who').replaceChildren(h('span', { class: 'avatar' }, initials(state.session.name)),
+    h('span', { class: 'who-text' }, h('strong', {}, state.session.name), h('small', {}, state.session.role === 'admin' ? 'Admin' : 'Staff')));
+  document.getElementById('mode').hidden = !state.remote;
+  drawUpdateBar();
+  drawBusinessDay();
+  drawClock();
+  app.classList.toggle('fill', !!state.orderId);
   const view = state.orderId ? renderOrder : {
     floor: renderFloor, orders: renderOrders, history: renderHistory, menuAdmin: renderMenuAdmin,
     plan: renderPlan, users: renderUsers, reports: renderReports, settings: renderSettings,
     customers: renderCustomers,
   }[state.view];
   view().catch((e) => { if (!e?.handled) toast(String(e?.message ?? e), true); });
+}
+
+function drawClock() {
+  const el = document.getElementById('clock');
+  const tick = () => (el.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  tick();
+  clearInterval(state.topClock);
+  state.topClock = setInterval(tick, 15000);
 }
 
 function openOrder(id) {
@@ -273,14 +384,16 @@ document.getElementById('logout').onclick = act(async () => {
   if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
   await call('logout');
   Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null });
+  document.getElementById('bar').hidden = true;
+  document.getElementById('rail').hidden = true;
   renderLogin();
 });
 
 // ---------- floor plan canvas (shared by live view and editor) ----------
 
-function planBox() {
+function planBox(reserve = 170) {
   const { w, h: ph } = state.plan;
-  return h('div', { class: 'plan', style: `aspect-ratio:${w}/${ph}; width:min(100%, calc((100vh - 150px) * ${w / ph}))` });
+  return h('div', { class: 'plan', style: `aspect-ratio:${w}/${ph}; width:min(100%, calc((100vh - ${reserve}px) * ${w / ph}))` });
 }
 
 function placeTable(el, t) {
@@ -308,20 +421,37 @@ async function floorTabs(onPick, extra = []) {
 
 // ---------- live floor view ----------
 
+/// Segmented control: `items` are [value, label]; returns the element.
+function segmented(items, current, onPick) {
+  return h('div', { class: 'seg' }, items.map(([v, label]) =>
+    h('button', { class: v === current ? 'on' : '', onclick: () => onPick(v) }, label)));
+}
+
 async function renderFloor() {
-  const { floors, tabs } = await floorTabs((id) => { state.floorId = id; renderFloor(); });
+  const floors = await call('list_floors');
+  if (!floors.some((f) => f.id === state.floorId)) state.floorId = floors[0]?.id ?? null;
   if (!floors.length) {
-    return screen(h('div', { class: 'card' }, 'No floor plan yet. ',
-      isAdmin() ? h('button', { onclick: () => go('plan') }, 'Draw the floor plan') : 'Ask an admin to set it up.'));
+    return screen(h('div', { class: 'empty' }, icon('plan', 48), h('h2', {}, 'No floor plan yet'),
+      isAdmin() ? h('button', { class: 'primary lg', onclick: () => go('plan') }, 'Draw the floor plan') : h('p', {}, 'Ask an admin to set it up.')));
   }
-  const plan = planBox();
+  const plan = planBox(290);
+  const stats = h('div', { class: 'stats' });
   const draw = async () => {
     const tables = await call('floor_status', { floorId: state.floorId });
-    plan.replaceChildren(...tables.map((t) => {
-      const el = tableEl(t, `${t.order_id ? 'busy' : ''} ${t.unsent_count ? 'unsent' : ''}`);
+    const busy = tables.filter((t) => t.order_id);
+    setKids(stats, 
+      h('div', { class: 'stat' }, h('small', {}, 'Occupied'), h('strong', {}, `${busy.length}/${tables.length}`)),
+      h('div', { class: 'stat' }, h('small', {}, 'Open bills'), h('strong', {}, money(busy.reduce((n, t) => n + t.total_cents, 0)))),
+      h('div', { class: 'stat' }, h('small', {}, 'Not sent'), h('strong', { class: busy.some((t) => t.unsent_count) ? 'bad' : '' }, busy.filter((t) => t.unsent_count).length)),
+      h('div', { class: 'stat' }, h('small', {}, 'Mains waiting'), h('strong', {}, busy.filter((t) => t.held_count).length)));
+    setKids(plan, ...tables.map((t) => {
+      const el = tableEl(t, `${t.order_id ? 'busy' : 'free'} ${t.unsent_count ? 'unsent' : ''} ${t.held_count ? 'held' : ''}`);
       el.append(h('b', {}, t.name));
-      if (t.order_id) el.append(h('span', {}, money(t.total_cents)), h('span', { class: 'muted' }, ago(t.opened_at)));
-      if (t.held_count) el.append(h('span', { class: 'badge held' }, 'mains waiting'));
+      // Small tables show less, so the text always fits.
+      const roomy = Math.min(t.w, t.h) >= 100;
+      if (t.order_id) el.append(h('span', { class: 'amt' }, money(t.total_cents)), roomy && h('span', { class: 'time' }, ago(t.opened_at)));
+      if (t.held_count) el.append(h('span', { class: 'flag' }, roomy ? 'mains waiting' : 'mains'));
+      else if (t.unsent_count && roomy) el.append(h('span', { class: 'flag bad' }, 'not sent'));
       el.onclick = act(async () => {
         if (t.order_id) return openOrder(t.order_id);
         try {
@@ -335,10 +465,14 @@ async function renderFloor() {
       return el;
     }));
   };
-  screen(h('div', { class: 'stack' },
-    h('div', { class: 'row' }, tabs, h('span', { style: 'flex:1' }),
-      h('span', { class: 'muted' }, 'Tap a table to open or continue its order. Red ring = items not sent to kitchen. "Mains waiting" = call them from the order.')),
-    plan));
+  screen(h('div', { class: 'page' },
+    h('div', { class: 'toolbar' },
+      segmented(floors.map((f) => [f.id, f.name]), state.floorId, (id) => { state.floorId = id; renderFloor(); }),
+      h('span', { class: 'spacer' }),
+      h('div', { class: 'legend' },
+        h('span', {}, h('i', { class: 'free' }), 'Free'), h('span', {}, h('i', { class: 'busy' }), 'Occupied'),
+        h('span', {}, h('i', { class: 'unsent' }), 'Not sent'), h('span', {}, h('i', { class: 'held' }), 'Mains waiting'))),
+    stats, plan));
   await draw();
   live(draw);
 }
@@ -378,30 +512,37 @@ async function renderOrder() {
   await loadMenu();
   let order = await call('get_order', { id: state.orderId });
   if (order.status !== 'open') {
-    return screen(h('div', { class: 'stack', style: 'max-width:640px' },
-      h('div', {}, h('button', { onclick: closeOrder }, '← Back')), orderDetail(order, () => renderShell())));
+    app.classList.remove('fill');
+    return screen(h('div', { class: 'page narrow' },
+      h('div', { class: 'toolbar' }, h('button', { class: 'ghost', onclick: closeOrder }, icon('back'), 'Back')),
+      orderDetail(order, () => renderShell())));
   }
   const orderId = order.id;
 
   // --- menu side ---
-  const search = h('input', { placeholder: 'Search menu or scan barcode…', style: 'flex:1' });
+  const search = h('input', { type: 'search', placeholder: 'Search menu or scan barcode…' });
   const cats = h('div', { class: 'cats' });
   const grid = h('div', { class: 'items' });
   const picker = h('div', { class: 'stack picker', hidden: true });
   const catColor = Object.fromEntries(state.cats.map((c) => [c.id, c.color]));
   const drawMenu = () => {
-    cats.replaceChildren(
-      h('button', { class: state.catId == null ? 'on' : '', onclick: () => { state.catId = null; drawMenu(); } }, 'All'),
+    setKids(cats, 
+      h('button', { class: state.catId == null ? 'on' : '', style: '--c:#64748b', onclick: () => { state.catId = null; search.value = ''; drawMenu(); } },
+        h('span', { class: 'dot' }), 'All items'),
       ...state.cats.map((c) => h('button', {
-        class: state.catId === c.id ? 'on' : '', style: c.color ? `border-left:6px solid ${c.color}` : '',
-        onclick: () => { state.catId = c.id; search.value = ''; drawMenu(); },
-      }, c.name)));
+        class: state.catId === c.id ? 'on' : '', style: `--c:${c.color || '#94a3b8'}`,
+        onclick: () => { state.catId = c.id; search.value = ''; closePicker(); drawMenu(); },
+      }, h('span', { class: 'dot' }), c.name)));
     const q = search.value.trim().toLowerCase();
     const list = state.menu.filter((p) => q ? p.name.toLowerCase().includes(q) : state.catId == null || p.category_id === state.catId);
-    grid.replaceChildren(...list.slice(0, 300).map((p) => h('button', {
-      style: `border-left-color:${catColor[p.category_id] || '#d9dce1'}`, onclick: choose(p),
-    }, h('span', {}, p.name), h('small', {}, itemPrice(p, state.itemVariants[p.id]),
-      state.itemGroups[p.id] || state.itemVariants[p.id] ? ' …' : ''))));
+    setKids(grid, ...list.slice(0, 300).map((p) => h('button', {
+      class: 'tile', style: `--c:${catColor[p.category_id] || '#94a3b8'}`, onclick: choose(p),
+    }, h('span', { class: 'name' }, p.name),
+      h('span', { class: 'foot' },
+        h('span', { class: 'price' }, itemPrice(p, state.itemVariants[p.id])),
+        p.starter && h('span', { class: 'tag' }, 'Starter'),
+        (state.itemGroups[p.id] || state.itemVariants[p.id]) && h('span', { class: 'more', title: 'Has choices' }, '•••')))));
+    if (!list.length) grid.append(h('div', { class: 'muted pad' }, q ? 'No items match your search.' : 'No items in this category yet.'));
     return list;
   };
   search.addEventListener('input', drawMenu);
@@ -418,8 +559,12 @@ async function renderOrder() {
   // --- ticket side ---
   const lines = h('div', { class: 'lines' });
   const totals = h('table', { class: 'totals' });
-  const sendBtn = h('button', { onclick: act(() => send(allCourses.checked)) });
-  const mainsBtn = h('button', { class: 'primary', onclick: act(() => send(true, 'Mains called')) });
+  const sendBtn = h('button', { class: 'send', onclick: act(() => send(allCourses.checked)) });
+  const mainsBtn = h('button', { class: 'mains', onclick: act(() => send(true, 'Mains called')) });
+  const payBtn = h('button', { class: 'go pay', onclick: () => finish() });
+  // Phones: the menu and the ticket take turns on screen.
+  let layout = null;
+  const phoneBar = h('button', { class: 'phone-bar', onclick: () => { layout.classList.toggle('show-ticket'); draw(); } });
   // Dine-in: starters go first and the rest waits for "Call mains", unless ticked.
   const allCourses = h('input', { type: 'checkbox' });
   const extra = h('div');
@@ -444,7 +589,7 @@ async function renderOrder() {
     const body = h('div', { class: 'stack' });
     const price = h('strong');
     const redraw = () => {
-      body.replaceChildren(
+      setKids(body, 
         variants.length > 0 && h('div', { class: 'stack' },
           h('div', {}, h('strong', {}, 'Choose'), ' ', h('span', { class: 'muted' }, 'required')),
           h('div', { class: 'opts' }, variants.map((v) => h('button', {
@@ -478,7 +623,7 @@ async function renderOrder() {
     });
     // With only choices (no option groups), one tap on a choice adds it.
     if (!groups.length) {
-      picker.replaceChildren(h('h3', {}, p.name),
+      setKids(picker, h('h3', {}, p.name),
         h('div', { class: 'opts' }, variants.map((v) => h('button', {
           onclick: act(async () => { await addItem(p.id, [], v.id); closePicker(); }),
         }, v.name, h('small', {}, money(v.price_cents))))),
@@ -486,7 +631,7 @@ async function renderOrder() {
       [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
       return;
     }
-    picker.replaceChildren(h('h3', {}, p.name), body,
+    setKids(picker, h('h3', {}, p.name), body,
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: add }, 'Add to order'),
         h('button', { onclick: closePicker }, 'Cancel'), h('span', { style: 'flex:1' }), price));
     redraw();
@@ -534,7 +679,7 @@ async function renderOrder() {
   });
 
   function draw() {
-    lines.replaceChildren(h('table', {}, order.items.map((it) => {
+    setKids(lines, h('table', { class: 'ticket-lines' }, order.items.map((it) => {
       const sent = !!it.sent_at;
       const row = h('tr', {},
         h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
@@ -543,14 +688,15 @@ async function renderOrder() {
           it.options.length > 0 && h('div', { class: 'muted' }, it.options.map((o) => o.name).join(', ')),
           it.note && h('div', { class: 'muted' }, '“', it.note, '”'),
           it.discount_cents ? h('div', { class: 'muted' }, `discount -${money(it.discount_cents)}`) : ''),
-        h('td', { style: 'white-space:nowrap' },
+        h('td', { class: 'qty' }, h('div', { class: 'stepper' },
           h('button', { onclick: act(() => setLine(it, { qty: it.qty - 1 })) }, '−'),
-          ` ${it.qty} `,
+          h('span', {}, it.qty),
           h('button', { onclick: act(() => (sent
             ? addItem(it.product_id, it.options.map((o) => o.option_id), it.variant_id)
-            : setLine(it, { qty: it.qty + 1 }))) }, '+')),
+            : setLine(it, { qty: it.qty + 1 }))) }, '+'))),
         h('td', { class: 'num' }, money(it.line_total_cents)),
-        h('td', {}, h('button', { onclick: () => { editing = editing === it.id ? null : it.id; draw(); } }, '✎')));
+        h('td', {}, h('button', { class: `icon-btn ${editing === it.id ? 'on' : ''}`, title: 'Note, discount, remove',
+          onclick: () => { editing = editing === it.id ? null : it.id; draw(); } }, '✎')));
       if (editing !== it.id) return row;
       const note = h('input', { value: it.note ?? '', placeholder: 'Note (no onions…)', disabled: sent });
       const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: 'Discount', style: 'width:90px' });
@@ -561,8 +707,8 @@ async function renderOrder() {
         }) }, 'Save'),
         h('button', { class: 'danger', onclick: act(async () => { editing = null; await setLine(it, { qty: 0 }); }) }, 'Remove'))))];
     })));
-    if (!order.items.length) lines.append(h('p', { class: 'muted' }, 'Tap menu items to add them.'));
-    totals.replaceChildren(
+    if (!order.items.length) lines.append(h('div', { class: 'empty small' }, icon('orders', 36), h('p', {}, 'Tap menu items to add them')));
+    setKids(totals, 
       h('tr', {}, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(order.subtotal_cents))),
       order.discount_cents ? h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
       h('tr', {}, h('td', {}, 'Tax'), h('td', { class: 'num' }, money(order.tax_cents))),
@@ -575,9 +721,13 @@ async function renderOrder() {
     sendBtn.textContent = !unsent ? 'Send to kitchen'
       : byCourse && starters ? `Send starters (${starters})` : `Send to kitchen (${unsent + (allCourses.checked ? waiting : 0)})`;
     sendBtn.disabled = !unsent && !(allCourses.checked && waiting);
-    sendBtn.className = sendBtn.disabled ? '' : 'primary';
+    sendBtn.classList.toggle('ready', !sendBtn.disabled);
     mainsBtn.textContent = `Call mains (${waiting})`;
     mainsBtn.hidden = !waiting;
+    setKids(payBtn, h('span', {}, 'Finish & Pay'), h('strong', {}, money(order.total_cents)));
+    const count = order.items.reduce((n, i) => n + i.qty, 0);
+    setKids(phoneBar, layout?.classList.contains('show-ticket') ? '← Back to menu' : `View order · ${count} item(s)`,
+      h('strong', {}, money(order.total_cents)));
   }
   allCourses.onchange = () => draw();
 
@@ -587,63 +737,69 @@ async function renderOrder() {
     const statuses = await Promise.all(floors.map((f) => call('floor_status', { floorId: f.id })));
     const sel = h('select', {}, floors.map((f, i) => h('optgroup', { label: f.name },
       statuses[i].filter((t) => !t.order_id).map((t) => h('option', { value: t.id }, t.name)))));
-    extra.replaceChildren(h('div', { class: 'row card' }, 'Move to', sel,
+    setKids(extra, h('div', { class: 'row card' }, 'Move to', sel,
       h('button', { class: 'primary', onclick: act(async () => {
         order = await call('move_order', { id: orderId, tableId: Number(sel.value) });
-        extra.replaceChildren(); header(); toast(`Moved to ${order.table_name}`);
+        setKids(extra); header(); toast(`Moved to ${order.table_name}`);
       }) }, 'Move'),
-      h('button', { onclick: () => extra.replaceChildren() }, 'Close')));
+      h('button', { onclick: () => setKids(extra) }, 'Close')));
   });
   const showDetails = () => {
     const f = customerFields(order.order_type, order);
-    extra.replaceChildren(h('div', { class: 'stack card' }, f.el, h('div', { class: 'row' },
+    setKids(extra, h('div', { class: 'stack card' }, f.el, h('div', { class: 'row' },
       h('button', { class: 'primary', onclick: act(async () => {
         order = await call('update_order_details', { id: orderId, details: f.value() });
-        extra.replaceChildren(); header(); toast('Saved');
+        setKids(extra); header(); toast('Saved');
       }) }, 'Save'),
-      h('button', { onclick: () => extra.replaceChildren() }, 'Close'))));
+      h('button', { onclick: () => setKids(extra) }, 'Close'))));
   };
   const showCancel = () => {
     const reason = h('input', { placeholder: 'Reason', style: 'flex:1' });
-    extra.replaceChildren(h('div', { class: 'row card' }, reason,
+    setKids(extra, h('div', { class: 'row card' }, reason,
       h('button', { class: 'danger', onclick: act(async () => {
         await call('cancel_order', { orderId, reason: reason.value });
         toast('Order cancelled'); closeOrder();
       }) }, 'Cancel order'),
-      h('button', { onclick: () => extra.replaceChildren() }, 'Keep order')));
+      h('button', { onclick: () => setKids(extra) }, 'Keep order')));
   };
 
-  const head = h('div');
+  const head = h('div', { class: 'ticket-head' });
   function header() {
-    head.replaceChildren(h('div', { class: 'row' },
-      h('button', { onclick: closeOrder }, '← Back'),
-      h('strong', {}, `#${order.id} ${TYPE[order.order_type]} · ${where(order)}`)),
-    h('div', { class: 'muted' }, [
-      order.customer_phone, order.delivery_address, order.notes,
-      `opened ${ago(order.opened_at)} ago by ${order.opened_by_name}`,
-    ].filter(Boolean).join(' · ')));
+    setKids(head, h('div', { class: 'row nowrap' },
+      h('button', { class: 'icon-btn', onclick: closeOrder, title: 'Back' }, icon('back')),
+      h('div', { class: 'grow' },
+        h('div', { class: 'row nowrap' }, h('strong', { class: 'big-id' }, `#${order.id}`), typeChip(order.order_type), h('span', { class: 'where' }, where(order))),
+        h('div', { class: 'muted small' }, [
+          order.customer_phone, order.delivery_address, order.notes,
+          `opened ${ago(order.opened_at)} ago by ${order.opened_by_name}`,
+        ].filter(Boolean).join(' · ')))));
   }
   header();
   draw();
   drawMenu();
-  screen(h('div', { class: 'order' },
-    h('div', { class: 'card menu' }, h('div', { class: 'row' }, search), cats, grid, picker),
-    h('div', { class: 'card ticket' },
-      head, lines, totals,
-      h('div', { class: 'row' }, sendBtn, mainsBtn,
-        order.order_type === 'dine_in' && h('label', { title: 'Otherwise starters go first and the rest waits for "Call mains"' },
-          allCourses, ' All courses together')),
-      h('div', { class: 'row' }, h('button', { class: 'primary pay', onclick: finish }, 'Finish & Pay')),
-      h('div', { class: 'row' },
-        order.order_type === 'dine_in'
-          ? h('button', { onclick: showMove }, 'Move table')
-          : h('button', { onclick: showDetails }, 'Customer'),
-        h('button', { onclick: act(async () => reportPrint(await call('reprint_kitchen', { orderId }), 'Kitchen ticket reprinted', true)) }, 'Reprint kitchen'),
-        h('button', { onclick: act(async () => printResult(await call('print_receipt', { orderId }), 'Bill printed')) }, 'Print bill'),
-        h('button', { onclick: act(async () => printResult(await call('open_drawer'), 'Drawer opened')) }, 'Open drawer'),
-        h('button', { class: 'danger', onclick: showCancel }, 'Cancel order')),
-      extra)));
-  search.focus();
+  layout = h('div', { class: 'order' },
+    h('div', { class: 'cats-col' }, cats),
+    h('div', { class: 'menu' }, h('div', { class: 'searchbox' }, icon('search', 20), search), grid, picker),
+    h('div', { class: 'ticket' },
+      head, lines, extra,
+      h('div', { class: 'ticket-foot' },
+        totals,
+        order.order_type === 'dine_in' && h('label', { class: 'switch', title: 'Otherwise starters go first and the rest waits for "Call mains"' },
+          allCourses, h('span', {}), 'All courses together'),
+        h('div', { class: 'row nowrap' }, sendBtn, mainsBtn),
+        payBtn,
+        h('div', { class: 'tools' },
+          order.order_type === 'dine_in'
+            ? h('button', { onclick: showMove }, 'Move')
+            : h('button', { onclick: showDetails }, 'Customer'),
+          h('button', { onclick: act(async () => reportPrint(await call('reprint_kitchen', { orderId }), 'Kitchen ticket reprinted', true)) }, 'Reprint'),
+          h('button', { onclick: act(async () => printResult(await call('print_receipt', { orderId }), 'Bill printed')) }, 'Bill'),
+          h('button', { onclick: act(async () => printResult(await call('open_drawer'), 'Drawer opened')) }, 'Drawer'),
+          h('button', { class: 'danger', onclick: showCancel }, 'Cancel')))),
+    phoneBar);
+  screen(layout);
+  draw();
+  if (!matchMedia('(pointer: coarse)').matches) search.focus();
 }
 
 // ---------- payment dialog ----------
@@ -651,13 +807,13 @@ async function renderOrder() {
 function closeModal() {
   const m = document.getElementById('modal');
   m.hidden = true;
-  m.replaceChildren();
+  setKids(m);
   document.removeEventListener('keydown', state.modalKeys);
 }
 
 function showModal(...kids) {
   const m = document.getElementById('modal');
-  m.replaceChildren(h('div', { class: 'dialog card stack' }, ...kids));
+  setKids(m, h('div', { class: 'dialog card stack' }, ...kids));
   m.hidden = false;
 }
 
@@ -819,11 +975,11 @@ function customerEditor({ type = 'delivery', customer = null, search = true, sav
     f.postcode.value = c?.postcode ?? '';
     drawPicked();
   };
-  const drawPicked = () => picked.replaceChildren(selected
+  const drawPicked = () => setKids(picked, selected
     ? h('div', { class: 'row muted' }, `Saved customer · ${selected.order_count} order(s)`,
       search && h('button', { onclick: () => { selected = null; drawPicked(); } }, 'Treat as new customer'))
     : '');
-  const row = (c) => h('tr', { class: 'click', onclick: () => { fill(c); results.replaceChildren(); find.value = ''; } },
+  const row = (c) => h('tr', { class: 'click', onclick: () => { fill(c); setKids(results); find.value = ''; } },
     h('td', {}, h('strong', {}, c.name)), h('td', {}, c.phone ?? ''), h('td', { class: 'muted' }, addressText(c)));
 
   let t1, t2;
@@ -831,16 +987,16 @@ function customerEditor({ type = 'delivery', customer = null, search = true, sav
     clearTimeout(t1);
     t1 = setTimeout(async () => {
       const q = find.value.trim();
-      if (!q) return results.replaceChildren();
+      if (!q) return setKids(results);
       const list = await call('search_customers', { query: q, limit: 8 });
-      results.replaceChildren(list.length ? h('table', {}, list.map(row)) : h('div', { class: 'muted' }, 'No saved customer found: fill in the details below.'));
+      setKids(results, list.length ? h('table', {}, list.map(row)) : h('div', { class: 'muted' }, 'No saved customer found: fill in the details below.'));
     }, 150);
   });
   f.postcode.addEventListener('input', () => {
     clearTimeout(t2);
     t2 = setTimeout(async () => {
       const list = f.postcode.value.trim().length >= 5 ? await call('customers_at_postcode', { postcode: f.postcode.value }) : [];
-      suggestions.replaceChildren(...(list.length ? [h('span', { class: 'muted' }, 'Saved at this postcode:')] : []),
+      setKids(suggestions, ...(list.length ? [h('span', { class: 'muted' }, 'Saved at this postcode:')] : []),
         ...list.map((c) => h('button', {
           title: c.name,
           // With no name typed yet, pick the whole customer; otherwise just the address.
@@ -941,11 +1097,11 @@ async function renderOrders() {
     }
     const notes = h('input', { placeholder: 'Notes for this order (optional)', style: 'flex:1' });
     const ce = customerEditor({ type });
-    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, `New ${TYPE[type].toLowerCase()} order`), ce.el,
+    setKids(form, h('div', { class: 'card stack' }, h('h3', {}, `New ${TYPE[type].toLowerCase()} order`), ce.el,
       h('div', { class: 'row' }, notes),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: act(() => startCustomerOrder(type, ce, notes.value)) }, 'Start order'),
-        h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+        h('button', { onclick: () => setKids(form) }, 'Cancel'))));
     ce.focus();
   });
   const platformOrder = (ch) => act(async () => {
@@ -959,36 +1115,41 @@ async function renderOrders() {
       } });
       openOrder(o.id);
     });
-    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, `New ${ch.name} order`),
+    setKids(form, h('div', { class: 'card stack' }, h('h3', {}, `New ${ch.name} order`),
       h('div', { class: 'row' }, ref, name), h('label', {}, collects, ' Customer collects (no platform rider)'),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: start }, 'Start order'),
-        h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+        h('button', { onclick: () => setKids(form) }, 'Cancel'))));
     ref.focus();
   });
   const channels = await call('list_channels');
+  const count = h('span', { class: 'count' });
   const draw = async () => {
     const orders = await call('list_open_orders');
-    board.replaceChildren(orders.length ? h('table', {},
-      h('tr', {}, h('th', {}, '#'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Waiting'),
-        h('th', {}, 'Staff'), h('th', { class: 'num' }, 'Items'), h('th', { class: 'num' }, 'Total')),
-      orders.map((o) => h('tr', { class: 'click', onclick: () => openOrder(o.id) },
-        h('td', {}, o.id), h('td', {}, h('span', { class: 'badge' }, TYPE[o.order_type])),
-        h('td', {}, where(o), o.customer_phone ? h('div', { class: 'muted' }, o.customer_phone) : ''),
-        h('td', {}, ago(o.opened_at)), h('td', {}, o.opened_by_name),
-        h('td', { class: 'num' }, o.item_count, o.unsent_count ? h('div', {}, h('span', { class: 'badge warn' }, `${o.unsent_count} not sent`)) : '',
-          o.held_count ? h('div', {}, h('span', { class: 'badge held' }, 'mains waiting')) : ''),
-        h('td', { class: 'num' }, money(o.total_cents)))))
-      : h('p', { class: 'muted' }, 'No open orders.'));
+    count.textContent = orders.length;
+    setKids(board, orders.length ? h('div', { class: 'cards' },
+      orders.map((o) => h('button', { class: `order-card ${o.unsent_count ? 'unsent' : ''}`, onclick: () => openOrder(o.id) },
+        h('div', { class: 'row nowrap' }, h('strong', { class: 'big-id' }, `#${o.id}`), typeChip(o.order_type), h('span', { class: 'spacer' }),
+          h('span', { class: 'time' }, ago(o.opened_at))),
+        h('div', { class: 'where' }, where(o)),
+        o.customer_phone && h('div', { class: 'muted small' }, o.customer_phone),
+        h('div', { class: 'row nowrap foot' },
+          h('span', { class: 'muted small' }, `${o.item_count} item(s) · ${o.opened_by_name}`), h('span', { class: 'spacer' }),
+          h('strong', { class: 'amt' }, money(o.total_cents))),
+        (o.unsent_count > 0 || o.held_count > 0) && h('div', { class: 'row' },
+          o.unsent_count > 0 && h('span', { class: 'badge warn' }, `${o.unsent_count} not sent`),
+          o.held_count > 0 && h('span', { class: 'badge held' }, 'mains waiting')))))
+      : h('div', { class: 'empty small' }, icon('orders', 36), h('p', {}, 'No open orders. Dine-in orders start from Tables.')));
   };
-  screen(h('div', { class: 'stack' },
-    h('div', { class: 'row' },
-      h('button', { class: 'primary', onclick: newOrder('takeaway') }, '+ Takeaway'),
-      h('button', { class: 'primary', onclick: newOrder('collection') }, '+ Collection'),
-      h('button', { class: 'primary', onclick: newOrder('delivery') }, '+ Delivery'),
-      channels.map((ch) => h('button', { class: 'platform', style: `--c:${ch.color || '#374151'}`, onclick: platformOrder(ch) }, `+ ${ch.name}`)),
-      h('span', { class: 'muted', style: 'flex:1' }, 'Dine-in orders start from the Tables screen.'),
-      h('button', { onclick: act(async () => printResult(await call('open_drawer'), 'Drawer opened')) }, 'Open drawer')),
-    form, h('h3', {}, 'Open orders'), board));
+  const newTile = (label, ico, onclick, color = null) =>
+    h('button', { class: 'new-tile', style: color ? `--c:${color}` : '', onclick }, icon(ico, 26), h('span', {}, label));
+  screen(h('div', { class: 'page' },
+    h('div', { class: 'new-tiles' },
+      newTile('Takeaway', 'bag', newOrder('takeaway')),
+      newTile('Collection', 'walk', newOrder('collection')),
+      newTile('Delivery', 'bike', newOrder('delivery')),
+      channels.map((ch) => newTile(ch.name, 'bike', platformOrder(ch), ch.color || '#374151')),
+      newTile('Open drawer', 'drawer', act(async () => printResult(await call('open_drawer'), 'Drawer opened')), '#475569')),
+    form, h('div', { class: 'section-title' }, h('h3', {}, 'Open orders'), count), board));
   await draw();
   live(draw);
 }
@@ -998,21 +1159,25 @@ async function renderOrders() {
 async function renderHistory() {
   const date = h('input', { type: 'date', value: today() });
   const list = h('div');
-  const detail = h('div');
+  const detail = h('div', { 'data-hint': 'Tap an order to see its details, reprint or void it.' });
   const load = act(async () => {
     const [from, to] = dayRange(date.value);
     const orders = await call('list_orders', { from, to, limit: 500, offset: 0 });
-    list.replaceChildren(h('table', {},
+    setKids(list, h('table', {},
       h('tr', {}, h('th', {}, '#'), h('th', {}, 'Opened'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Total')),
       orders.map((o) => h('tr', { class: 'click', onclick: act(() => show(o.id)) },
-        h('td', {}, o.id), h('td', {}, new Date(o.opened_at * 1000).toLocaleTimeString()), h('td', {}, TYPE[o.order_type]),
-        h('td', {}, where(o)), h('td', {}, o.status), h('td', { class: 'num' }, money(o.total_cents))))));
+        h('td', {}, h('strong', {}, `#${o.id}`)), h('td', {}, new Date(o.opened_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+        h('td', {}, typeChip(o.order_type)), h('td', {}, where(o)), h('td', {}, h('span', { class: `status s-${o.status}` }, o.status)),
+        h('td', { class: 'num' }, money(o.total_cents))))));
+    if (!orders.length) setKids(list, h('div', { class: 'empty small' }, icon('history', 36), h('p', {}, 'No closed orders on this day.')));
   });
   async function show(id) {
-    detail.replaceChildren(orderDetail(await call('get_order', { id }), async () => { await show(id); await load(); }));
+    setKids(detail, orderDetail(await call('get_order', { id }), async () => { await show(id); await load(); }));
   }
   date.onchange = load;
-  screen(h('div', { class: 'grid2' }, h('div', { class: 'stack' }, h('div', { class: 'row' }, 'Day', date), list), detail));
+  screen(h('div', { class: 'page split' },
+    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('label', { class: 'field' }, 'Day', date)), h('div', { class: 'panel' }, list)),
+    h('div', { class: 'stack sticky' }, detail)));
   await load();
 }
 
@@ -1029,16 +1194,16 @@ async function renderMenuAdmin() {
   for (const v of allVariants) (variantsOf[v.product_id] ??= []).push(v);
   const activeGroups = groups.filter((g) => g.active);
   const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
-  const form = h('div');
+  const form = h('div', { 'data-hint': 'Tap a menu item, category or option group to edit it, or add a new one.' });
   const list = h('div');
   const filter = h('select', {}, h('option', { value: '' }, 'All categories'), cats.filter((c) => c.active).map((c) => h('option', { value: c.id }, c.name)));
   const showInactive = h('input', { type: 'checkbox' });
-  const changed = async () => { state.menu = null; form.replaceChildren(); await renderMenuAdmin(); };
+  const changed = async () => { state.menu = null; setKids(form); await renderMenuAdmin(); };
 
   const loadProducts = act(async () => {
     let products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
     if (filter.value) products = products.filter((p) => p.category_id === Number(filter.value));
-    list.replaceChildren(h('table', {},
+    setKids(list, h('table', {},
       h('tr', {}, h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
         h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
       products.map((p) => h('tr', { class: 'click', style: p.active ? '' : 'opacity:.5', onclick: () => editProduct(p) },
@@ -1062,7 +1227,7 @@ async function renderMenuAdmin() {
     const color = h('input', { type: 'color', value: c?.color ?? '#9ca3af' });
     const order = h('input', { value: c?.sort_order ?? cats.length + 1, inputmode: 'numeric', style: 'width:70px', title: 'Position' });
     const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
-    form.replaceChildren(h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
+    setKids(form, h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
       h('div', { class: 'row' }, name, 'Colour', color, 'Position', order, c && h('label', {}, active, ' Active')),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: act(async () => {
@@ -1071,7 +1236,7 @@ async function renderMenuAdmin() {
           else await call('create_category', args);
           toast('Saved'); await changed();
         }) }, 'Save'),
-        h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+        h('button', { onclick: () => setKids(form) }, 'Cancel'))));
     name.focus();
   }
 
@@ -1082,7 +1247,7 @@ async function renderMenuAdmin() {
     const active = h('input', { type: 'checkbox', checked: g ? g.active : true });
     const rows = (g?.options ?? []).filter((o) => o.active).map((o) => ({ id: o.id, name: o.name, price: o.price_cents ? signed(o.price_cents) : '' }));
     const list = h('div', { class: 'stack' });
-    const drawRows = () => list.replaceChildren(...rows.map((r, i) => h('div', { class: 'row' },
+    const drawRows = () => setKids(list, ...rows.map((r, i) => h('div', { class: 'row' },
       h('input', { value: r.name, placeholder: 'Option, e.g. Large', oninput: (e) => (r.name = e.target.value) }),
       h('input', { value: r.price, placeholder: '+0.00', style: 'width:90px', inputmode: 'decimal', oninput: (e) => (r.price = e.target.value) }),
       h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); drawRows(); } }, '×'))));
@@ -1106,7 +1271,7 @@ async function renderMenuAdmin() {
       await call('delete_option_group', { id: g.id });
       toast(`${g.name} deleted`); await changed();
     }) }, 'Delete group');
-    form.replaceChildren(h('div', { class: 'card stack' },
+    setKids(form, h('div', { class: 'card stack' },
       h('h3', {}, g ? `Edit ${g.name}` : 'New option group'),
       h('div', { class: 'row' }, name, g && h('label', {}, active, ' In use')),
       h('div', { class: 'row' }, 'Customer must choose at least', min, 'and at most', max),
@@ -1114,7 +1279,7 @@ async function renderMenuAdmin() {
         'Untick "In use" to hide it for now; Delete removes it from every item (past orders are not affected).'),
       list,
       h('div', {}, h('button', { onclick: addRow }, '+ Option')),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel'),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'),
         h('span', { style: 'flex:1' }), g && deleteBtn)));
     drawRows();
     if (!rows.length) addRow();
@@ -1142,7 +1307,7 @@ async function renderMenuAdmin() {
     const priceHint = h('span', { class: 'muted' });
     const drawChoices = () => {
       priceHint.textContent = choices.length ? '(the item price above is not used)' : '';
-      choiceList.replaceChildren(...choices.map((c, i) => h('div', { class: 'row' },
+      setKids(choiceList, ...choices.map((c, i) => h('div', { class: 'row' },
         h('input', { value: c.name, placeholder: 'e.g. Chicken', oninput: (e) => (c.name = e.target.value) }),
         h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', oninput: (e) => (c.price = e.target.value) }),
         h('button', { class: 'danger', onclick: () => { choices.splice(i, 1); drawChoices(); } }, '×'))));
@@ -1172,7 +1337,7 @@ async function renderMenuAdmin() {
     });
     const delta = h('input', { placeholder: '+/- qty', style: 'width:90px', inputmode: 'numeric' });
     const reason = h('input', { placeholder: 'Reason (delivery, count…)' });
-    form.replaceChildren(h('div', { class: 'card stack' },
+    setKids(form, h('div', { class: 'card stack' },
       h('h3', {}, p ? `Edit ${p.name}` : 'New menu item'),
       h('div', { class: 'row' }, f.name, f.cat),
       h('div', { class: 'row' }, 'Price', f.price, 'Tax %', f.tax, 'Cost', f.cost),
@@ -1185,7 +1350,7 @@ async function renderMenuAdmin() {
       h('label', {}, f.starter, ' Starter ', h('span', { class: 'muted' }, '(dine-in: sent to the kitchen first; the rest waits for "Call mains")')),
       h('div', { class: 'row' }, h('label', {}, f.track, ' Count stock (e.g. bottled drinks)'),
         !p && ['Opening stock', f.stock], p && h('label', {}, f.active, ' On the menu')),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel')),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel')),
       p && p.track_stock && h('div', { class: 'row' }, `Stock: ${p.stock_qty}`, delta, reason,
         h('button', { onclick: act(async () => {
           await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
@@ -1196,7 +1361,7 @@ async function renderMenuAdmin() {
 
   filter.onchange = loadProducts;
   showInactive.onchange = loadProducts;
-  screen(h('div', { class: 'grid2' },
+  screen(h('div', { class: 'page split' },
     h('div', { class: 'stack' },
       h('div', { class: 'card stack' },
         h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Categories'), h('button', { onclick: () => editCategory(null) }, '+ Category')),
@@ -1209,10 +1374,10 @@ async function renderMenuAdmin() {
           style: g.active ? '' : 'opacity:.5', onclick: () => editGroup(g), title: g.options.filter((o) => o.active).map((o) => o.name).join(', '),
         }, g.name, h('small', { class: 'muted' }, ` ${groupRule(g)}`)))
           : h('span', { class: 'muted' }, 'Create a group like "Size" or "Extras", then tick it on the menu items that use it.'))),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => editProduct(null) }, '+ Menu item'), filter,
-        h('label', {}, showInactive, ' Show removed')),
-      list),
-    form));
+      h('div', { class: 'toolbar' }, h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Menu item'), filter,
+        h('label', { class: 'check' }, showInactive, ' Show removed')),
+      h('div', { class: 'panel' }, list)),
+    h('div', { class: 'stack sticky' }, form)));
   await loadProducts();
 }
 
@@ -1232,7 +1397,7 @@ async function renderPlan() {
     renderPlan();
   }, [newFloor, h('button', { onclick: addFloor }, '+ Floor')]);
   if (!floors.length) {
-    return screen(h('div', { class: 'card stack', style: 'max-width:520px' },
+    return screen(h('div', { class: 'page narrow card stack' },
       h('h3', {}, 'Floor plan'), 'Create your first floor (for example "Ground floor"), then add tables to it.', tabs));
   }
   const floor = floors.find((f) => f.id === state.floorId);
@@ -1253,7 +1418,7 @@ async function renderPlan() {
   const snap = (v) => Math.round(v / SNAP) * SNAP;
 
   function draw() {
-    plan.replaceChildren(...tables.map((t) => {
+    setKids(plan, ...tables.map((t) => {
       const el = tableEl(t, t === sel ? 'sel' : '');
       el.append(h('b', {}, t.name));
       el.addEventListener('pointerdown', (e) => {
@@ -1346,7 +1511,7 @@ async function renderPlan() {
           await call('delete_floor', { id: floor.id });
           setDirty(false); state.floorId = null; toast('Floor removed'); renderPlan();
         }) }, 'Delete floor')));
-    panel.replaceChildren(...kids);
+    setKids(panel, ...kids);
   }
 
   async function save() {
@@ -1363,8 +1528,8 @@ async function renderPlan() {
   }
 
   setDirty(false);
-  screen(h('div', { class: 'stack' }, tabs,
-    h('div', { style: 'display:grid; grid-template-columns:1fr 320px; gap:12px; align-items:start' }, plan, panel)));
+  screen(h('div', { class: 'page' }, h('div', { class: 'toolbar' }, tabs),
+    h('div', { class: 'plan-editor' }, plan, panel)));
   draw();
 }
 
@@ -1372,13 +1537,15 @@ async function renderPlan() {
 
 async function renderUsers() {
   const list = h('div');
-  const form = h('div');
+  const form = h('div', { 'data-hint': 'Tap a staff member to edit them or reset their PIN.' });
   const load = async () => {
     const users = await call('list_users');
-    list.replaceChildren(h('table', {},
+    setKids(list, h('table', {},
       h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Role'), h('th', {}, 'Status'), h('th', {}, 'Last login')),
       users.map((u) => h('tr', { class: 'click', onclick: () => edit(u) },
-        h('td', {}, u.name), h('td', {}, u.role), h('td', {}, u.active ? 'active' : 'disabled'),
+        h('td', {}, h('span', { class: 'row nowrap' }, h('span', { class: 'avatar sm' }, initials(u.name)), u.name)),
+        h('td', {}, h('span', { class: `chip ${u.role === 'admin' ? 'info' : ''}` }, u.role === 'admin' ? 'Admin' : 'Staff')),
+        h('td', {}, h('span', { class: `status ${u.active ? 's-paid' : 's-cancelled'}` }, u.active ? 'active' : 'disabled')),
         h('td', {}, u.last_login_at ? fmtTime(u.last_login_at) : '—')))));
   };
   function edit(u) {
@@ -1395,18 +1562,20 @@ async function renderUsers() {
         await call('create_user', { name: name.value, role: role.value, pin: pin.value });
       }
       toast('Saved');
-      form.replaceChildren();
+      setKids(form);
       await start(); // own role/name may have changed
     });
-    form.replaceChildren(h('div', { class: 'card stack' },
+    setKids(form, h('div', { class: 'card stack' },
       h('h3', {}, u ? `Edit ${u.name}` : 'New user'),
       h('div', { class: 'row' }, name, role, u && h('label', {}, active, ' Active')),
       h('div', { class: 'row' }, pin),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => form.replaceChildren() }, 'Cancel'))));
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'))));
     name.focus();
   }
-  screen(h('div', { class: 'grid2' },
-    h('div', { class: 'stack' }, h('div', {}, h('button', { class: 'primary', onclick: () => edit(null) }, '+ User')), list), form));
+  screen(h('div', { class: 'page split' },
+    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Staff member')),
+      h('div', { class: 'panel' }, list)),
+    h('div', { class: 'stack sticky' }, form)));
   await load();
 }
 
@@ -1440,7 +1609,7 @@ async function renderReports() {
       else toast(r.print.attempted ? `${msg} · summary printed` : `${msg} · no receipt printer, summary shown below`);
       await drawEod(r.view);
     });
-    eod.replaceChildren(
+    setKids(eod, 
       h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `End of day · ${dayLabel(day.date)}`),
         h('span', { class: 'muted' }, `since ${fmtTime(day.since)}`)),
       h('div', { class: 'row' },
@@ -1462,7 +1631,7 @@ async function renderReports() {
   const load = act(async () => {
     const [from, to] = dayRange(date.value);
     const [s, top] = await Promise.all([call('sales_summary', { from, to }), call('top_products', { from, to, limit: 20 })]);
-    out.replaceChildren(h('div', { class: 'grid2' },
+    setKids(out, h('div', { class: 'grid2' },
       h('div', { class: 'stack' },
         h('div', { class: 'card' }, h('h3', {}, 'Summary'), rows([
           ['Paid orders', s.order_count], ['Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
@@ -1481,7 +1650,7 @@ async function renderReports() {
           top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents)))))))));
   });
   date.onchange = load;
-  screen(h('div', { class: 'stack' }, eod, h('div', { class: 'row' }, h('h3', {}, 'Sales by calendar day'), date), out));
+  screen(h('div', { class: 'page' }, eod, h('div', { class: 'section-title' }, h('h3', {}, 'Sales by calendar day'), h('span', { class: 'spacer' }), date), out));
   await Promise.all([drawEod(), load()]);
 }
 
@@ -1492,11 +1661,11 @@ async function renderReports() {
 async function renderCustomers() {
   const q = h('input', { placeholder: 'Search: phone, name or postcode', style: 'flex:1' });
   const list = h('div');
-  const panel = h('div');
+  const panel = h('div', { 'data-hint': 'Find a customer to edit them, see their orders or start a new order.' });
   let timer;
   const load = async () => {
     const found = await call('search_customers', { query: q.value, limit: 100 });
-    list.replaceChildren(found.length ? h('table', {},
+    setKids(list, found.length ? h('table', {},
       h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Phone'), h('th', {}, 'Address'), h('th', { class: 'num' }, 'Orders')),
       found.map((c) => h('tr', { class: 'click', onclick: () => edit(c) },
         h('td', {}, c.name), h('td', {}, c.phone ?? ''), h('td', { class: 'muted' }, addressText(c)),
@@ -1512,19 +1681,19 @@ async function renderCustomers() {
       await ce.commit(true);
       await startCustomerOrder(type, ce, null);
     });
-    panel.replaceChildren(h('div', { class: 'card stack' },
+    setKids(panel, h('div', { class: 'card stack' },
       h('h3', {}, c ? c.name : 'New customer'), ce.el,
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: act(async () => { const saved = await ce.commit(true); toast('Saved'); await load(); await edit(saved); }) }, 'Save'),
         h('button', { onclick: orderFor('delivery') }, 'New delivery order'),
         h('button', { onclick: orderFor('collection') }, 'New collection order'),
         c && isAdmin() && h('button', { class: 'danger', onclick: act(async () => {
-          await call('delete_customer', { id: c.id }); toast('Customer removed'); panel.replaceChildren(); await load();
+          await call('delete_customer', { id: c.id }); toast('Customer removed'); setKids(panel); await load();
         }) }, 'Delete')),
       history));
     if (c) {
       const orders = await call('customer_orders', { id: c.id });
-      history.replaceChildren(orders.length ? h('div', { class: 'stack' }, h('strong', {}, 'Recent orders'), h('table', {},
+      setKids(history, orders.length ? h('div', { class: 'stack' }, h('strong', {}, 'Recent orders'), h('table', {},
         orders.map((o) => h('tr', { class: 'click', onclick: () => openOrder(o.id) },
           h('td', {}, `#${o.id}`), h('td', {}, fmtTime(o.opened_at)), h('td', {}, TYPE[o.order_type]),
           h('td', {}, o.status), h('td', { class: 'num' }, money(o.total_cents)))))) : '');
@@ -1532,9 +1701,10 @@ async function renderCustomers() {
     if (!c) ce.focus();
   }
 
-  screen(h('div', { class: 'grid2' },
-    h('div', { class: 'stack' }, h('div', { class: 'row' }, q, h('button', { class: 'primary', onclick: () => edit(null) }, '+ Customer')), list),
-    panel));
+  screen(h('div', { class: 'page split' },
+    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('div', { class: 'searchbox grow' }, icon('search', 20), q),
+      h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Customer')), h('div', { class: 'panel' }, list)),
+    h('div', { class: 'stack sticky' }, panel)));
   await load();
   q.focus();
 }
@@ -1544,7 +1714,7 @@ function platformsCard() {
   const card = h('div', { class: 'card stack' });
   let rows = [];
   const list = h('div', { class: 'stack' });
-  const draw = () => list.replaceChildren(...rows.map((r, i) => h('div', { class: 'row' },
+  const draw = () => setKids(list, ...rows.map((r, i) => h('div', { class: 'row' },
     h('input', { value: r.name, placeholder: 'Platform name', oninput: (e) => (r.name = e.target.value) }),
     h('input', { type: 'color', value: r.color || '#374151', oninput: (e) => (r.color = e.target.value) }),
     h('button', { disabled: i === 0, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '↑'),
@@ -1591,7 +1761,7 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   const copies = h('input', { type: 'number', min: 1, max: 9, value: cfg.copies ?? 1, style: 'width:70px' });
   const delay = h('input', { type: 'number', min: 0, max: 30, value: cfg.copy_delay_secs ?? 2, style: 'width:70px', title: 'Seconds to wait between copies' });
   const fields = h('div', { class: 'row' });
-  const drawFields = () => fields.replaceChildren(...{
+  const drawFields = () => setKids(fields, ...{
     none: [],
     network: ['IP address', host, 'Port', port],
     windows: ['Printer', winName],
@@ -1610,6 +1780,39 @@ function printerForm(cfg, systemPrinters, noneLabel) {
       ...(kind.value === 'file' && { path: path.value.trim() }),
     }),
   };
+}
+
+/// Settings card for the local network server (desktop window only).
+function serverCard() {
+  const card = h('div', { class: 'card stack' });
+  const draw = (st) => {
+    const port = h('input', { type: 'number', min: 1024, max: 65535, value: st.settings.port, style: 'width:110px' });
+    const auto = h('input', { type: 'checkbox', checked: st.settings.auto_start });
+    const settings = () => ({ port: Number(port.value) || 8080, auto_start: auto.checked });
+    const apply = (run) => act(async () => {
+      const next = await call('set_server', { settings: settings(), run });
+      draw(next);
+      toast(run ? 'Local server running' : next.running ? 'Saved' : 'Local server stopped');
+    });
+    setKids(card,
+      h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Local server'),
+        h('span', { class: `status ${st.running ? 's-paid' : 's-cancelled'}` }, st.running ? 'running' : 'stopped')),
+      h('div', { class: 'muted' }, 'Use this POS from other devices on the same network (tablets, laptops, phones) in a web browser. ' +
+        'Each device logs in with its own PIN and shares the same orders, menu and printers. This PC must stay on with the POS open.'),
+      st.running && h('div', { class: 'server-urls' }, h('div', { class: 'muted small' }, 'Open this address on the other device:'),
+        st.urls.map((u) => h('code', {}, u))),
+      st.error && !st.running && h('div', { class: 'badge warn' }, st.error),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Port', port),
+        h('label', { class: 'switch' }, auto, h('span', {}), 'Start automatically when the POS opens')),
+      h('div', { class: 'row' },
+        st.running
+          ? [h('button', { class: 'primary', onclick: apply(true) }, 'Save & restart'), h('button', { class: 'danger', onclick: apply(false) }, 'Stop server')]
+          : h('button', { class: 'primary', onclick: apply(true) }, 'Start server'),
+        !st.running && h('button', { onclick: apply(false) }, 'Save')),
+      h('div', { class: 'muted small' }, 'The first time, Windows may ask whether to allow the POS on the network: choose Allow on private networks.'));
+  };
+  call('server_status').then(draw).catch(() => {});
+  return card;
 }
 
 const printResult = (r, ok) => toast(r.error ? `Did not print: ${r.error}` : ok, !!r.error);
@@ -1634,7 +1837,7 @@ async function renderSettings() {
     header: header.value.trim() || null, footer: footer.value.trim() || null, currency: currency.value,
   });
 
-  screen(h('div', { class: 'stack', style: 'max-width:760px' },
+  screen(h('div', { class: 'page settings' },
     h('div', { class: 'card stack' },
       h('h3', {}, 'Restaurant'),
       h('div', { class: 'row' }, store, h('button', { class: 'primary', onclick: act(async () => {
@@ -1680,19 +1883,23 @@ async function renderSettings() {
           toast('Receipt settings saved');
         }) }, 'Save receipt settings'))),
     platformsCard(),
+    state.remote ? '' : serverCard(),
     h('div', { class: 'card stack' },
       h('h3', {}, 'About'),
       h('div', {}, `POS version ${state.version}`),
-      h('div', { class: 'muted' }, 'The app checks for updates when it starts and every few hours. Installing one takes about a minute: ' +
-        'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
-      h('div', { class: 'row' }, h('button', { onclick: act(async () => {
-        const info = await checkForUpdate(false);
-        if (info && !info.available) toast(`You have the latest version (${info.current})`);
-      }) }, 'Check for updates'))),
+      state.remote
+        ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
+        : [h('div', { class: 'muted' }, 'The app checks for updates when it starts and every few hours. Installing one takes about a minute: ' +
+          'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
+        h('div', { class: 'row' }, h('button', { onclick: act(async () => {
+          const info = await checkForUpdate(false);
+          if (info && !info.available) toast(`You have the latest version (${info.current})`);
+        }) }, 'Check for updates'))]),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Backup'),
       h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),
       h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up now')))));
 }
 
-start().catch((e) => toast(String(e), true));
+document.getElementById('logout').append(icon('logout'));
+start().catch((e) => toast(String(e?.message ?? e), true));

@@ -100,7 +100,17 @@ impl Pos {
     }
 
     pub fn login(&mut self, pin: &str) -> Result<Session> {
-        self.throttle.check(Instant::now())?;
+        let mut throttle = std::mem::take(&mut self.throttle);
+        let result = self.login_with(pin, &mut throttle);
+        self.throttle = throttle;
+        result
+    }
+
+    /// Log in counting failures in `throttle` instead of this terminal's own,
+    /// e.g. one shared by every browser on the network, so wrong PINs typed
+    /// there cannot lock out the main till (and vice versa).
+    pub fn login_with(&mut self, pin: &str, throttle: &mut LoginThrottle) -> Result<Session> {
+        throttle.check(Instant::now())?;
         let found = match self.hash_pin(pin) {
             Ok(hash) => self
                 .conn
@@ -112,11 +122,11 @@ impl Pos {
             Err(_) => None,
         };
         let Some((user_id, name, role)) = found else {
-            self.throttle.record_failure(Instant::now());
+            throttle.record_failure(Instant::now());
             self.audit(None, "login.failed", "")?;
             return Err(PosError::InvalidPin);
         };
-        self.throttle.record_success();
+        throttle.record_success();
         self.conn
             .prepare_cached("UPDATE users SET last_login_at = unixepoch() WHERE id = ?1")?
             .execute([user_id])?;

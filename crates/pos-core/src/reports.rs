@@ -33,6 +33,13 @@ pub struct SalesSummary {
     pub by_category: Vec<GroupTotal>,
 }
 
+impl SalesSummary {
+    /// Nothing happened: no sales, voids or cancelled orders.
+    pub fn is_empty(&self) -> bool {
+        self.order_count == 0 && self.voided_count == 0 && self.cancelled_count == 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TopProduct {
     pub product_id: i64,

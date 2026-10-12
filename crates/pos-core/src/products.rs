@@ -98,7 +98,7 @@ fn clean_code(code: Option<String>) -> Option<String> {
     code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty())
 }
 
-fn validate(name: &str, price: i64, cost: i64, tax_bp: i64) -> Result<String> {
+pub(crate) fn validate(name: &str, price: i64, cost: i64, tax_bp: i64) -> Result<String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 120 {
         return invalid("product name must be 1 to 120 characters");

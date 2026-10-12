@@ -36,11 +36,11 @@ pub struct DayClose {
     pub summary: SalesSummary,
 }
 
-fn parse_date(s: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
-fn local_midnight(d: NaiveDate) -> i64 {
+pub(crate) fn local_midnight(d: NaiveDate) -> i64 {
     Local
         .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap_or_default())
         .earliest()

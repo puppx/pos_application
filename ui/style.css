@@ -382,3 +382,9 @@ pre.report { background: var(--surface-2); border: 1px dashed var(--line-2); bor
   content: attr(data-hint); display: flex; align-items: center; justify-content: center; text-align: center; min-height: 180px; padding: 24px;
   border: 2px dashed var(--line-2); border-radius: var(--radius); color: var(--muted); font-weight: 500;
 }
+
+/* settings: danger zone */
+.danger-zone { border-color: #fca5a5; background: linear-gradient(#fff, #fff7f7); }
+.danger-zone h3 { color: var(--danger); }
+button.danger.solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.danger.solid:hover { background: #b91c1c; }

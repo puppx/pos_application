@@ -26,7 +26,7 @@ fn category_from_row(r: &Row) -> rusqlite::Result<Category> {
     })
 }
 
-fn clean(name: &str, color: Option<&str>) -> Result<(String, Option<String>)> {
+pub(crate) fn clean(name: &str, color: Option<&str>) -> Result<(String, Option<String>)> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 40 {
         return invalid("category name must be 1 to 40 characters");

@@ -1606,7 +1606,8 @@ async function renderReports() {
       await drawBusinessDay();
       const c = r.view.close;
       const msg = `${dayLabel(c.business_date)} closed: ${c.summary.order_count} orders, ${money(c.summary.total_cents)}. Now on ${dayLabel(state.day.date)}`;
-      if (r.print.error) toast(`${msg}. The summary did not print (${r.print.error}); reprint it below.`, true);
+      if (r.empty) toast(`${dayLabel(c.business_date)} closed. No sales today, so nothing was printed. Now on ${dayLabel(state.day.date)}`);
+      else if (r.print.error) toast(`${msg}. The summary did not print (${r.print.error}); reprint it below.`, true);
       else toast(r.print.attempted ? `${msg} · summary printed` : `${msg} · no receipt printer, summary shown below`);
       await drawEod(r.view);
     });
@@ -1915,8 +1916,122 @@ async function renderSettings() {
         }) }, 'Check for updates'))]),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Backup'),
-      h('p', {}, 'A backup is made automatically once a day at startup (last 14 kept).'),
-      h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up now')))));
+      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; the last 14 are kept.'),
+      h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up everything now'))),
+    menuBackupCard(),
+    resetCard()));
+}
+
+/// Two taps to run `fn`: the first changes the label to `sure`.
+function confirmBtn(label, sure, fn, cls = 'danger') {
+  const b = h('button', { class: cls });
+  b.textContent = label;
+  b.onclick = act(async () => {
+    if (!b.dataset.sure) {
+      b.dataset.sure = '1';
+      b.textContent = sure;
+      setTimeout(() => { delete b.dataset.sure; b.textContent = label; }, 5000);
+      return;
+    }
+    delete b.dataset.sure;
+    b.textContent = label;
+    await fn();
+  });
+  return b;
+}
+
+/// Menu only: save, list, restore, and restore from a file (another till).
+function menuBackupCard() {
+  const list = h('div', { class: 'stack' });
+  const restored = async (n) => {
+    state.menu = null;
+    toast(`Menu restored: ${n.items} items, ${n.categories} categories, ${n.option_groups} option groups`);
+  };
+  const load = async () => {
+    const files = await call('list_menu_backups');
+    setKids(list, files.length
+      ? h('table', {}, files.slice(0, 10).map((f) => h('tr', {},
+        h('td', {}, fmtTime(f.saved_at)), h('td', { class: 'muted' }, `${f.items} items`),
+        h('td', { class: 'num' }, confirmBtn('Restore', 'Tap again: replace the menu', async () => restored(await call('restore_menu_backup', { name: f.name })), '')))))
+      : h('div', { class: 'muted' }, 'No menu backups yet.'));
+  };
+  const file = h('input', { type: 'file', accept: '.json,application/json', hidden: true });
+  const picked = h('div');
+  file.onchange = act(async () => {
+    const f = file.files[0];
+    file.value = '';
+    if (!f) return;
+    let menu;
+    try { menu = JSON.parse(await f.text()); } catch { return toast('This file is not a POS menu backup', true); }
+    if (menu?.format !== 'pos-menu') return toast('This file is not a POS menu backup', true);
+    setKids(picked, h('div', { class: 'row card' },
+      h('span', { class: 'grow' }, `${f.name}: ${menu.items.length} items, ${menu.categories.length} categories`),
+      confirmBtn('Replace menu with this file', 'Tap again to replace the menu', async () => {
+        restored(await call('import_menu', { menu }));
+        setKids(picked);
+      }, 'primary'),
+      h('button', { onclick: () => setKids(picked) }, 'Cancel')));
+  });
+  const save = act(async () => {
+    const r = await call('backup_menu');
+    toast(`Menu saved (${r.file.items} items)`);
+    if (state.remote) {
+      // In a browser, also give the user the file.
+      const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(r.menu, null, 2)], { type: 'application/json' })), download: r.file.name });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+    await load();
+  });
+  load().catch(() => {});
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Menu backup'),
+    h('p', { class: 'muted' }, 'Save just the menu (categories, items, choices, options and prices), then restore it later or load it on another till. ' +
+      'Restoring replaces the current menu; past orders are not changed.'),
+    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Back up menu'),
+      h('button', { onclick: () => file.click() }, 'Restore from a file…'), file),
+    picked, list);
+}
+
+/// Danger zone: delete chosen data (admin only, PIN + RESET, full backup first).
+function resetCard() {
+  const box = (label, hint) => {
+    const input = h('input', { type: 'checkbox' });
+    return { input, el: h('label', { class: 'check' }, input, h('span', {}, h('strong', {}, label), hint && h('span', { class: 'muted' }, ` · ${hint}`))) };
+  };
+  const sales = box('Sales history', 'orders, payments, day closes');
+  const salesWhen = h('select', {}, h('option', { value: 'all' }, 'All sales, including open orders'), h('option', { value: 'before' }, 'Only sales before a date'));
+  const salesDate = h('input', { type: 'date', value: today(), hidden: true });
+  salesWhen.onchange = () => (salesDate.hidden = salesWhen.value !== 'before');
+  const salesOpts = h('div', { class: 'row', style: 'padding-left:28px', hidden: true }, salesWhen, salesDate);
+  sales.input.onchange = () => (salesOpts.hidden = !sales.input.checked);
+  const customers = box('Customers', 'saved names, phones, addresses');
+  const menu = box('Menu', 'categories, items, options, stock');
+  const floor = box('Floor plan', 'floors and tables');
+  const staff = box('Staff', 'everyone except you');
+  const settings = box('Settings', 'restaurant name, printers, platforms, display, local server');
+  const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: 'Your PIN', style: 'width:140px' });
+  const confirm = h('input', { placeholder: 'Type RESET', style: 'width:140px' });
+  const go = act(async () => {
+    const options = {
+      sales: sales.input.checked ? (salesWhen.value === 'all' ? { when: 'all' } : { when: 'before', date: salesDate.value }) : null,
+      customers: customers.input.checked, menu: menu.input.checked, floor_plan: floor.input.checked,
+      staff: staff.input.checked, settings: settings.input.checked,
+    };
+    if (!options.sales && !Object.entries(options).some(([k, v]) => k !== 'sales' && v)) return toast('Tick what you want to delete', true);
+    const r = await call('reset_data', { options, pin: pin.value, confirm: confirm.value });
+    pin.value = confirm.value = '';
+    const n = r.report;
+    toast(`Deleted: ${n.orders} orders, ${n.customers} customers, ${n.items} items, ${n.tables} tables, ${n.staff} staff. A full backup was saved first.`);
+    Object.assign(state, { menu: null, cats: null });
+    await start();
+  });
+  return h('div', { class: 'card stack danger-zone' },
+    h('h3', {}, 'Danger zone · Reset data'),
+    h('p', { class: 'muted' }, 'Tick only what you want to DELETE. Everything left unticked is kept. ' +
+      'A full backup is saved automatically first, so a mistake can be undone from the backups folder.'),
+    sales.el, salesOpts, customers.el, menu.el, floor.el, staff.el, settings.el,
+    h('div', { class: 'row' }, pin, confirm, h('button', { class: 'danger solid', onclick: go }, 'Delete selected data')));
 }
 
 // ---------- full screen ----------

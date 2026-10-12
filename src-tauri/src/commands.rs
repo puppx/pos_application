@@ -22,6 +22,8 @@ const IDLE_LOGOUT: Duration = Duration::from_secs(12 * 60 * 60);
 /// Logged-in browsers kept at once (the longest idle is logged out first).
 const MAX_TERMINALS: usize = 64;
 pub const BACKUPS_KEPT: usize = 14;
+/// Menu-only backups kept (each is a small JSON file).
+const MENU_BACKUPS_KEPT: usize = 30;
 
 struct Login {
     session: Session,
@@ -150,6 +152,61 @@ pub struct DayCloseView {
 pub struct CloseResult {
     view: DayCloseView,
     print: PrintOutcome,
+    /// Nothing happened that day, so nothing was printed.
+    empty: bool,
+}
+
+#[derive(Serialize)]
+pub struct MenuBackupFile {
+    name: String,
+    /// Unix seconds.
+    saved_at: u64,
+    items: usize,
+}
+
+#[derive(Serialize)]
+pub struct MenuBackupSaved {
+    file: MenuBackupFile,
+    path: String,
+    /// The file's contents, so a browser can also download it.
+    menu: MenuBackup,
+}
+
+#[derive(Serialize)]
+pub struct ResetResult {
+    report: ResetReport,
+    /// Full backup taken just before the reset.
+    backup: String,
+}
+
+/// Menu backups in `dir`, newest first.
+fn menu_backups(dir: &Path) -> Vec<(MenuBackupFile, PathBuf)> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !is_menu_backup_name(&name) {
+                return None;
+            }
+            let saved_at = name[5..name.len() - 5].parse().ok()?;
+            let items = std::fs::read(e.path())
+                .ok()
+                .and_then(|b| serde_json::from_slice::<MenuBackup>(&b).ok())
+                .map_or(0, |m| m.items.len());
+            Some((MenuBackupFile { name, saved_at, items }, e.path()))
+        })
+        .collect();
+    v.sort_by_key(|(f, _)| std::cmp::Reverse(f.saved_at));
+    v
+}
+
+/// "menu-<unix seconds>.json" only: never a path.
+fn is_menu_backup_name(name: &str) -> bool {
+    name.strip_prefix("menu-")
+        .and_then(|r| r.strip_suffix(".json"))
+        .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
 }
 
 pub fn backup_path(dir: &Path) -> PathBuf {
@@ -501,10 +558,12 @@ commands! {
         let (view, job) = app.with_session(t, |pos, s| {
             let close = pos.close_day(s)?;
             let text = pos.day_close_text(&close)?;
-            let job = pos.day_close_job(s, &close)?;
+            // A day with no sales, voids or cancellations prints nothing.
+            let job = if close.summary.is_empty() { None } else { pos.day_close_job(s, &close)? };
             Ok((DayCloseView { close, text }, job))
         })?;
-        Ok(CloseResult { view, print: print(job) })
+        let empty = view.close.summary.is_empty();
+        Ok(CloseResult { view, print: print(job), empty })
     }
 
     fn day_closes(app, t, limit: i64) -> Vec<DayCloseView> {
@@ -549,6 +608,65 @@ commands! {
 
     fn top_products(app, t, from: i64, to: i64, limit: i64) -> Vec<TopProduct> {
         app.with_session(t, |pos, s| pos.top_products(s, from, to, limit))
+    }
+
+    fn backup_menu(app, t) -> MenuBackupSaved {
+        let menu = app.with_session(t, |pos, s| {
+            s.require(Permission::Backup)?;
+            pos.export_menu(s)
+        })?;
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let name = format!("menu-{ts}.json");
+        let path = app.backup_dir.join(&name);
+        let json = serde_json::to_vec_pretty(&menu).map_err(|e| PosError::Internal(e.to_string()))?;
+        std::fs::write(&path, json).map_err(|e| PosError::Internal(format!("cannot save the menu backup: {e}")))?;
+        for (_, old) in menu_backups(&app.backup_dir).into_iter().skip(MENU_BACKUPS_KEPT) {
+            let _ = std::fs::remove_file(old);
+        }
+        Ok(MenuBackupSaved { file: MenuBackupFile { name, saved_at: ts, items: menu.items.len() }, path: path.display().to_string(), menu })
+    }
+
+    fn list_menu_backups(app, t) -> Vec<MenuBackupFile> {
+        app.with_session(t, |_, s| s.require(Permission::Backup))?;
+        Ok(menu_backups(&app.backup_dir).into_iter().map(|(f, _)| f).collect())
+    }
+
+    fn restore_menu_backup(app, t, name: String) -> MenuCounts {
+        if !is_menu_backup_name(&name) {
+            return Err(PosError::Validation("that is not a menu backup".into()));
+        }
+        let bytes = std::fs::read(app.backup_dir.join(&name)).map_err(|_| PosError::NotFound)?;
+        let menu: MenuBackup =
+            serde_json::from_slice(&bytes).map_err(|_| PosError::Validation("this file is not a POS menu backup".into()))?;
+        app.with_session(t, |pos, s| {
+            s.require(Permission::Backup)?;
+            pos.import_menu(s, &menu)
+        })
+    }
+
+    /// Restore from a file the user picked (e.g. a menu from another till).
+    fn import_menu(app, t, menu: MenuBackup) -> MenuCounts {
+        app.with_session(t, |pos, s| {
+            s.require(Permission::Backup)?;
+            pos.import_menu(s, &menu)
+        })
+    }
+
+    /// Delete the chosen data after re-checking the admin's PIN and taking
+    /// a full backup (restorable like any other backup).
+    fn reset_data(app, t, options: ResetOptions, pin: String, confirm: String) -> ResetResult {
+        if confirm.trim() != "RESET" {
+            return Err(PosError::Validation("type RESET to confirm".into()));
+        }
+        app.with_session(t, |pos, s| {
+            s.require(Permission::ManageSettings)?;
+            pos.verify_pin(s, &pin)?;
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let backup = app.backup_dir.join(format!("pos-before-reset-{ts}.db"));
+            pos.backup_unchecked(&backup)?;
+            let report = pos.reset_data(s, &options)?;
+            Ok(ResetResult { report, backup: backup.display().to_string() })
+        })
     }
 
     fn get_setting(app, t, key: String) -> Option<String> {

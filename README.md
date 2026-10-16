@@ -25,6 +25,7 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Full screen**: press **F11** or tap the full-screen button at the top right. Turn on **Settings → Display → Open in full screen when the POS starts** for a kiosk-style till.
 - **PIN login** with **admin** and **staff** roles
 - **Auto logout**: after 5 minutes without a touch or key press (Settings → Auto logout: never, 1–60 minutes), with a 30-second warning. Applies to the till and every device on the local server; open orders are kept
+- **Delete mistakes (admin)**: History → an order → **Delete order** removes an order entered by mistake from history and reports for good (stock is put back); use Void for real refunds. In Menu, **Delete item** and **Delete category** remove them for good (items named on past orders are hidden everywhere, and those orders keep their own copy of the name and price)
 - **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items
 - **Backups**: automatic daily copy at startup (last 14 kept), plus "Back up everything now"
 - **Menu backup**: Settings → Menu backup saves just the menu (categories, items, choices, options, prices) to restore later or load on another till (*Restore from a file…*)

@@ -112,6 +112,24 @@ impl Pos {
         Ok(())
     }
 
+    /// Delete a category; its items stay on the menu without a category.
+    pub fn delete_category(&mut self, s: &Session, id: i64) -> Result<()> {
+        s.require(Permission::ManageMenu)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let name: String = tx
+            .query_row("SELECT name FROM categories WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .ok_or(PosError::NotFound)?;
+        tx.execute("UPDATE products SET category_id = NULL, updated_at = unixepoch() WHERE category_id = ?1", [id])?;
+        tx.execute("DELETE FROM categories WHERE id = ?1", [id])?;
+        tx.execute(
+            "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'category.delete', ?2)",
+            rusqlite::params![s.user_id, format!("{id} {name}")],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Every sellable item, ordered for the menu-button grid. The UI loads
     /// this once per screen and filters locally, so tapping is instant.
     pub fn menu(&self, s: &Session) -> Result<Vec<Product>> {

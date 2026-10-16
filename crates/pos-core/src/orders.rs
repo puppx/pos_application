@@ -878,6 +878,42 @@ impl Pos {
         self.get_order(s, order_id)
     }
 
+    /// Delete an order completely (a mistake to be done again): it leaves
+    /// history, reports and the customer's order count. Stock taken by a
+    /// paid order is put back. Admin only; logged with the reason.
+    pub fn delete_order(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<()> {
+        s.require(Permission::VoidOrder)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (status, total, customer): (String, Option<i64>, Option<i64>) = tx
+            .query_row("SELECT status, total_cents, customer_id FROM orders WHERE id = ?1", [order_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?
+            .ok_or(PosError::NotFound)?;
+        if status == "paid" {
+            tx.execute(
+                "UPDATE products SET stock_qty = stock_qty - (
+                     SELECT m.delta FROM stock_movements m
+                     WHERE m.order_id = ?1 AND m.reason = 'sale' AND m.product_id = products.id)
+                 WHERE id IN (SELECT product_id FROM stock_movements WHERE order_id = ?1 AND reason = 'sale')",
+                [order_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM order_item_options WHERE item_id IN (SELECT id FROM order_items WHERE order_id = ?1)",
+            [order_id],
+        )?;
+        tx.execute("DELETE FROM order_items WHERE order_id = ?1", [order_id])?;
+        tx.execute("DELETE FROM stock_movements WHERE order_id = ?1", [order_id])?;
+        tx.execute("DELETE FROM orders WHERE id = ?1", [order_id])?;
+        if let Some(c) = customer {
+            tx.execute("UPDATE customers SET order_count = MAX(order_count - 1, 0) WHERE id = ?1", [c])?;
+        }
+        audit_tx(&tx, s.user_id, "order.delete", &format!("#{order_id} {status} total {} {}", total.unwrap_or(0), reason.trim()))?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Every open order (all types), oldest first: the live service board.
     pub fn list_open_orders(&self, s: &Session) -> Result<Vec<OrderSummary>> {
         s.require(Permission::Sell)?;

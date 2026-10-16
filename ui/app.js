@@ -567,7 +567,7 @@ async function renderOrder() {
     app.classList.remove('fill');
     return screen(h('div', { class: 'page narrow' },
       h('div', { class: 'toolbar' }, h('button', { class: 'ghost', onclick: closeOrder }, icon('back'), 'Back')),
-      orderDetail(order, () => renderShell())));
+      orderDetail(order, (what) => (what === 'deleted' ? closeOrder() : renderShell()))));
   }
   const orderId = order.id;
 
@@ -1159,7 +1159,16 @@ function orderDetail(o, onChange) {
         await call('void_order', { orderId: o.id, reason: reason.value });
         toast('Order voided');
         onChange();
-      }) }, 'Void / refund')));
+      }) }, 'Void / refund')),
+    // A mistake to be done again: remove the order from history and reports.
+    isAdmin() && h('div', { class: 'row delete-order' },
+      h('span', { class: 'muted grow' }, 'Entered by mistake? Delete removes this order from history and reports for good' +
+        (o.status === 'paid' ? ' (stock is put back). To refund a real sale use Void instead.' : '.')),
+      confirmBtn('Delete order', `Tap again to delete #${o.id}`, async () => {
+        await call('delete_order', { orderId: o.id, reason: reason.value || null });
+        toast(`Order #${o.id} deleted`);
+        onChange('deleted');
+      })));
 }
 
 // ---------- open orders board + new takeaway / collection / delivery ----------
@@ -1249,7 +1258,11 @@ async function renderHistory() {
     if (!orders.length) setKids(list, h('div', { class: 'empty small' }, icon('history', 36), h('p', {}, 'No closed orders on this day.')));
   });
   async function show(id) {
-    setKids(detail, orderDetail(await call('get_order', { id }), async () => { await show(id); await load(); }));
+    setKids(detail, orderDetail(await call('get_order', { id }), async (what) => {
+      if (what === 'deleted') setKids(detail);
+      else await show(id);
+      await load();
+    }));
   }
   date.onchange = load;
   screen(h('div', { class: 'page split' },
@@ -1313,7 +1326,13 @@ async function renderMenuAdmin() {
           else await call('create_category', args);
           toast('Saved'); await changed();
         }) }, 'Save'),
-        h('button', { onclick: () => setKids(form) }, 'Cancel'))));
+        h('button', { onclick: () => setKids(form) }, 'Cancel'),
+        h('span', { style: 'flex:1' }),
+        c && confirmBtn('Delete category', `Tap again to delete "${c.name}"`, async () => {
+          await call('delete_category', { id: c.id });
+          toast(`${c.name} deleted; its items now have no category`);
+          await changed();
+        }))));
     name.focus();
   }
 
@@ -1427,7 +1446,13 @@ async function renderMenuAdmin() {
       h('label', {}, f.starter, ' Starter ', h('span', { class: 'muted' }, '(dine-in: sent to the kitchen first; the rest waits for "Call mains")')),
       h('div', { class: 'row' }, h('label', {}, f.track, ' Count stock (e.g. bottled drinks)'),
         !p && ['Opening stock', f.stock], p && h('label', {}, f.active, ' On the menu')),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel')),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'),
+        h('span', { style: 'flex:1' }),
+        p && confirmBtn('Delete item', `Tap again to delete "${p.name}" for good`, async () => {
+          await call('delete_product', { id: p.id });
+          toast(`${p.name} deleted`);
+          await changed();
+        })),
       p && p.track_stock && h('div', { class: 'row' }, `Stock: ${p.stock_qty}`, delta, reason,
         h('button', { onclick: act(async () => {
           await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });

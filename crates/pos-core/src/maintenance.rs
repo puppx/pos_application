@@ -159,7 +159,7 @@ fn clear_menu(tx: &Transaction) -> Result<usize> {
          DELETE FROM products WHERE id NOT IN (SELECT product_id FROM order_items)
              AND id NOT IN (SELECT product_id FROM stock_movements)
              AND id NOT IN (SELECT product_id FROM product_variants);
-         UPDATE products SET active = 0, sku = NULL, barcode = NULL, category_id = NULL, updated_at = unixepoch();
+         UPDATE products SET active = 0, deleted = 1, sku = NULL, barcode = NULL, category_id = NULL, updated_at = unixepoch();
          DELETE FROM categories;
          DELETE FROM options WHERE id NOT IN (SELECT option_id FROM order_item_options);
          UPDATE options SET active = 0;

@@ -172,7 +172,7 @@ impl Pos {
     ) -> Result<Vec<Product>> {
         s.require(Permission::ManageMenu)?;
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {COLS} FROM products p WHERE (?1 OR p.active = 1)
+            "SELECT {COLS} FROM products p WHERE p.deleted = 0 AND (?1 OR p.active = 1)
              ORDER BY p.name LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt.query_map(
@@ -249,6 +249,38 @@ impl Pos {
         }
         self.audit(Some(s.user_id), "product.update", &format!("{id} {name}"))?;
         self.get_product(s, id)
+    }
+
+    /// Delete a menu item for good. Unused items are removed; items that past
+    /// orders still name are hidden everywhere (their orders keep their own
+    /// copy of the name and price). Returns true if the row was removed.
+    pub fn delete_product(&mut self, s: &Session, id: i64) -> Result<bool> {
+        s.require(Permission::ManageMenu)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let name: String = tx
+            .query_row("SELECT name FROM products WHERE id = ?1 AND deleted = 0", [id], |r| r.get(0))
+            .optional()?
+            .ok_or(PosError::NotFound)?;
+        let used: bool =
+            tx.query_row("SELECT EXISTS (SELECT 1 FROM order_items WHERE product_id = ?1)", [id], |r| r.get(0))?;
+        tx.execute("DELETE FROM product_option_groups WHERE product_id = ?1", [id])?;
+        if used {
+            tx.execute(
+                "UPDATE products SET active = 0, deleted = 1, sku = NULL, barcode = NULL, updated_at = unixepoch() WHERE id = ?1",
+                [id],
+            )?;
+            tx.execute("UPDATE product_variants SET active = 0 WHERE product_id = ?1", [id])?;
+        } else {
+            tx.execute("DELETE FROM stock_movements WHERE product_id = ?1", [id])?;
+            tx.execute("DELETE FROM product_variants WHERE product_id = ?1", [id])?;
+            tx.execute("DELETE FROM products WHERE id = ?1", [id])?;
+        }
+        tx.execute(
+            "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'product.delete', ?2)",
+            params![s.user_id, format!("{id} {name}")],
+        )?;
+        tx.commit()?;
+        Ok(!used)
     }
 
     /// Quick "Starter" toggle from the menu list.

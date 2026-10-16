@@ -681,6 +681,20 @@ commands! {
         app.with_session(t, |pos, s| pos.set_service_charge(s, order_id, rate_bp))
     }
 
+    fn delete_order(app, t, order_id: i64, reason: Option<String>) -> () {
+        app.with_session(t, |pos, s| pos.delete_order(s, order_id, reason.as_deref().unwrap_or("")))
+    }
+
+    /// True when the item was removed; false when past orders name it, so
+    /// it was hidden instead.
+    fn delete_product(app, t, id: i64) -> bool {
+        app.with_session(t, |pos, s| pos.delete_product(s, id))
+    }
+
+    fn delete_category(app, t, id: i64) -> () {
+        app.with_session(t, |pos, s| pos.delete_category(s, id))
+    }
+
     fn get_setting(app, t, key: String) -> Option<String> {
         app.with_session(t, |pos, _| pos.setting(&key))
     }

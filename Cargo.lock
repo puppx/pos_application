@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "pos-app"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "pos-core",
  "serde",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "pos-core"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "argon2",
  "chrono",

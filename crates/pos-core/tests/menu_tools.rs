@@ -7,7 +7,7 @@ fn setup() -> (Pos, Session) {
 }
 
 fn row(name: &str, price: i64, cat: Option<&str>) -> ImportRow {
-    ImportRow { name: name.into(), price_cents: price, category: cat.map(str::to_string), tax_rate_bp: None }
+    ImportRow { name: name.into(), price_cents: price, category: cat.map(str::to_string), tax_rate_bp: None, name_alt: None }
 }
 
 #[test]
@@ -16,7 +16,7 @@ fn import_uses_category_defaults_and_creates_categories() {
     pos.set_setting(&s, "default_tax_bp", "2000").unwrap();
     assert_eq!(pos.default_tax_bp().unwrap(), 2000);
     let starters = pos.create_category(&s, "Starters", None, 1).unwrap();
-    let starters = pos.set_category_defaults(&s, starters.id, Some(0), true).unwrap();
+    let starters = pos.set_category_defaults(&s, starters.id, Some(0), true, None).unwrap();
     assert_eq!((starters.tax_rate_bp, starters.starter), (Some(0), true));
 
     let r = pos
@@ -37,7 +37,7 @@ fn import_uses_category_defaults_and_creates_categories() {
     let err = pos.import_items(&s, &[row("Ok", 100, None), row("", 100, None)]).unwrap_err();
     assert!(err.to_string().starts_with("line 2:"), "{err}");
     assert_eq!(pos.menu(&s).unwrap().len(), 4);
-    assert!(pos.set_category_defaults(&s, starters.id, Some(10_001), false).is_err());
+    assert!(pos.set_category_defaults(&s, starters.id, Some(10_001), false, None).is_err());
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn reorder_and_duplicate() {
 
     // Duplicate B with a choice and an option group: copy lands right after it.
     let b = v[1].0;
-    pos.set_variants(&s, b, &[VariantInput { id: None, name: "Small".into(), price_cents: 150 }]).unwrap();
+    pos.set_variants(&s, b, &[VariantInput { id: None, name: "Small".into(), price_cents: 150, name_alt: None }]).unwrap();
     let g = pos.create_option_group(&s, "Extras", 0, 2).unwrap();
     pos.set_product_option_groups(&s, b, &[g.id]).unwrap();
     let copy = pos.duplicate_product(&s, b).unwrap();
@@ -67,7 +67,7 @@ fn reorder_and_duplicate() {
     assert_eq!(pos.list_categories(&s, false).unwrap()[0].name, "X");
 
     // A menu backup keeps the defaults and the order.
-    pos.set_category_defaults(&s, cat, Some(500), true).unwrap();
+    pos.set_category_defaults(&s, cat, Some(500), true, None).unwrap();
     let backup = pos.export_menu(&s).unwrap();
     pos.import_menu(&s, &backup).unwrap();
     let c = pos.list_categories(&s, false).unwrap().into_iter().find(|c| c.name == "Cat").unwrap();

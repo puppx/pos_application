@@ -25,6 +25,9 @@ pub struct ImportRow {
     /// None = the category's default, else the main default.
     #[serde(default)]
     pub tax_rate_bp: Option<i64>,
+    /// Thai name.
+    #[serde(default)]
+    pub name_alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,15 +43,23 @@ impl Pos {
         Ok(self.setting(DEFAULT_TAX_KEY)?.and_then(|v| v.trim().parse().ok()).filter(|v| (0..=10_000).contains(v)).unwrap_or(0))
     }
 
-    /// Defaults for new items in a category.
-    pub fn set_category_defaults(&self, s: &Session, id: i64, tax_rate_bp: Option<i64>, starter: bool) -> Result<Category> {
+    /// Defaults for new items in a category, and its Thai name.
+    pub fn set_category_defaults(
+        &self,
+        s: &Session,
+        id: i64,
+        tax_rate_bp: Option<i64>,
+        starter: bool,
+        name_alt: Option<&str>,
+    ) -> Result<Category> {
         s.require(Permission::ManageMenu)?;
         if tax_rate_bp.is_some_and(|t| !(0..=10_000).contains(&t)) {
             return invalid("tax rate must be between 0% and 100%");
         }
+        let name_alt = crate::products::clean_alt(name_alt, 40)?;
         let changed = self.conn.execute(
-            "UPDATE categories SET tax_rate_bp = ?2, starter = ?3 WHERE id = ?1",
-            params![id, tax_rate_bp, starter],
+            "UPDATE categories SET tax_rate_bp = ?2, starter = ?3, name_alt = ?4 WHERE id = ?1",
+            params![id, tax_rate_bp, starter, name_alt],
         )?;
         if changed == 0 {
             return Err(PosError::NotFound);
@@ -96,15 +107,15 @@ impl Pos {
             params![id, sort],
         )?;
         tx.execute(
-            "INSERT INTO products (category_id, name, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order)
-             SELECT category_id, ?2, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order + 1
+            "INSERT INTO products (category_id, name, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order, name_alt)
+             SELECT category_id, ?2, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order + 1, name_alt
              FROM products WHERE id = ?1",
             params![id, copy],
         )?;
         let new_id = tx.last_insert_rowid();
         tx.execute(
-            "INSERT INTO product_variants (product_id, name, price_cents, sort_order)
-             SELECT ?2, name, price_cents, sort_order FROM product_variants WHERE product_id = ?1 AND active = 1",
+            "INSERT INTO product_variants (product_id, name, price_cents, sort_order, name_alt)
+             SELECT ?2, name, price_cents, sort_order, name_alt FROM product_variants WHERE product_id = ?1 AND active = 1",
             params![id, new_id],
         )?;
         tx.execute(
@@ -162,10 +173,11 @@ impl Pos {
             let tax = row.tax_rate_bp.or(cat.and_then(|c| c.1)).unwrap_or(default_tax);
             let name = crate::products::validate(&row.name, row.price_cents, 0, tax).map_err(|e| at(e.to_string()))?;
             let category_id = cat.map(|c| c.0);
+            let alt = crate::products::clean_alt(row.name_alt.as_deref(), 120).map_err(|e| at(e.to_string()))?;
             tx.execute(
-                "INSERT INTO products (category_id, name, price_cents, tax_rate_bp, starter, sort_order)
-                 VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?1))",
-                params![category_id, name, row.price_cents, tax, cat.is_some_and(|c| c.2)],
+                "INSERT INTO products (category_id, name, price_cents, tax_rate_bp, starter, sort_order, name_alt)
+                 VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?1), ?6)",
+                params![category_id, name, row.price_cents, tax, cat.is_some_and(|c| c.2), alt],
             )?;
             report.items += 1;
         }

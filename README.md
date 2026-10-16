@@ -95,6 +95,27 @@ Ground
 ------------------------------------------
 ```
 
+### Thai and English names
+
+Give a menu item a **Thai name** (in the item editor, the quick-add row, or the 4th
+column of *Paste a menu*), and its kitchen ticket shows the English name with the Thai
+name under it, so every cook can read it. Item choices, options and categories can
+have Thai names too. Under **Item names** each printer prints *English with Thai under
+it* (kitchen default), *English only* or *Thai only*; receipts default to English only.
+Items without a Thai name always print in English.
+
+```
+-- MAINS / อาหารจานหลัก --
+1 x Pad Thai (Chicken)
+    ผัดไทย (ไก่)
+   + Fried egg / ไข่ดาว
+```
+
+Thermal printers have no Thai characters built in, so lines with Thai are drawn with
+the bundled Sarabun font (SIL Open Font License, `crates/pos-core/fonts/`) and sent as
+a raster image, which every ESC/POS printer can print. The screens stay in English;
+the Thai name is shown small under the item on the order screen.
+
 Printing happens after the order is saved and never blocks the till. A printer
 that is off or unreachable gives up after 4 seconds and shows an error.
 
@@ -264,6 +285,7 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
   src/migrations/    Database upgrades applied on start (never edit a shipped one)
   src/printing.rs    Kitchen tickets: layout, ESC/POS, network/Windows/serial printing
   src/receipt.rs     Customer receipts/bills and the cash drawer pulse
+  src/raster.rs      Thai text on thermal printers (shaped, drawn as an image)
   src/dayclose.rs    End of day: business date, close, sales summary printout
   src/lan.rs         Local server settings (port, start automatically)
   src/schema.sql     Database schema (migrations via PRAGMA user_version)

@@ -20,7 +20,7 @@ fn setup() -> (Pos, Session, Menu, i64) {
     let mut item = |name: &str, price, cat: i64, starter| {
         pos.create_product(&admin, NewProduct {
             category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter,
+            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter, name_alt: None,
         })
         .unwrap()
     };
@@ -124,7 +124,7 @@ fn courses_only_apply_to_dine_in_with_starters() {
 fn deleted_option_group_disappears_everywhere() {
     let (mut pos, s, m, table) = setup();
     let g = pos.create_option_group(&s, "Extras", 0, 3).unwrap();
-    let g = pos.save_group_options(&s, g.id, &[OptionInput { id: None, name: "Cheese".into(), price_cents: 100 }]).unwrap();
+    let g = pos.save_group_options(&s, g.id, &[OptionInput { id: None, name: "Cheese".into(), price_cents: 100, name_alt: None }]).unwrap();
     pos.set_product_option_groups(&s, m.burger.id, &[g.id]).unwrap();
     let o = pos.open_order(&s, &dine_in(table)).unwrap();
     let o = pos.add_item(&s, o.id, m.burger.id, 1, None, None, &[g.options[0].id]).unwrap();
@@ -198,7 +198,7 @@ fn end_of_day_closes_summarises_and_moves_on() {
     assert!(pos.day_close_job(&s, &close).unwrap().is_none());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("z.bin");
-    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 0 };
+    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 0, names: None };
     pos.set_receipt_settings(&s, &ReceiptSettings { printer, ..Default::default() }).unwrap();
     let job = pos.day_close_job(&s, &close).unwrap().unwrap();
     assert_eq!(job.parts.len(), 1, "the report prints once whatever the receipt copies");
@@ -209,7 +209,7 @@ fn copies_are_separate_parts_sent_with_a_delay() {
     let (mut pos, s, m, table) = setup();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kitchen.bin");
-    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 1 };
+    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 1, names: None };
     pos.set_kitchen_printer(&s, &cfg).unwrap();
     let o = pos.open_order(&s, &dine_in(table)).unwrap();
     pos.add_item(&s, o.id, m.burger.id, 1, None, None, &[]).unwrap();

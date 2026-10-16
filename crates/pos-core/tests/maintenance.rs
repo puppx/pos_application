@@ -19,7 +19,7 @@ fn setup() -> Fixture {
     let mut item = |name: &str, price, cat: i64, sku: Option<&str>| {
         pos.create_product(&admin, NewProduct {
             category_id: Some(cat), sku: sku.map(str::to_string), barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 100, tax_rate_bp: 1000, stock_qty: 5, track_stock: true, starter: false,
+            cost_cents: 100, tax_rate_bp: 1000, stock_qty: 5, track_stock: true, starter: false, name_alt: None,
         })
         .unwrap()
     };
@@ -27,14 +27,14 @@ fn setup() -> Fixture {
     let soup = item("Soup", 0, starters.id, None);
     pos.set_starter(&admin, soup.id, true).unwrap();
     pos.set_variants(&admin, soup.id, &[
-        VariantInput { id: None, name: "Chicken".into(), price_cents: 650 },
-        VariantInput { id: None, name: "Beef".into(), price_cents: 750 },
+        VariantInput { id: None, name: "Chicken".into(), price_cents: 650, name_alt: None },
+        VariantInput { id: None, name: "Beef".into(), price_cents: 750, name_alt: None },
     ])
     .unwrap();
     let size = pos.create_option_group(&admin, "Size", 1, 1).unwrap();
     pos.save_group_options(&admin, size.id, &[
-        OptionInput { id: None, name: "Regular".into(), price_cents: 0 },
-        OptionInput { id: None, name: "Large".into(), price_cents: 200 },
+        OptionInput { id: None, name: "Regular".into(), price_cents: 0, name_alt: None },
+        OptionInput { id: None, name: "Large".into(), price_cents: 200, name_alt: None },
     ])
     .unwrap();
     pos.set_product_option_groups(&admin, burger.id, &[size.id]).unwrap();
@@ -134,7 +134,7 @@ fn reset_keeps_what_was_not_chosen() {
     f.pos.create_category(&f.admin, "Mains", None, 0).unwrap();
     f.pos.create_product(&f.admin, NewProduct {
         category_id: None, sku: Some("B1".into()), barcode: None, name: "Burger".into(), price_cents: 900,
-        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false,
+        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None,
     })
     .unwrap();
 }

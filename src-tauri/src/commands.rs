@@ -695,8 +695,8 @@ commands! {
         app.with_session(t, |pos, s| pos.delete_category(s, id))
     }
 
-    fn set_category_defaults(app, t, id: i64, tax_rate_bp: Option<i64>, starter: bool) -> Category {
-        app.with_session(t, |pos, s| pos.set_category_defaults(s, id, tax_rate_bp, starter))
+    fn set_category_defaults(app, t, id: i64, tax_rate_bp: Option<i64>, starter: bool, name_alt: Option<String>) -> Category {
+        app.with_session(t, |pos, s| pos.set_category_defaults(s, id, tax_rate_bp, starter, name_alt.as_deref()))
     }
 
     fn reorder_categories(app, t, ids: Vec<i64>) -> () {

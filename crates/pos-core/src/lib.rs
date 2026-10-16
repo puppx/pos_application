@@ -16,6 +16,7 @@ mod menu_tools;
 mod options;
 mod orders;
 mod printing;
+mod raster;
 mod receipt;
 mod products;
 mod reports;
@@ -41,7 +42,7 @@ pub use menu::Category;
 pub use menu_tools::{ImportReport, ImportRow};
 pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
-pub use printing::{system_printers, KitchenTicket, PrintJob, PrinterConfig, PrinterTarget, TicketItem};
+pub use printing::{system_printers, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
 pub use orders::{
     ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, PaymentMethod,
 };
@@ -66,6 +67,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0005_service_charge.sql"),
     include_str!("migrations/0006_deleted_items.sql"),
     include_str!("migrations/0007_menu_editing.sql"),
+    include_str!("migrations/0008_thai_names.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

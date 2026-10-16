@@ -21,6 +21,8 @@ pub struct Product {
     pub starter: bool,
     /// Position within its category on the menu.
     pub sort_order: i64,
+    /// Second name (Thai), printed under the name on kitchen tickets.
+    pub name_alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,6 +46,8 @@ pub struct NewProduct {
     pub track_stock: bool,
     #[serde(default)]
     pub starter: bool,
+    #[serde(default)]
+    pub name_alt: Option<String>,
 }
 
 /// Stock is not editable here: it only changes through sales and
@@ -68,6 +72,8 @@ pub struct ProductUpdate {
     pub active: bool,
     #[serde(default)]
     pub starter: bool,
+    #[serde(default)]
+    pub name_alt: Option<String>,
 }
 
 fn yes() -> bool {
@@ -75,7 +81,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -94,11 +100,21 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         active: r.get(10)?,
         starter: r.get(11)?,
         sort_order: r.get(12)?,
+        name_alt: r.get(13)?,
     })
 }
 
 fn clean_code(code: Option<String>) -> Option<String> {
     code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty())
+}
+
+/// Second-language name: trimmed, empty = none.
+pub(crate) fn clean_alt(name: Option<&str>, max: usize) -> Result<Option<String>> {
+    let name = name.map(str::trim).filter(|n| !n.is_empty());
+    if name.is_some_and(|n| n.chars().count() > max) {
+        return invalid(format!("Thai names can be at most {max} characters"));
+    }
+    Ok(name.map(str::to_string))
 }
 
 pub(crate) fn validate(name: &str, price: i64, cost: i64, tax_bp: i64) -> Result<String> {
@@ -188,11 +204,12 @@ impl Pos {
     pub fn create_product(&mut self, s: &Session, p: NewProduct) -> Result<Product> {
         s.require(Permission::ManageMenu)?;
         let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
+        let name_alt = clean_alt(p.name_alt.as_deref(), 120)?;
         self.check_category(p.category_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter, name_alt, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                      (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?9))",
             params![
                 clean_code(p.sku),
@@ -204,7 +221,8 @@ impl Pos {
                 p.stock_qty,
                 p.track_stock,
                 p.category_id,
-                p.starter
+                p.starter,
+                name_alt
             ],
         )
         .map_err(|e| map_unique(e, CODE_TAKEN))?;
@@ -226,12 +244,13 @@ impl Pos {
     pub fn update_product(&self, s: &Session, id: i64, p: ProductUpdate) -> Result<Product> {
         s.require(Permission::ManageMenu)?;
         let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
+        let name_alt = clean_alt(p.name_alt.as_deref(), 120)?;
         self.check_category(p.category_id)?;
         let changed = self
             .conn
             .execute(
                 "UPDATE products SET sku = ?2, barcode = ?3, name = ?4, price_cents = ?5, cost_cents = ?6,
-                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, starter = ?11, updated_at = unixepoch()
+                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, starter = ?11, name_alt = ?12, updated_at = unixepoch()
                  WHERE id = ?1",
                 params![
                     id,
@@ -244,7 +263,8 @@ impl Pos {
                     p.track_stock,
                     p.active,
                     p.category_id,
-                    p.starter
+                    p.starter,
+                    name_alt
                 ],
             )
             .map_err(|e| map_unique(e, CODE_TAKEN))?;

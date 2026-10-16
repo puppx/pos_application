@@ -22,6 +22,7 @@ pub struct OptionChoice {
     pub name: String,
     pub price_cents: i64,
     pub active: bool,
+    pub name_alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +45,8 @@ pub struct OptionInput {
     pub name: String,
     #[serde(default)]
     pub price_cents: i64,
+    #[serde(default)]
+    pub name_alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +70,8 @@ pub struct ItemOption {
     pub group_name: String,
     pub name: String,
     pub price_cents: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_alt: Option<String>,
 }
 
 const GROUP_TAKEN: &str = "an option group with that name already exists";
@@ -102,11 +107,11 @@ fn load_groups(conn: &Connection, include_inactive: bool) -> Result<Vec<OptionGr
         .collect::<rusqlite::Result<_>>()?;
     let index: HashMap<i64, usize> = groups.iter().enumerate().map(|(i, g)| (g.id, i)).collect();
     let mut stmt = conn.prepare_cached(
-        "SELECT group_id, id, name, price_cents, active FROM options
+        "SELECT group_id, id, name, price_cents, active, name_alt FROM options
          WHERE ?1 OR active = 1 ORDER BY group_id, sort_order, id",
     )?;
     let rows = stmt.query_map([include_inactive], |r| {
-        Ok((r.get::<_, i64>(0)?, OptionChoice { id: r.get(1)?, name: r.get(2)?, price_cents: r.get(3)?, active: r.get(4)? }))
+        Ok((r.get::<_, i64>(0)?, OptionChoice { id: r.get(1)?, name: r.get(2)?, price_cents: r.get(3)?, active: r.get(4)?, name_alt: r.get(5)? }))
     })?;
     for row in rows {
         let (gid, o) = row?;
@@ -133,19 +138,19 @@ pub(crate) fn resolve_options(conn: &Connection, product_id: i64, option_ids: &[
         .query_map([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut stmt = conn.prepare_cached(
-        "SELECT group_id, name, price_cents, sort_order FROM options WHERE id = ?1 AND active = 1",
+        "SELECT group_id, name, price_cents, sort_order, name_alt FROM options WHERE id = ?1 AND active = 1",
     )?;
     let mut chosen = Vec::with_capacity(option_ids.len());
     for &id in option_ids {
-        let (gid, name, price, sort): (i64, String, i64, i64) = stmt
-            .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        let (gid, name, price, sort, name_alt): (i64, String, i64, i64, Option<String>) = stmt
+            .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that option is no longer available".into()))?;
         let pos = groups
             .iter()
             .position(|g| g.0 == gid)
             .ok_or_else(|| PosError::Validation(format!("{name} is not an option for this item")))?;
-        chosen.push((pos, sort, id, ItemOption { option_id: id, group_name: groups[pos].1.clone(), name, price_cents: price }));
+        chosen.push((pos, sort, id, ItemOption { option_id: id, group_name: groups[pos].1.clone(), name, price_cents: price, name_alt }));
     }
     for (pos, (_, name, min, max)) in groups.iter().enumerate() {
         let n = chosen.iter().filter(|c| c.0 == pos).count() as i64;
@@ -261,7 +266,7 @@ impl Pos {
             if !(-MAX_OPTION_PRICE..=MAX_OPTION_PRICE).contains(&o.price_cents) {
                 return invalid(format!("price for {name} is out of range"));
             }
-            cleaned.push((o.id, name.to_string(), o.price_cents));
+            cleaned.push((o.id, name.to_string(), o.price_cents, crate::products::clean_alt(o.name_alt.as_deref(), 40)?));
         }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing: HashSet<i64> = tx
@@ -280,15 +285,15 @@ impl Pos {
         for id in existing.difference(&keep) {
             tx.execute("UPDATE options SET active = 0 WHERE id = ?1", [id])?;
         }
-        for (i, (id, name, price)) in cleaned.iter().enumerate() {
+        for (i, (id, name, price, alt)) in cleaned.iter().enumerate() {
             match id {
                 Some(id) => tx.execute(
-                    "UPDATE options SET name = ?2, price_cents = ?3, sort_order = ?4 WHERE id = ?1",
-                    params![id, name, price, i as i64],
+                    "UPDATE options SET name = ?2, price_cents = ?3, sort_order = ?4, name_alt = ?5 WHERE id = ?1",
+                    params![id, name, price, i as i64, alt],
                 )?,
                 None => tx.execute(
-                    "INSERT INTO options (group_id, name, price_cents, sort_order) VALUES (?1, ?2, ?3, ?4)",
-                    params![group_id, name, price, i as i64],
+                    "INSERT INTO options (group_id, name, price_cents, sort_order, name_alt) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![group_id, name, price, i as i64, alt],
                 )?,
             };
         }

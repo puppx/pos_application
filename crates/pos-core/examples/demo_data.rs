@@ -43,7 +43,7 @@ fn main() -> Result<()> {
     let mut group = |name: &str, min, max, opts: &[(&str, i64)]| -> Result<i64> {
         let g = pos.create_option_group(&admin, name, min, max)?;
         let opts: Vec<OptionInput> =
-            opts.iter().map(|(n, p)| OptionInput { id: None, name: (*n).into(), price_cents: *p }).collect();
+            opts.iter().map(|(n, p)| OptionInput { id: None, name: (*n).into(), price_cents: *p, name_alt: None }).collect();
         Ok(pos.save_group_options(&admin, g.id, &opts)?.id)
     };
     let burger_size = group("Burger size", 1, 1, &[("Regular", 0), ("Double", 350)])?;
@@ -72,7 +72,7 @@ fn main() -> Result<()> {
                 tax_rate_bp: 1000,
                 stock_qty: 0,
                 track_stock: false,
-                starter: *cat == "Starters",
+                starter: *cat == "Starters", name_alt: None,
             })?;
             if !groups.is_empty() {
                 pos.set_product_option_groups(&admin, p.id, groups)?;

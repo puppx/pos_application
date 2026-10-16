@@ -628,10 +628,10 @@ async function renderOrder() {
         onclick: () => { state.catId = c.id; search.value = ''; closePicker(); drawMenu(); },
       }, h('span', { class: 'dot' }), c.name)));
     const q = search.value.trim().toLowerCase();
-    const list = state.menu.filter((p) => q ? p.name.toLowerCase().includes(q) : state.catId == null || p.category_id === state.catId);
+    const list = state.menu.filter((p) => q ? matches(p, q) : state.catId == null || p.category_id === state.catId);
     setKids(grid, ...list.slice(0, 300).map((p) => h('button', {
       class: 'tile', style: `--c:${catColor[p.category_id] || '#94a3b8'}`, onclick: choose(p),
-    }, h('span', { class: 'name' }, p.name),
+    }, h('span', { class: 'names' }, h('span', { class: 'name' }, p.name), p.name_alt && h('span', { class: 'alt', lang: 'th' }, p.name_alt)),
       h('span', { class: 'foot' },
         h('span', { class: 'price' }, itemPrice(p, state.itemVariants[p.id])),
         p.starter && h('span', { class: 'tag' }, 'Starter'),
@@ -779,6 +779,7 @@ async function renderOrder() {
         h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
           it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : ''),
+          it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt),
           it.options.length > 0 && h('div', { class: 'muted' }, it.options.map((o) => o.name).join(', ')),
           it.note && h('div', { class: 'muted' }, '“', it.note, '”'),
           it.discount_cents ? h('div', { class: 'muted' }, `discount -${money(it.discount_cents)}`) : ''),
@@ -1358,7 +1359,7 @@ async function renderMenuAdmin() {
   const loadProducts = act(async () => {
     let products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
     const q = search.value.trim().toLowerCase();
-    if (q) products = products.filter((p) => p.name.toLowerCase().includes(q));
+    if (q) products = products.filter((p) => matches(p, q));
     else if (state.menuTab === 'none') products = products.filter((p) => p.category_id == null);
     else if (tabCat()) products = products.filter((p) => p.category_id === tabCat());
     // Dragging sets the order inside one category, so it needs a category tab.
@@ -1371,7 +1372,8 @@ async function renderMenuAdmin() {
       products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
         onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
         canDrag && h('td', { class: 'grip', title: 'Drag to reorder', onclick: (e) => e.stopPropagation() }, '⠿'),
-        h('td', {}, p.name, variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
+        h('td', {}, p.name, p.name_alt && h('div', { class: 'alt', lang: 'th' }, p.name_alt),
+          variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
         h('td', {}, catById[p.category_id]?.name ?? '—'),
         h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
           type: 'checkbox', checked: p.starter, title: 'Starter: sent to the kitchen first',
@@ -1395,6 +1397,7 @@ async function renderMenuAdmin() {
   function quickAdd() {
     const name = h('input', { placeholder: 'New item name', 'data-f': 'qname' });
     const price = h('input', { placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', 'data-f': 'qprice' });
+    const alt = h('input', { placeholder: 'Thai name (optional)', lang: 'th', class: 'alt-input' });
     const cat = h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active).map((c) => h('option', { value: c.id }, c.name)));
     cat.value = tabCat() ?? '';
     const add = act(async () => {
@@ -1404,17 +1407,17 @@ async function renderMenuAdmin() {
       try { cents = parseMoney(price.value); } catch (e) { return fieldErr(price, e.message); }
       const category_id = cat.value ? Number(cat.value) : null;
       const d = defaultsFor(category_id);
-      await call('create_product', { product: { name: name.value, price_cents: cents, category_id, tax_rate_bp: d.tax, starter: d.starter } });
+      await call('create_product', { product: { name: name.value, name_alt: alt.value.trim() || null, price_cents: cents, category_id, tax_rate_bp: d.tax, starter: d.starter } });
       toast(`${name.value.trim()} added (${money(cents)})`);
       state.menu = null;
       state.quickCat = cat.value;
       await loadProducts();
     });
-    for (const el of [name, price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(e); });
+    for (const el of [name, alt, price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(e); });
     if (state.quickCat != null && tabCat() == null && state.menuTab === 'all') cat.value = state.quickCat;
     const row = h('tr', { class: 'quick-add' },
       tabCat() != null && !search.value && h('td', {}),
-      h('td', {}, name), h('td', {}, cat), h('td', {}), h('td', { class: 'num' }, price),
+      h('td', { class: 'quick-names' }, name, alt), h('td', {}, cat), h('td', {}), h('td', { class: 'num' }, price),
       h('td', { colspan: 2, class: 'num' }, h('button', { class: 'primary', onclick: add }, icon('plus', 16), 'Add')));
     return { row, focus: () => { if (!matchMedia('(pointer: coarse)').matches && !form.firstChild) name.focus(); } };
   }
@@ -1422,6 +1425,7 @@ async function renderMenuAdmin() {
   // ---- categories (with defaults and drag to reorder) ----
   function editCategory(c) {
     const name = h('input', { value: c?.name ?? '', placeholder: 'Category name', 'data-f': 'cname' });
+    const alt = h('input', { value: c?.name_alt ?? '', placeholder: 'Thai name (optional)', lang: 'th', 'data-f': 'calt' });
     const color = h('input', { type: 'color', value: c?.color ?? '#9ca3af' });
     const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
     const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (main default)`, inputmode: 'decimal', style: 'width:150px', 'data-f': 'ctax' });
@@ -1439,7 +1443,7 @@ async function renderMenuAdmin() {
       const saved = c
         ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.checked })
         : await call('create_category', { ...args, sortOrder: cats.length + 1 });
-      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked });
+      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked, nameAlt: alt.value.trim() || null });
       toast('Saved');
       if (!c) state.menuTab = saved.id;
       await changed();
@@ -1447,6 +1451,7 @@ async function renderMenuAdmin() {
     name.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
     setKids(form, h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
       h('div', { class: 'row' }, name, h('label', { class: 'field' }, 'Colour', color), c && h('label', { class: 'check' }, active, ' Active')),
+      h('div', { class: 'row' }, alt, h('span', { class: 'muted small' }, 'Printed next to the heading on kitchen tickets')),
       h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
         h('label', { class: 'check' }, starter, ' Items here are starters')),
@@ -1469,16 +1474,17 @@ async function renderMenuAdmin() {
     const min = h('input', { type: 'number', value: g?.min_select ?? 0, min: 0, max: 20, style: 'width:70px' });
     const max = h('input', { type: 'number', value: g?.max_select ?? 1, min: 1, max: 20, style: 'width:70px' });
     const active = h('input', { type: 'checkbox', checked: g ? g.active : true });
-    const rows = (g?.options ?? []).filter((o) => o.active).map((o) => ({ id: o.id, name: o.name, price: o.price_cents ? signed(o.price_cents) : '' }));
+    const rows = (g?.options ?? []).filter((o) => o.active).map((o) => ({ id: o.id, name: o.name, alt: o.name_alt ?? '', price: o.price_cents ? signed(o.price_cents) : '' }));
     const optList = h('div', { class: 'stack' });
     const drawRows = () => setKids(optList, ...rows.map((r, i) => h('div', { class: 'row' },
-      h('input', { value: r.name, placeholder: 'Option, e.g. Large', oninput: (e) => (r.name = e.target.value) }),
+      h('input', { value: r.name, placeholder: 'Option, e.g. Large', style: 'width:160px', oninput: (e) => (r.name = e.target.value) }),
+      h('input', { value: r.alt, placeholder: 'Thai (optional)', lang: 'th', class: 'alt-input', oninput: (e) => (r.alt = e.target.value) }),
       h('input', { value: r.price, placeholder: '+0.00', style: 'width:90px', inputmode: 'decimal', oninput: (e) => (r.price = e.target.value) }),
       h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); drawRows(); } }, '×'))));
-    const addRow = () => { rows.push({ id: null, name: '', price: '' }); drawRows(); optList.lastChild.querySelector('input').focus(); };
+    const addRow = () => { rows.push({ id: null, name: '', alt: '', price: '' }); drawRows(); optList.lastChild.querySelector('input').focus(); };
     const save = act(async () => {
       const args = { name: name.value, minSelect: parseInt(min.value, 10) || 0, maxSelect: parseInt(max.value, 10) || 1 };
-      const options = rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, price_cents: parseSignedMoney(r.price) }));
+      const options = rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, name_alt: r.alt.trim() || null, price_cents: parseSignedMoney(r.price) }));
       const saved = g
         ? await call('update_option_group', { id: g.id, ...args, sortOrder: g.sort_order, active: active.checked })
         : await call('create_option_group', args);
@@ -1510,6 +1516,7 @@ async function renderMenuAdmin() {
     const d0 = defaultsFor(startCat);
     const f = {
       name: h('input', { value: p?.name ?? '', placeholder: 'Item name', 'data-f': 'name' }),
+      alt: h('input', { value: p?.name_alt ?? '', placeholder: 'Thai name (optional), e.g. ผัดไทย', lang: 'th', 'data-f': 'alt' }),
       cat: h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name))),
       price: h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', style: 'width:110px', 'data-f': 'price' }),
       tax: h('input', { value: pct(p ? p.tax_rate_bp : d0.tax), inputmode: 'decimal', style: 'width:80px', 'data-f': 'tax' }),
@@ -1533,17 +1540,18 @@ async function renderMenuAdmin() {
       preview();
     });
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
-    const choices = (variantsOf[p?.id] ?? []).map((v) => ({ id: v.id, name: v.name, price: money(v.price_cents) }));
+    const choices = (variantsOf[p?.id] ?? []).map((v) => ({ id: v.id, name: v.name, alt: v.name_alt ?? '', price: money(v.price_cents) }));
     const choiceList = h('div', { class: 'stack' });
     const priceHint = h('span', { class: 'muted' });
     const drawChoices = () => {
       priceHint.textContent = choices.length ? '(the item price is not used)' : '';
       setKids(choiceList, ...choices.map((c, i) => h('div', { class: 'row' },
-        h('input', { value: c.name, placeholder: 'e.g. Chicken', oninput: (e) => { c.name = e.target.value; preview(); } }),
+        h('input', { value: c.name, placeholder: 'e.g. Chicken', style: 'width:150px', oninput: (e) => { c.name = e.target.value; preview(); } }),
+        h('input', { value: c.alt, placeholder: 'Thai, e.g. ไก่', lang: 'th', class: 'alt-input', oninput: (e) => (c.alt = e.target.value) }),
         h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', 'data-f': `choice${i}`, oninput: (e) => { c.price = e.target.value; preview(); } }),
         h('button', { class: 'danger', onclick: () => { choices.splice(i, 1); drawChoices(); preview(); } }, '×'))));
     };
-    const addChoice = () => { choices.push({ id: null, name: '', price: '' }); drawChoices(); choiceList.lastChild.querySelector('input').focus(); };
+    const addChoice = () => { choices.push({ id: null, name: '', alt: '', price: '' }); drawChoices(); choiceList.lastChild.querySelector('input').focus(); };
     drawChoices();
     const groupBoxes = activeGroups.map((g) => ({ g, box: h('input', { type: 'checkbox', checked: linked.has(g.id) }) }));
     const groupRow = h('div', { class: 'row' });
@@ -1556,7 +1564,7 @@ async function renderMenuAdmin() {
     const openNewGroup = () => {
       const gname = h('input', { placeholder: 'e.g. Spice level' });
       const rule = h('select', {}, h('option', { value: '1-1' }, 'Customer picks exactly 1'), h('option', { value: '0-1' }, 'Optional, up to 1'), h('option', { value: '0-5' }, 'Optional, up to 5'));
-      const opts = h('textarea', { rows: 3, placeholder: 'One option per line, with an extra price if any:\nMild\nHot\nExtra hot +0.50', style: 'width:100%' });
+      const opts = h('textarea', { rows: 3, placeholder: 'One option per line, with an extra price if any, and Thai after | if you like:\nMild | เผ็ดน้อย\nHot | เผ็ด\nExtra hot | เผ็ดมาก +0.50', style: 'width:100%' });
       setKids(newGroup, h('div', { class: 'card stack inset' },
         h('strong', {}, 'New option group'),
         h('div', { class: 'row' }, gname, rule), opts,
@@ -1565,7 +1573,8 @@ async function renderMenuAdmin() {
             const [mn, mx] = rule.value.split('-').map(Number);
             const options = opts.value.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
               const m = l.match(/^(.*?)\s*([+-]\s*[£$€]?\d+(?:[.,]\d{1,2})?)$/);
-              return m ? { id: null, name: m[1], price_cents: parseSignedMoney(m[2].replace(/\s|[£$€]/g, '')) } : { id: null, name: l, price_cents: 0 };
+              const [name, alt = ''] = (m ? m[1] : l).split('|').map((x) => x.trim());
+              return { id: null, name, name_alt: alt || null, price_cents: m ? parseSignedMoney(m[2].replace(/\s|[£$€]/g, '')) : 0 };
             });
             if (!options.length) return toast('Add at least one option, one per line', true);
             const g = await call('create_option_group', { name: gname.value, minSelect: mn, maxSelect: mx });
@@ -1592,11 +1601,11 @@ async function renderMenuAdmin() {
         ? (prices.every((x) => x === prices[0]) ? money(prices[0]) : `from ${money(Math.min(...prices))}`)
         : price == null ? '?' : money(price);
       tile.style.setProperty('--c', c?.color || '#94a3b8');
-      setKids(tile, h('span', { class: 'name' }, f.name.value.trim() || 'Item name'),
+      setKids(tile, h('span', { class: 'names' }, h('span', { class: 'name' }, f.name.value.trim() || 'Item name'), f.alt.value.trim() && h('span', { class: 'alt', lang: 'th' }, f.alt.value.trim())),
         h('span', { class: 'foot' }, h('span', { class: 'price' }, label), f.starter.checked && h('span', { class: 'tag' }, 'Starter'),
           (named.length || groupBoxes.some((x) => x.box.checked)) && h('span', { class: 'more' }, '•••')));
     };
-    for (const el of [f.name, f.price]) el.addEventListener('input', preview);
+    for (const el of [f.name, f.alt, f.price]) el.addEventListener('input', preview);
     f.starter.addEventListener('change', preview);
     groupRow.addEventListener('change', preview);
     preview();
@@ -1619,12 +1628,12 @@ async function renderMenuAdmin() {
       choices.forEach((c, i) => {
         if (!c.name.trim()) return;
         const el = choiceList.querySelector(`[data-f="choice${i}"]`);
-        try { variants.push({ id: c.id, name: c.name, price_cents: parseMoney(c.price) }); err(el, null); } catch (e) { err(el, e.message); }
+        try { variants.push({ id: c.id, name: c.name, name_alt: c.alt.trim() || null, price_cents: parseMoney(c.price) }); err(el, null); } catch (e) { err(el, e.message); }
       });
       if (!ok) { more.open = more.open || !!form.querySelector('details .bad'); return null; }
       return {
         product: {
-          name: f.name.value, category_id: f.cat.value ? Number(f.cat.value) : null,
+          name: f.name.value, name_alt: f.alt.value.trim() || null, category_id: f.cat.value ? Number(f.cat.value) : null,
           barcode: f.barcode.value || null, sku: f.sku.value || null, price_cents: price, cost_cents: cost,
           tax_rate_bp: Math.round(tax * 100), track_stock: f.track.checked, starter: f.starter.checked,
         },
@@ -1651,7 +1660,7 @@ async function renderMenuAdmin() {
         await changed();
       }
     });
-    for (const el of [f.name, f.price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(!p)(e); });
+    for (const el of [f.name, f.alt, f.price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(!p)(e); });
 
     const delta = h('input', { placeholder: '+/- qty', style: 'width:90px', inputmode: 'numeric' });
     const reason = h('input', { placeholder: 'Reason (delivery, count…)' });
@@ -1678,6 +1687,7 @@ async function renderMenuAdmin() {
     setKids(form, h('div', { class: 'card stack' },
       h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, p ? `Edit ${p.name}` : 'New menu item'), tile),
       h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, f.name), f.cat),
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, f.alt), h('span', { class: 'muted small' }, 'Printed under the name on kitchen tickets')),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Price', h('span', { class: 'field-col' }, f.price))),
       more,
       h('div', { class: 'row' },
@@ -1704,18 +1714,18 @@ async function renderMenuAdmin() {
 
   // ---- 6: paste a whole menu from a spreadsheet ----
   function pasteImport() {
-    const text = h('textarea', { rows: 10, style: 'width:100%', placeholder: 'Name\tPrice\tCategory\nMargherita\t9.50\tPizza\nGarlic bread\t4.50\tStarters\nCola\t2.50\tDrinks' });
+    const text = h('textarea', { rows: 10, style: 'width:100%', placeholder: 'Name\tPrice\tCategory\tThai name\nPad Thai\t9.50\tMains\tผัดไทย\nSpring rolls\t4.50\tStarters\tปอเปี๊ยะ\nCola\t2.50\tDrinks' });
     const out = h('div', { class: 'stack' });
     let rows = [];
     const parse = () => {
       rows = text.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((line, i) => {
         // Spreadsheets paste tab-separated; typed lines use commas ("quoted, names" allowed).
         const cells = line.includes('\t') ? line.split('\t') : splitCsv(line);
-        const [name = '', priceText = '', category = ''] = cells.map((c) => c.trim());
+        const [name = '', priceText = '', category = '', alt = ''] = cells.map((c) => c.trim());
         let price = null, error = null;
         try { price = parseMoney(priceText); } catch { error = priceText ? `"${priceText}" is not a price` : 'no price'; }
         if (!name) error = 'no name';
-        return { line: i + 1, name, price, category, error };
+        return { line: i + 1, name, alt, price, category, error };
       });
       // A header line ("Name, Price, Category") is skipped.
       if (rows[0]?.error && /price/i.test(text.value.split(/\r?\n/)[0])) rows.shift();
@@ -1725,14 +1735,14 @@ async function renderMenuAdmin() {
       setKids(out, rows.length ? h('div', { class: 'panel' }, h('table', {},
         h('tr', {}, h('th', {}, '#'), h('th', {}, 'Item'), h('th', { class: 'num' }, 'Price'), h('th', {}, 'Category'), h('th', {}, '')),
         rows.slice(0, 200).map((r) => h('tr', { class: r.error ? 'bad-row' : '' },
-          h('td', { class: 'muted' }, r.line), h('td', {}, r.name), h('td', { class: 'num' }, r.price != null ? money(r.price) : ''),
+          h('td', { class: 'muted' }, r.line), h('td', {}, r.name, r.alt && h('div', { class: 'alt', lang: 'th' }, r.alt)), h('td', { class: 'num' }, r.price != null ? money(r.price) : ''),
           h('td', {}, r.category || h('span', { class: 'muted' }, 'none'), r.category && !byCat(r) ? h('span', { class: 'badge' }, 'new') : ''),
           h('td', { class: 'field-error' }, r.error ?? ''))))) : '',
         rows.length > 200 && h('div', { class: 'muted' }, `…and ${rows.length - 200} more`),
         fresh.length > 0 && h('div', { class: 'muted' }, `New categories will be created: ${fresh.join(', ')}`),
         h('div', { class: 'row' },
           h('button', { class: 'primary', disabled: !rows.length || bad.length > 0, onclick: act(async () => {
-            const r = await call('import_items', { rows: rows.map((x) => ({ name: x.name, price_cents: x.price, category: x.category || null })) });
+            const r = await call('import_items', { rows: rows.map((x) => ({ name: x.name, name_alt: x.alt || null, price_cents: x.price, category: x.category || null })) });
             toast(`${r.items} items imported` + (r.new_categories.length ? `, ${r.new_categories.length} new categories` : ''));
             await changed();
           }) }, bad.length ? `Fix ${bad.length} line(s) first` : `Import ${rows.length} item(s)`),
@@ -1741,7 +1751,7 @@ async function renderMenuAdmin() {
     text.addEventListener('input', parse);
     setKids(form, h('div', { class: 'card stack' },
       h('h3', {}, 'Paste a menu'),
-      h('div', { class: 'muted' }, 'Copy rows from Excel or Google Sheets (columns: name, price, category) and paste them here, or type one item per line like "Margherita, 9.50, Pizza". ' +
+      h('div', { class: 'muted' }, 'Copy rows from Excel or Google Sheets (columns: name, price, category, Thai name) and paste them here, or type one item per line like "Pad Thai, 9.50, Mains, ผัดไทย". ' +
         'Missing categories are created; each item gets its category\'s tax and starter defaults. Check the preview, then import.'),
       text, out));
     parse();
@@ -1792,6 +1802,11 @@ async function renderMenuAdmin() {
       h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, form)));
   await loadProducts();
+}
+
+/// Search match on the English or Thai name (`q` is lower case).
+function matches(p, q) {
+  return p.name.toLowerCase().includes(q) || (p.name_alt ?? '').toLowerCase().includes(q);
 }
 
 /// Split one CSV line, honouring "quoted, values".
@@ -2166,7 +2181,8 @@ function platformsCard() {
 }
 
 /// Connection, paper and copies for one printer (kitchen or receipt).
-function printerForm(cfg, systemPrinters, noneLabel) {
+/// `names`: [[value, label]...] for "Names on tickets"; the first is the default.
+function printerForm(cfg, systemPrinters, noneLabel, names) {
   const kind = h('select', {},
     h('option', { value: 'none' }, noneLabel),
     h('option', { value: 'network' }, 'Network printer (IP address)'),
@@ -2187,6 +2203,8 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   width.value = String(cfg.width ?? 42);
   const copies = h('input', { type: 'number', min: 1, max: 9, value: cfg.copies ?? 1, style: 'width:70px' });
   const delay = h('input', { type: 'number', min: 0, max: 30, value: cfg.copy_delay_secs ?? 2, style: 'width:70px', title: 'Seconds to wait between copies' });
+  const lang = h('select', {}, names.map(([v, label]) => h('option', { value: v }, label)));
+  lang.value = names.some(([v]) => v === cfg.names) ? cfg.names : names[0][0];
   const fields = h('div', { class: 'row' });
   const drawFields = () => setKids(fields, ...{
     none: [],
@@ -2197,11 +2215,14 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   kind.onchange = drawFields;
   drawFields();
   return {
-    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, 'Delay between copies', delay, 'sec'), fields),
+    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, 'Delay between copies', delay, 'sec'), fields,
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
+        h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.'))),
     none: () => kind.value === 'none',
     config: () => ({
       kind: kind.value, width: Number(width.value), copies: Math.min(9, Math.max(1, parseInt(copies.value, 10) || 1)),
       copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
+      names: lang.value,
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
       ...(kind.value === 'file' && { path: path.value.trim() }),
@@ -2329,9 +2350,11 @@ async function renderSettings() {
     call('get_kitchen_printer'), call('get_receipt_settings'), call('list_system_printers'),
   ]);
 
-  const kitchen = printerForm(kitchenCfg, systemPrinters, 'No kitchen printer');
+  const kitchen = printerForm(kitchenCfg, systemPrinters, 'No kitchen printer',
+    [['both', 'English with Thai under it'], ['english', 'English only'], ['thai', 'Thai only']]);
 
-  const receipt = printerForm(receiptCfg, systemPrinters, 'No receipt printer');
+  const receipt = printerForm(receiptCfg, systemPrinters, 'No receipt printer',
+    [['english', 'English only'], ['both', 'English with Thai under it']]);
   const autoPrint = h('input', { type: 'checkbox', checked: receiptCfg.auto_print });
   const drawer = h('input', { type: 'checkbox', checked: receiptCfg.drawer_on_cash });
   const header = h('textarea', { rows: 3, style: 'width:100%', placeholder: 'Address, phone, VAT number… (one per line)' });

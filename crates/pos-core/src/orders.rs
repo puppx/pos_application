@@ -109,6 +109,8 @@ pub struct OrderItem {
     pub qty: i64,
     pub discount_cents: i64,
     pub note: Option<String>,
+    /// Thai name snapshot, e.g. "ผัดไทย (ไก่)"; None when the menu has none.
+    pub name_alt: Option<String>,
     /// The item choice (e.g. "Beef"), when the item has choices.
     pub variant_id: Option<i64>,
     pub options: Vec<ItemOption>,
@@ -265,7 +267,7 @@ fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
 const TABLE_BUSY: &str = "that table already has an open order";
 
 const ITEM_COLS: &str =
-    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held";
+    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt";
 
 fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
     let (price, rate, qty, disc): (i64, i64, i64, i64) = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
@@ -284,6 +286,7 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         sent_at: r.get(8)?,
         starter: r.get(10)?,
         held: r.get(11)?,
+        name_alt: r.get(12)?,
         line_total_cents: net,
         tax_cents: tax_of(net, rate),
     })
@@ -293,12 +296,12 @@ fn load_items(conn: &Connection, order_id: i64) -> Result<Vec<OrderItem>> {
     let mut stmt = conn.prepare_cached(&format!("SELECT {ITEM_COLS} FROM order_items WHERE order_id = ?1 ORDER BY id"))?;
     let mut items: Vec<OrderItem> = stmt.query_map([order_id], item_from_row)?.collect::<rusqlite::Result<_>>()?;
     let mut opts = conn.prepare_cached(
-        "SELECT o.item_id, o.option_id, o.group_name, o.name, o.price_cents
+        "SELECT o.item_id, o.option_id, o.group_name, o.name, o.price_cents, o.name_alt
          FROM order_item_options o JOIN order_items i ON i.id = o.item_id
          WHERE i.order_id = ?1 ORDER BY o.id",
     )?;
     let rows = opts.query_map([order_id], |r| {
-        Ok((r.get::<_, i64>(0)?, ItemOption { option_id: r.get(1)?, group_name: r.get(2)?, name: r.get(3)?, price_cents: r.get(4)? }))
+        Ok((r.get::<_, i64>(0)?, ItemOption { option_id: r.get(1)?, group_name: r.get(2)?, name: r.get(3)?, price_cents: r.get(4)?, name_alt: r.get(5)? }))
     })?;
     for row in rows {
         let (item_id, o) = row?;
@@ -568,16 +571,22 @@ impl Pos {
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, base, rate, starter): (String, i64, i64, bool) = tx
-            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter FROM products WHERE id = ?1 AND active = 1")?
-            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        let (name, base, rate, starter, alt): (String, i64, i64, bool, Option<String>) = tx
+            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt FROM products WHERE id = ?1 AND active = 1")?
+            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available".into()))?;
         let variant = resolve_variant(&tx, product_id, variant_id)?;
         let variant_id = variant.as_ref().map(|v| v.0);
-        let (name, base) = match variant {
-            Some((_, vname, vprice)) => (format!("{name} ({vname})"), vprice),
-            None => (name, base),
+        let (name, base, alt) = match variant {
+            Some((_, vname, vprice, valt)) => {
+                // Thai for whichever part has it, English for the other.
+                let alt = (alt.is_some() || valt.is_some()).then(|| {
+                    format!("{} ({})", alt.as_deref().unwrap_or(&name), valt.as_deref().unwrap_or(&vname))
+                });
+                (format!("{name} ({vname})"), vprice, alt)
+            }
+            None => (name, base, alt),
         };
         let options = resolve_options(&tx, product_id, option_ids)?;
         let price = base + options.iter().map(|o| o.price_cents).sum::<i64>();
@@ -614,17 +623,17 @@ impl Pos {
                 return invalid("this order has too many lines");
             }
             tx.prepare_cached(
-                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id, starter)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id, starter, name_alt)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?
-            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id, starter])?;
+            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id, starter, alt])?;
             let item_id = tx.last_insert_rowid();
             let mut ins = tx.prepare_cached(
-                "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents, name_alt)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for o in &options {
-                ins.execute(params![item_id, o.option_id, o.group_name, o.name, o.price_cents])?;
+                ins.execute(params![item_id, o.option_id, o.group_name, o.name, o.price_cents, o.name_alt])?;
             }
         }
         tx.commit()?;
@@ -655,6 +664,7 @@ impl Pos {
                     sent_at: r.get(9)?,
                     starter: r.get(11)?,
                     held: r.get(12)?,
+                    name_alt: r.get(13)?,
                     line_total_cents: 0,
                     tax_cents: 0,
                 };

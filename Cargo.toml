@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/pos-core", "src-tauri"]
 
 [workspace.package]
-version = "0.7.3"
+version = "0.7.4"
 edition = "2021"
 license = "UNLICENSED"
 
@@ -22,6 +22,4 @@ strip = true
 
 # Keep PIN hashing fast even in debug builds (argon2 is very slow unoptimised).
 [profile.dev.package.argon2]
-opt-level = 3
-[profile.dev.package.blake2]
 opt-level = 3

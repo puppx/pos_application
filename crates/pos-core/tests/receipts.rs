@@ -28,7 +28,7 @@ fn setup() -> (Pos, Session, Menu) {
     let mut item = |name: &str, price, cat: Option<i64>| {
         pos.create_product(&admin, NewProduct {
             category_id: cat, sku: None, barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false,
+            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None,
         })
         .unwrap()
     };
@@ -37,7 +37,7 @@ fn setup() -> (Pos, Session, Menu) {
     let cola = item("Cola", 250, Some(drinks.id));
     let bread = item("Bread", 200, None);
     let size = pos.create_option_group(&admin, "Size", 0, 1).unwrap();
-    let size = pos.save_group_options(&admin, size.id, &[OptionInput { id: None, name: "Large".into(), price_cents: 200 }]).unwrap();
+    let size = pos.save_group_options(&admin, size.id, &[OptionInput { id: None, name: "Large".into(), price_cents: 200, name_alt: None }]).unwrap();
     pos.set_product_option_groups(&admin, burger.id, &[size.id]).unwrap();
     let large = size.options[0].id;
     (pos, admin, Menu { soup, burger, cola, bread, large })
@@ -122,7 +122,7 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
     let (mut pos, admin, m) = setup();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("receipt.bin");
-    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0 };
+    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None };
     let mut settings = ReceiptSettings { printer: printer.clone(), ..Default::default() };
 
     // No receipt printer: nothing to print, drawer button explains why.
@@ -196,8 +196,8 @@ fn kitchen_copies_and_old_settings_still_load() {
     let reprint = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
     assert_eq!(count(&reprint.bytes(), &CUT), 1);
 
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0 }).is_err());
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0 }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0, names: None }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0, names: None }).is_err());
 
     // Receipt settings JSON shape (as the UI sends it).
     let rs: ReceiptSettings = serde_json::from_str(

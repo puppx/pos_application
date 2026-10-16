@@ -46,6 +46,41 @@ pub struct PrinterConfig {
     /// Seconds to wait between copies, so each one can be torn off.
     #[serde(default = "default_copy_delay")]
     pub copy_delay_secs: u8,
+    /// Which names to print; None = this printer's usual (kitchen: both,
+    /// receipt: English).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<PrintNames>,
+}
+
+/// Language of item names on a printout. Items without a Thai name always
+/// print in English.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrintNames {
+    English,
+    /// The English name with the Thai name under it.
+    Both,
+    Thai,
+}
+
+impl PrintNames {
+    /// Name to print on the item's line, and the second name under it.
+    pub(crate) fn pick<'a>(self, name: &'a str, alt: Option<&'a str>) -> (&'a str, Option<&'a str>) {
+        let alt = alt.filter(|a| !a.trim().is_empty() && *a != name);
+        match (self, alt) {
+            (PrintNames::Both, Some(a)) => (name, Some(a)),
+            (PrintNames::Thai, Some(a)) => (a, None),
+            _ => (name, None),
+        }
+    }
+
+    /// One-line form, for options and category headings: "Large / ใหญ่".
+    pub(crate) fn inline(self, name: &str, alt: Option<&str>) -> String {
+        match self.pick(name, alt) {
+            (n, Some(a)) => format!("{n} / {a}"),
+            (n, None) => n.to_string(),
+        }
+    }
 }
 
 fn default_width() -> usize {
@@ -62,7 +97,13 @@ fn one() -> u8 {
 
 impl Default for PrinterConfig {
     fn default() -> Self {
-        PrinterConfig { target: PrinterTarget::None, width: default_width(), copies: 1, copy_delay_secs: default_copy_delay() }
+        PrinterConfig {
+            target: PrinterTarget::None,
+            width: default_width(),
+            copies: 1,
+            copy_delay_secs: default_copy_delay(),
+            names: None,
+        }
     }
 }
 
@@ -190,6 +231,8 @@ pub struct TicketItem {
     pub category: Option<String>,
     pub qty: i64,
     pub name: String,
+    /// Printed under the name (Thai), when the printer prints both.
+    pub name_alt: Option<String>,
     pub options: Vec<String>,
     pub note: Option<String>,
 }
@@ -251,10 +294,15 @@ pub(crate) fn render_text(lines: &[Line], width: usize) -> String {
 }
 
 /// ESC/POS bytes for laid-out lines, code page 437, ending with a feed and
-/// partial cut.
-pub(crate) fn render_escpos(lines: &[Line]) -> Vec<u8> {
+/// partial cut. Lines with characters outside code page 437 (Thai) are
+/// printed as images, `width` characters wide.
+pub(crate) fn render_escpos(lines: &[Line], width: usize) -> Vec<u8> {
     let mut b = vec![0x1B, b'@', 0x1B, b't', 0]; // init, code page 437
     for l in lines {
+        if crate::raster::needs_raster(&l.text) {
+            b.extend(crate::raster::escpos_line(l.text.trim_end(), l.size, l.center, width * crate::raster::DOTS_PER_CHAR));
+            continue;
+        }
         b.extend_from_slice(&[0x1B, b'a', u8::from(l.center)]);
         b.extend_from_slice(&[0x1D, b'!', match l.size {
             Size::Normal => 0x00,
@@ -341,6 +389,11 @@ impl KitchenTicket {
             for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), width, "", "    ").into_iter().enumerate() {
                 push(Size::Tall, i == 0, false, t);
             }
+            if let Some(alt) = &it.name_alt {
+                for t in wrap(alt, width, "    ", "    ") {
+                    push(Size::Tall, false, false, t);
+                }
+            }
             for o in &it.options {
                 for t in wrap(o, width, "   + ", "     ") {
                     push(Size::Tall, false, false, t);
@@ -368,7 +421,7 @@ impl KitchenTicket {
 
     /// ESC/POS bytes, code page 437, ending with a feed and partial cut.
     pub fn to_escpos(&self, width: usize) -> Vec<u8> {
-        render_escpos(&self.lines(width))
+        render_escpos(&self.lines(width), width)
     }
 }
 
@@ -405,16 +458,20 @@ impl Pos {
     /// Items in menu-category order (category position, then name; items
     /// without a category last), each with its category name. Within a
     /// category the order they were added is kept.
-    pub(crate) fn by_category<'a>(&self, items: &'a [OrderItem]) -> Result<Vec<(Option<String>, &'a OrderItem)>> {
+    /// `names` decides how the category is labelled.
+    pub(crate) fn by_category<'a>(&self, items: &'a [OrderItem], names: PrintNames) -> Result<Vec<(Option<String>, &'a OrderItem)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT c.name, c.sort_order FROM products p LEFT JOIN categories c ON c.id = p.category_id
+            "SELECT c.name, c.sort_order, c.name_alt FROM products p LEFT JOIN categories c ON c.id = p.category_id
              WHERE p.id = ?1",
         )?;
         let mut keyed = Vec::with_capacity(items.len());
         for (i, it) in items.iter().enumerate() {
-            let (name, sort): (Option<String>, Option<i64>) =
-                stmt.query_row([it.product_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.unwrap_or((None, None));
-            keyed.push(((name.is_none(), sort.unwrap_or(0), name.clone().unwrap_or_default(), i), name, it));
+            let (name, sort, alt): (Option<String>, Option<i64>, Option<String>) = stmt
+                .query_row([it.product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?
+                .unwrap_or((None, None, None));
+            let label = name.as_deref().map(|n| names.inline(n, alt.as_deref()));
+            keyed.push(((name.is_none(), sort.unwrap_or(0), name.unwrap_or_default(), i), label, it));
         }
         keyed.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(keyed.into_iter().map(|(_, n, it)| (n, it)).collect())
@@ -471,6 +528,7 @@ impl Pos {
         } else {
             "ADDITIONAL"
         };
+        let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
         Ok(KitchenTicket {
             title: title.into(),
             heading: heading(&o),
@@ -479,14 +537,18 @@ impl Pos {
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: s.name.clone(),
             items: self
-                .by_category(items)?
+                .by_category(items, names)?
                 .into_iter()
-                .map(|(category, i)| TicketItem {
-                    category,
-                    qty: i.qty,
-                    name: i.name.clone(),
-                    options: i.options.iter().map(|o| o.name.clone()).collect(),
-                    note: i.note.clone(),
+                .map(|(category, i)| {
+                    let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
+                    TicketItem {
+                        category,
+                        qty: i.qty,
+                        name: name.to_string(),
+                        name_alt: name_alt.map(str::to_string),
+                        options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
+                        note: i.note.clone(),
+                    }
                 })
                 .collect(),
             footer: (!reprint && waiting > 0).then(|| format!("MAINS TO FOLLOW: {waiting}")),
@@ -518,6 +580,12 @@ impl Pos {
     pub fn test_print_job(&self, s: &Session, cfg: &PrinterConfig) -> Result<PrintJob> {
         s.require(Permission::ManageSettings)?;
         cfg.validate()?;
+        let names = cfg.names.unwrap_or(PrintNames::Both);
+        let item = |name: &str, alt: &str| {
+            let (n, a) = names.pick(name, Some(alt));
+            (n.to_string(), a.map(str::to_string))
+        };
+        let ((soup, soup_alt), (burger, burger_alt)) = (item("Soup of the day", "ซุปประจำวัน"), item("Example burger", "เบอร์เกอร์"));
         let ticket = KitchenTicket {
             title: "TEST PRINT".into(),
             heading: "DINE-IN T1".into(),
@@ -527,17 +595,19 @@ impl Pos {
             staff: s.name.clone(),
             items: vec![
                 TicketItem {
-                    category: Some("Starters".into()),
+                    category: Some(names.inline("Starters", Some("อาหารเรียกน้ำย่อย"))),
                     qty: 1,
-                    name: "Soup of the day".into(),
+                    name: soup,
+                    name_alt: soup_alt,
                     options: vec![],
                     note: None,
                 },
                 TicketItem {
-                    category: Some("Mains".into()),
+                    category: Some(names.inline("Mains", Some("อาหารจานหลัก"))),
                     qty: 2,
-                    name: "Example burger".into(),
-                    options: vec!["Large".into(), "Extra cheese".into()],
+                    name: burger,
+                    name_alt: burger_alt,
+                    options: vec![names.inline("Large", Some("ใหญ่")), names.inline("Extra cheese", Some("เพิ่มชีส"))],
                     note: Some("no onions".into()),
                 },
             ],
@@ -654,8 +724,8 @@ mod tests {
             time: "19:05".into(),
             staff: "Sam".into(),
             items: vec![
-                TicketItem { category: None, qty: 2, name: "Burger".into(), options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
-                TicketItem { category: None, qty: 1, name: "Crème brûlée".into(), options: vec![], note: None },
+                TicketItem { category: None, qty: 2, name: "Burger".into(), name_alt: None, options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
+                TicketItem { category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None },
             ],
             footer: None,
         }
@@ -667,6 +737,32 @@ mod tests {
         let expected = "   NEW ORDER\nDINE-IN T3\nGround\n#12  19:05  Sam\n--------------------------------\n\
                         2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n1 x Crème brûlée\n--------------------------------\n";
         assert_eq!(t, expected);
+    }
+
+    #[test]
+    fn thai_name_under_the_english_one() {
+        let mut t = ticket();
+        t.items[0].name_alt = Some("เบอร์เกอร์".into());
+        t.items[0].options[0] = PrintNames::Both.inline("Large", Some("ใหญ่"));
+        let text = t.to_text(32);
+        assert!(text.contains("2 x Burger\n    เบอร์เกอร์\n   + Large / ใหญ่\n"), "{text}");
+        // Thai lines go out as raster images; the rest stays text.
+        let b = t.to_escpos(32);
+        assert_eq!(b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count(), 2);
+        assert!(b.windows(10).any(|w| w == b"2 x Burger"));
+        assert!(!b.windows(3).any(|w| w == "เ".as_bytes()));
+    }
+
+    #[test]
+    fn choosing_names() {
+        assert_eq!(PrintNames::Both.pick("Pad Thai", Some("ผัดไทย")), ("Pad Thai", Some("ผัดไทย")));
+        assert_eq!(PrintNames::Thai.pick("Pad Thai", Some("ผัดไทย")), ("ผัดไทย", None));
+        assert_eq!(PrintNames::English.pick("Pad Thai", Some("ผัดไทย")), ("Pad Thai", None));
+        // No Thai name: English everywhere.
+        assert_eq!(PrintNames::Thai.pick("Cola", None), ("Cola", None));
+        assert_eq!(PrintNames::Both.pick("Cola", Some(" ")), ("Cola", None));
+        assert_eq!(PrintNames::Both.inline("Large", Some("ใหญ่")), "Large / ใหญ่");
+        assert_eq!(PrintNames::Thai.inline("Large", None), "Large");
     }
 
     #[test]

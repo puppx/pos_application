@@ -9,13 +9,13 @@ fn setup() -> (Pos, Session) {
 fn product(pos: &mut Pos, admin: &Session, name: &str, price: i64) -> Product {
     pos.create_product(admin, NewProduct {
         category_id: None, sku: None, barcode: None, name: name.into(), price_cents: price,
-        cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false,
+        cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None,
     })
     .unwrap()
 }
 
 fn opt(name: &str, price: i64) -> OptionInput {
-    OptionInput { id: None, name: name.into(), price_cents: price }
+    OptionInput { id: None, name: name.into(), price_cents: price, name_alt: None }
 }
 
 /// Burger (10.00) with "Burger size" (exactly one: Regular +0, Large +2.50)
@@ -71,7 +71,7 @@ fn options_price_and_rules() {
     assert_eq!(order.items[1].unit_price_cents, 1000);
 
     // Editing the menu later does not change the order line.
-    pos.save_group_options(&admin, size.id, &[OptionInput { id: Some(id(&size, "Large")), name: "Big".into(), price_cents: 500 }]).unwrap();
+    pos.save_group_options(&admin, size.id, &[OptionInput { id: Some(id(&size, "Large")), name: "Big".into(), price_cents: 500, name_alt: None }]).unwrap();
     let order = pos.get_order(&admin, o.id).unwrap();
     assert_eq!((order.items[0].unit_price_cents, order.items[0].options[0].name.as_str()), (1500, "Large"));
     // ...but "Regular" was retired, so it can no longer be chosen.
@@ -155,7 +155,7 @@ fn kitchen_tickets_per_round() {
     // Configure a file printer and reprint everything.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kitchen.bin");
-    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 32, copies: 1, copy_delay_secs: 0 };
+    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 32, copies: 1, copy_delay_secs: 0, names: None };
     pos.set_kitchen_printer(&admin, &cfg).unwrap();
     assert_eq!(pos.kitchen_printer().unwrap(), cfg);
     let job = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
@@ -171,11 +171,11 @@ fn kitchen_tickets_per_round() {
 fn printer_settings_are_admin_only_and_validated() {
     let (mut pos, admin) = setup();
     assert_eq!(pos.kitchen_printer().unwrap().target, PrinterTarget::None);
-    let bad = PrinterConfig { target: PrinterTarget::Network { host: "".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0 };
+    let bad = PrinterConfig { target: PrinterTarget::Network { host: "".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None };
     assert!(pos.set_kitchen_printer(&admin, &bad).is_err());
     pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
     let staff = pos.login("2222").unwrap();
-    let good = PrinterConfig { target: PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0 };
+    let good = PrinterConfig { target: PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None };
     assert!(matches!(pos.set_kitchen_printer(&staff, &good), Err(PosError::Forbidden)));
     assert!(matches!(pos.test_print_job(&staff, &good), Err(PosError::Forbidden)));
     pos.set_kitchen_printer(&admin, &good).unwrap();
@@ -189,7 +189,7 @@ fn printer_settings_are_admin_only_and_validated() {
 fn item_choices_with_their_own_prices() {
     let (mut pos, admin) = setup();
     let soup = product(&mut pos, &admin, "Tom Yum Soup", 0);
-    let v = |id, name: &str, price| VariantInput { id, name: name.into(), price_cents: price };
+    let v = |id, name: &str, price| VariantInput { id, name: name.into(), price_cents: price, name_alt: None };
     let choices = pos
         .set_variants(&admin, soup.id, &[v(None, "Chicken", 650), v(None, "Beef", 750), v(None, "Prawn", 850)])
         .unwrap();

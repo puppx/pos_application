@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
 use crate::printing::{category_heading, heading, render_escpos, render_text, wrap, Line, Size};
-use crate::{Order, OrderType, Permission, Pos, PosError, PrintJob, PrinterConfig, PrinterTarget, Result, Session};
+use crate::{Order, OrderType, Permission, Pos, PosError, PrintJob, PrintNames, PrinterConfig, PrinterTarget, Result, Session};
 
 const SETTING_KEY: &str = "_receipt_printer";
 
@@ -78,6 +78,8 @@ pub struct ReceiptLine {
     pub category: Option<String>,
     pub qty: i64,
     pub name: String,
+    /// Printed under the name (Thai), when receipts print both.
+    pub name_alt: Option<String>,
     pub options: Vec<String>,
     /// qty x unit price, before discount.
     pub amount_cents: i64,
@@ -175,6 +177,11 @@ impl Receipt {
                 current = Some(cat);
             }
             two_col(&mut v, Size::Normal, false, &format!("{} x {}", l.qty, l.name), &self.money(l.amount_cents), width, "    ");
+            if let Some(alt) = &l.name_alt {
+                for t in wrap(alt, width, "    ", "    ") {
+                    v.push(Line::new(Size::Normal, false, false, t));
+                }
+            }
             for o in &l.options {
                 for t in wrap(o, width, "   + ", "     ") {
                     v.push(Line::new(Size::Normal, false, false, t));
@@ -216,7 +223,7 @@ impl Receipt {
     }
 
     pub fn to_escpos(&self, width: usize) -> Vec<u8> {
-        render_escpos(&self.layout(width))
+        render_escpos(&self.layout(width), width)
     }
 }
 
@@ -294,14 +301,20 @@ impl Pos {
                 payment.push(("Change".into(), change));
             }
         }
+        // Receipts print English, or English with Thai under it.
+        let names = match cfg.printer.names {
+            Some(PrintNames::Both | PrintNames::Thai) => PrintNames::Both,
+            _ => PrintNames::English,
+        };
         let lines = self
-            .by_category(&o.items)?
+            .by_category(&o.items, names)?
             .into_iter()
             .map(|(category, i)| ReceiptLine {
                 category,
                 qty: i.qty,
                 name: i.name.clone(),
-                options: i.options.iter().map(|o| o.name.clone()).collect(),
+                name_alt: names.pick(&i.name, i.name_alt.as_deref()).1.map(str::to_string),
+                options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
                 amount_cents: i.unit_price_cents * i.qty,
                 discount_cents: i.discount_cents,
             })
@@ -384,6 +397,8 @@ impl Pos {
         if drawer_only {
             return Ok(PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()));
         }
+        let thai = matches!(cfg.printer.names, Some(PrintNames::Both | PrintNames::Thai));
+        let alt = |t: &str| thai.then(|| t.to_string());
         let r = Receipt {
             store_name: self.setting("store_name")?.unwrap_or_else(|| "POS".into()),
             header: lines_of(&cfg.header),
@@ -396,8 +411,8 @@ impl Pos {
             details: vec![],
             staff: s.name.clone(),
             lines: vec![
-                ReceiptLine { category: Some("Starters".into()), qty: 1, name: "Soup of the day".into(), options: vec![], amount_cents: 550, discount_cents: 0 },
-                ReceiptLine { category: Some("Mains".into()), qty: 2, name: "Example burger".into(), options: vec!["Large".into()], amount_cents: 2300, discount_cents: 0 },
+                ReceiptLine { category: Some("Starters".into()), qty: 1, name: "Soup of the day".into(), name_alt: alt("ซุปประจำวัน"), options: vec![], amount_cents: 550, discount_cents: 0 },
+                ReceiptLine { category: Some("Mains".into()), qty: 2, name: "Example burger".into(), name_alt: alt("เบอร์เกอร์"), options: vec!["Large".into()], amount_cents: 2300, discount_cents: 0 },
             ],
             subtotal_cents: 2850,
             discount_cents: 0,

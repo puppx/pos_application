@@ -207,13 +207,15 @@ impl Pos {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT t.id, t.floor_id, t.name, t.shape, t.x, t.y, t.w, t.h, o.id, o.opened_at,
-                    COALESCE(i.total, 0), COALESCE(i.items, 0), COALESCE(i.unsent, 0), COALESCE(i.held, 0)
+                    COALESCE(i.total, 0) + (COALESCE(i.net, 0) * COALESCE(o.service_bp, 0) + 5000) / 10000,
+                    COALESCE(i.items, 0), COALESCE(i.unsent, 0), COALESCE(i.held, 0)
              FROM dining_tables t
              LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'
              LEFT JOIN (
                  SELECT order_id,
                         SUM(unit_price_cents * qty - discount_cents
                             + ((unit_price_cents * qty - discount_cents) * tax_rate_bp + 5000) / 10000) AS total,
+                        SUM(unit_price_cents * qty - discount_cents) AS net,
                         SUM(qty) AS items,
                         SUM(sent_at IS NULL AND held = 0) AS unsent,
                         SUM(sent_at IS NULL AND held = 1) AS held

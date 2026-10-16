@@ -669,6 +669,18 @@ commands! {
         })
     }
 
+    fn get_service_settings(app, t) -> ServiceSettings {
+        app.with_session(t, |pos, _| pos.service_settings())
+    }
+
+    fn set_service_settings(app, t, settings: ServiceSettings) -> () {
+        app.with_session(t, |pos, s| pos.set_service_settings(s, &settings))
+    }
+
+    fn set_service_charge(app, t, order_id: i64, rate_bp: i64) -> Order {
+        app.with_session(t, |pos, s| pos.set_service_charge(s, order_id, rate_bp))
+    }
+
     fn get_setting(app, t, key: String) -> Option<String> {
         app.with_session(t, |pos, _| pos.setting(&key))
     }

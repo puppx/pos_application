@@ -188,7 +188,7 @@ fn upgrades_a_v0_1_0_database() {
     assert_eq!(pos.setting("store_name").unwrap().as_deref(), Some("Old Shop"));
     let conn = rusqlite::Connection::open(&path).unwrap();
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let (name, channel): (String, Option<i64>) = conn
         .query_row("SELECT customer_name, channel_id FROM orders WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();

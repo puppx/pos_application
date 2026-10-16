@@ -19,6 +19,9 @@ pub struct SalesSummary {
     pub subtotal_cents: i64,
     pub discount_cents: i64,
     pub tax_cents: i64,
+    /// Service charges taken (included in `total_cents`).
+    #[serde(default)]
+    pub service_cents: i64,
     pub total_cents: i64,
     pub voided_count: i64,
     pub voided_total_cents: i64,
@@ -63,7 +66,8 @@ impl Pos {
                     COALESCE(SUM(tax_cents) FILTER (WHERE status = 'paid'), 0),
                     COALESCE(SUM(total_cents) FILTER (WHERE status = 'paid'), 0),
                     COUNT(*) FILTER (WHERE status = 'voided'),
-                    COALESCE(SUM(total_cents) FILTER (WHERE status = 'voided'), 0)
+                    COALESCE(SUM(total_cents) FILTER (WHERE status = 'voided'), 0),
+                    COALESCE(SUM(service_cents) FILTER (WHERE status = 'paid'), 0)
                  FROM orders WHERE paid_at >= ?1 AND paid_at < ?2",
             )?
             .query_row(params![from, to], |r| {
@@ -74,6 +78,7 @@ impl Pos {
                     subtotal_cents: r.get(1)?,
                     discount_cents: r.get(2)?,
                     tax_cents: r.get(3)?,
+                    service_cents: r.get(7)?,
                     total_cents: r.get(4)?,
                     voided_count: r.get(5)?,
                     voided_total_cents: r.get(6)?,

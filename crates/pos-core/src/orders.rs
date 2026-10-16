@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{invalid, map_unique};
 use crate::options::{resolve_options, ItemOption};
+use crate::service::{check_rate, service_of};
 use crate::variants::resolve_variant;
 use crate::{Permission, Pos, PosError, Result, Session};
 
@@ -145,6 +146,11 @@ pub struct Order {
     pub subtotal_cents: i64,
     pub discount_cents: i64,
     pub tax_cents: i64,
+    /// Service charge rate on this order (1250 = 12.5%), 0 for none.
+    pub service_bp: i64,
+    /// Service charge amount: rate x (subtotal - discount), not taxed.
+    pub service_cents: i64,
+    /// subtotal - discount + tax + service.
     pub total_cents: i64,
     pub payment_method: Option<String>,
     pub tendered_cents: Option<i64>,
@@ -317,14 +323,16 @@ struct Totals {
     subtotal: i64,
     discount: i64,
     tax: i64,
+    service: i64,
     total: i64,
 }
 
-fn totals(items: &[OrderItem]) -> Totals {
-    let subtotal = items.iter().map(|i| i.unit_price_cents * i.qty).sum();
-    let discount = items.iter().map(|i| i.discount_cents).sum();
+fn totals(items: &[OrderItem], service_bp: i64) -> Totals {
+    let subtotal: i64 = items.iter().map(|i| i.unit_price_cents * i.qty).sum();
+    let discount: i64 = items.iter().map(|i| i.discount_cents).sum();
     let tax = items.iter().map(|i| i.tax_cents).sum();
-    Totals { subtotal, discount, tax, total: subtotal - discount + tax }
+    let service = service_of(subtotal - discount, service_bp);
+    Totals { subtotal, discount, tax, service, total: subtotal - discount + tax + service }
 }
 
 pub(crate) const SUMMARY_SQL: &str = "
@@ -333,6 +341,7 @@ pub(crate) const SUMMARY_SQL: &str = "
            COALESCE(o.total_cents, (
                SELECT SUM(i.unit_price_cents * i.qty - i.discount_cents
                           + ((i.unit_price_cents * i.qty - i.discount_cents) * i.tax_rate_bp + 5000) / 10000)
+                      + (SUM(i.unit_price_cents * i.qty - i.discount_cents) * o.service_bp + 5000) / 10000
                FROM order_items i WHERE i.order_id = o.id), 0),
            (SELECT COALESCE(SUM(qty), 0) FROM order_items i WHERE i.order_id = o.id),
            (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 0),
@@ -386,14 +395,15 @@ impl Pos {
             }
             self.check_channel(ch)?;
         }
+        let service_bp = self.service_rate_for(new.order_type)?;
         let tx = self.conn.unchecked_transaction()?;
         if let Some(c) = new.details.customer_id {
             self.touch_customer(c)?;
         }
         tx.prepare_cached(
             "INSERT INTO orders (order_type, table_id, customer_name, customer_phone, delivery_address, notes,
-                                 channel_id, external_ref, customer_id, opened_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                 channel_id, external_ref, customer_id, opened_by, service_bp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?
         .execute(params![
             new.order_type.as_str(),
@@ -405,7 +415,8 @@ impl Pos {
             new.channel_id,
             d.external_ref,
             new.details.customer_id,
-            s.user_id
+            s.user_id,
+            service_bp
         ])
         .map_err(|e| map_unique(e, TABLE_BUSY))?;
         let id = tx.last_insert_rowid();
@@ -431,7 +442,7 @@ impl Pos {
                 "SELECT o.id, o.order_type, o.status, o.table_id, t.name, f.name, o.customer_name, o.customer_phone,
                         o.delivery_address, o.notes, o.opened_by, u.name, o.opened_at, o.payment_method,
                         o.tendered_cents, o.change_cents, o.paid_by, o.paid_at, o.closed_at, o.close_reason,
-                        o.channel_id, ch.name, o.external_ref, o.customer_id
+                        o.channel_id, ch.name, o.external_ref, o.customer_id, o.service_bp
                  FROM orders o JOIN users u ON u.id = o.opened_by
                  LEFT JOIN dining_tables t ON t.id = o.table_id
                  LEFT JOIN floors f ON f.id = t.floor_id
@@ -464,9 +475,11 @@ impl Pos {
                     channel_name: r.get(21)?,
                     external_ref: r.get(22)?,
                     customer_id: r.get(23)?,
+                    service_bp: r.get(24)?,
                     subtotal_cents: 0,
                     discount_cents: 0,
                     tax_cents: 0,
+                    service_cents: 0,
                     total_cents: 0,
                     items: Vec::new(),
                 })
@@ -484,8 +497,9 @@ impl Pos {
             }
         }
         o.items = load_items(&self.conn, id)?;
-        let t = totals(&o.items);
-        (o.subtotal_cents, o.discount_cents, o.tax_cents, o.total_cents) = (t.subtotal, t.discount, t.tax, t.total);
+        let t = totals(&o.items, o.service_bp);
+        (o.subtotal_cents, o.discount_cents, o.tax_cents, o.service_cents, o.total_cents) =
+            (t.subtotal, t.discount, t.tax, t.service, t.total);
         Ok(o)
     }
 
@@ -738,6 +752,17 @@ impl Pos {
         Ok(sent)
     }
 
+    /// Change or remove (0) the service charge on an open order, e.g. at the
+    /// customer's request. Logged.
+    pub fn set_service_charge(&self, s: &Session, order_id: i64, rate_bp: i64) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        check_rate(rate_bp)?;
+        require_open(&self.conn, order_id)?;
+        self.conn.execute("UPDATE orders SET service_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
+        self.audit(Some(s.user_id), "order.service", &format!("{order_id} {rate_bp}"))?;
+        self.get_order(s, order_id)
+    }
+
     /// Take payment and close the order. Stock is taken for tracked items.
     pub fn pay_order(&mut self, s: &Session, order_id: i64, method: PaymentMethod, tendered_cents: i64) -> Result<Order> {
         s.require(Permission::Sell)?;
@@ -747,7 +772,8 @@ impl Pos {
         if items.is_empty() {
             return invalid("the order is empty");
         }
-        let t = totals(&items);
+        let service_bp: i64 = tx.query_row("SELECT service_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+        let t = totals(&items, service_bp);
         let tendered = match method {
             PaymentMethod::Cash if tendered_cents < t.total => return invalid("cash tendered is less than the total"),
             PaymentMethod::Cash => tendered_cents,
@@ -756,10 +782,21 @@ impl Pos {
         tx.prepare_cached(
             "UPDATE orders SET status = 'paid', subtotal_cents = ?2, discount_cents = ?3, tax_cents = ?4,
                  total_cents = ?5, payment_method = ?6, tendered_cents = ?7, change_cents = ?8,
-                 paid_by = ?9, paid_at = unixepoch()
+                 paid_by = ?9, paid_at = unixepoch(), service_cents = ?10
              WHERE id = ?1",
         )?
-        .execute(params![order_id, t.subtotal, t.discount, t.tax, t.total, method.as_str(), tendered, tendered - t.total, s.user_id])?;
+        .execute(params![
+            order_id,
+            t.subtotal,
+            t.discount,
+            t.tax,
+            t.total,
+            method.as_str(),
+            tendered,
+            tendered - t.total,
+            s.user_id,
+            t.service
+        ])?;
         // Stock may go negative: service is never blocked by a miscount.
         tx.prepare_cached(
             "INSERT INTO stock_movements (product_id, delta, reason, order_id, user_id)

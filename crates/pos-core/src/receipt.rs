@@ -101,6 +101,8 @@ pub struct Receipt {
     pub subtotal_cents: i64,
     pub discount_cents: i64,
     pub tax_cents: i64,
+    /// ("Service charge 12.5%", 3.13), when the order has one.
+    pub service: Option<(String, i64)>,
     pub total_cents: i64,
     /// ("Cash", 40.00), ("Change", 5.35)...
     pub payment: Vec<(String, i64)>,
@@ -121,6 +123,12 @@ pub(crate) fn two_col(v: &mut Vec<Line>, size: Size, bold: bool, left: &str, rig
         };
         v.push(Line::new(size, bold, false, text));
     }
+}
+
+/// 1250 -> "12.5", 1000 -> "10".
+pub(crate) fn percent(bp: i64) -> String {
+    let s = format!("{}.{:02}", bp / 100, bp % 100);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 pub(crate) fn money(currency: &str, cents: i64) -> String {
@@ -182,6 +190,9 @@ impl Receipt {
             two_col(&mut v, Size::Normal, false, "Discount", &self.money(-self.discount_cents), width, "");
         }
         two_col(&mut v, Size::Normal, false, "Tax", &self.money(self.tax_cents), width, "");
+        if let Some((label, cents)) = &self.service {
+            two_col(&mut v, Size::Normal, false, label, &self.money(*cents), width, "");
+        }
         two_col(&mut v, Size::Big, true, "TOTAL", &self.money(self.total_cents), big, "");
         if !self.payment.is_empty() {
             v.push(Line::new(Size::Normal, false, false, ""));
@@ -315,6 +326,8 @@ impl Pos {
             subtotal_cents: o.subtotal_cents,
             discount_cents: o.discount_cents,
             tax_cents: o.tax_cents,
+            service: (o.service_cents != 0)
+                .then(|| (format!("{} {}%", self.service_settings().map(|c| c.label).unwrap_or_default(), percent(o.service_bp)), o.service_cents)),
             total_cents: o.total_cents,
             payment,
         })
@@ -389,6 +402,7 @@ impl Pos {
             subtotal_cents: 2850,
             discount_cents: 0,
             tax_cents: 285,
+            service: None,
             total_cents: 3135,
             payment: vec![("Cash".into(), 4000), ("Change".into(), 865)],
         };

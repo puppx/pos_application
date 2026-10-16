@@ -388,3 +388,7 @@ pre.report { background: var(--surface-2); border: 1px dashed var(--line-2); bor
 .danger-zone h3 { color: var(--danger); }
 button.danger.solid { background: var(--danger); border-color: var(--danger); color: #fff; }
 button.danger.solid:hover { background: #b91c1c; }
+
+/* order: service charge row */
+.service-row { cursor: pointer; }
+.service-row .edit-link { color: var(--brand); font-size: 12.5px; font-weight: 600; }

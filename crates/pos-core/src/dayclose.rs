@@ -92,6 +92,9 @@ impl DayClose {
             two_col(&mut v, Size::Normal, false, "Discounts", &m(-sum.discount_cents), width, "");
         }
         two_col(&mut v, Size::Normal, false, "Tax", &m(sum.tax_cents), width, "");
+        if sum.service_cents != 0 {
+            two_col(&mut v, Size::Normal, false, "Service charge", &m(sum.service_cents), width, "");
+        }
         two_col(&mut v, Size::Big, true, "TOTAL", &m(sum.total_cents), big, "");
         let section = |v: &mut Vec<Line>, title: &str, rows: Vec<(String, i64, i64)>| {
             if rows.is_empty() {

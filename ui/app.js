@@ -482,10 +482,11 @@ async function renderFloor() {
 
 async function loadMenu() {
   if (!state.menu) {
-    const [menu, cats, opts, variants] = await Promise.all([
+    const [menu, cats, opts, variants, service] = await Promise.all([
       call('menu'), call('list_categories', { includeInactive: false }), call('menu_options'),
-      call('list_variants', { productId: null }),
+      call('list_variants', { productId: null }), call('get_service_settings'),
     ]);
+    state.service = service;
     state.itemVariants = {};
     for (const v of variants) (state.itemVariants[v.product_id] ??= []).push(v);
     const byId = Object.fromEntries(opts.groups.map((g) => [g.id, g]));
@@ -713,6 +714,9 @@ async function renderOrder() {
       h('tr', {}, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(order.subtotal_cents))),
       order.discount_cents ? h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
       h('tr', {}, h('td', {}, 'Tax'), h('td', { class: 'num' }, money(order.tax_cents))),
+      (order.service_bp || state.service?.rate_bp) ? h('tr', { class: 'service-row', onclick: showService, title: 'Change or remove the service charge' },
+        h('td', {}, `${state.service?.label || 'Service charge'} ${order.service_bp ? pct(order.service_bp) + '%' : '(none)'} `, h('span', { class: 'edit-link' }, 'change')),
+        h('td', { class: 'num' }, money(order.service_cents))) : '',
       h('tr', { class: 'grand' }, h('td', {}, 'Total'), h('td', { class: 'num' }, money(order.total_cents))));
     const qty = (f) => order.items.filter(f).reduce((n, i) => n + i.qty, 0);
     const unsent = qty((i) => !i.sent_at && !i.held);
@@ -753,6 +757,28 @@ async function renderOrder() {
         setKids(extra); header(); toast('Saved');
       }) }, 'Save'),
       h('button', { onclick: () => setKids(extra) }, 'Close'))));
+  };
+  // Service charge on this order only: remove it, pick a rate or type one.
+  const showService = () => {
+    const presets = [...new Set([state.service?.rate_bp || 0, 1000, 1250, 1500].filter((b) => b > 0))].sort((a, b) => a - b);
+    const custom = h('input', { inputmode: 'decimal', placeholder: '%', style: 'width:80px', value: order.service_bp ? pct(order.service_bp) : '' });
+    const set = (bp) => act(async () => {
+      order = await call('set_service_charge', { orderId, rateBp: bp });
+      setKids(extra); draw();
+      toast(bp ? `Service charge ${pct(bp)}%` : 'Service charge removed');
+    });
+    setKids(extra, h('div', { class: 'stack card' },
+      h('strong', {}, state.service?.label || 'Service charge'),
+      h('div', { class: 'row' },
+        h('button', { class: order.service_bp === 0 ? 'on' : 'danger', onclick: set(0) }, 'Remove'),
+        presets.map((bp) => h('button', { class: order.service_bp === bp ? 'on' : '', onclick: set(bp) }, `${pct(bp)}%`))),
+      h('div', { class: 'row' }, 'Other', custom, '%',
+        h('button', { class: 'primary', onclick: (e) => {
+          const v = Number(custom.value.replace(',', '.'));
+          if (!Number.isFinite(v) || v < 0 || v > 30) return toast('Enter a percentage from 0 to 30', true);
+          return set(Math.round(v * 100))(e);
+        } }, 'Apply'),
+        h('button', { onclick: () => setKids(extra) }, 'Close'))));
   };
   const showCancel = () => {
     const reason = h('input', { placeholder: 'Reason', style: 'flex:1' });
@@ -1637,7 +1663,7 @@ async function renderReports() {
       h('div', { class: 'stack' },
         h('div', { class: 'card' }, h('h3', {}, 'Summary'), rows([
           ['Paid orders', s.order_count], ['Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
-          ['Tax', money(s.tax_cents)], ['Total', money(s.total_cents)],
+          ['Tax', money(s.tax_cents)], ['Service charge', money(s.service_cents)], ['Total', money(s.total_cents)],
           ['Voided / refunded', `${s.voided_count} (${money(s.voided_total_cents)})`], ['Cancelled', s.cancelled_count]])),
         h('div', { class: 'card' }, h('h3', {}, 'By order type'),
           rows(s.by_type.map((g) => [TYPE[g.key] ?? g.key, `${g.count} · ${money(g.total_cents)}`]))),
@@ -1784,6 +1810,33 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   };
 }
 
+/// Settings card for the service charge.
+function serviceCard() {
+  const card = h('div', { class: 'card stack' });
+  call('get_service_settings').then((cfg) => {
+    const rate = h('input', { inputmode: 'decimal', value: cfg.rate_bp ? pct(cfg.rate_bp) : '', placeholder: '0', style: 'width:90px' });
+    const label = h('input', { value: cfg.label, style: 'width:200px' });
+    const types = Object.entries(TYPE).map(([k, name]) => ({ k, box: h('input', { type: 'checkbox', checked: cfg.order_types.includes(k) }), name }));
+    setKids(card,
+      h('h3', {}, 'Service charge'),
+      h('div', { class: 'muted' }, 'Added to the bill as a percentage of the food (after discounts, no tax on it). Leave the rate empty or 0 for no service charge. ' +
+        'Staff can change or remove it on any order by tapping it under the totals.'),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Rate', rate, '%'), h('label', { class: 'field' }, 'Name on the bill', label)),
+      h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Add it to new:'),
+        types.map((t) => h('label', { class: 'check' }, t.box, ` ${t.name}`))),
+      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
+        const v = Number((rate.value || '0').replace(',', '.'));
+        if (!Number.isFinite(v) || v < 0 || v > 30) return toast('Enter a rate from 0 to 30 %', true);
+        await call('set_service_settings', { settings: {
+          rate_bp: Math.round(v * 100), label: label.value, order_types: types.filter((t) => t.box.checked).map((t) => t.k),
+        } });
+        state.menu = null; // reload on the next order screen
+        toast(v ? `Service charge ${v}% saved (applies to new orders)` : 'Service charge switched off');
+      }) }, 'Save service charge')));
+  }).catch(() => {});
+  return card;
+}
+
 /// Settings card for full screen (desktop window only).
 function displayCard() {
   const on = h('input', { type: 'checkbox' });
@@ -1863,6 +1916,7 @@ async function renderSettings() {
         toast('Saved');
         await start();
       }) }, 'Save'))),
+    serviceCard(),
     state.remote ? '' : displayCard(),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Kitchen printer'),

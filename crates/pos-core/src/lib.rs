@@ -19,6 +19,7 @@ mod receipt;
 mod products;
 mod reports;
 mod roles;
+mod service;
 mod users;
 mod variants;
 
@@ -44,6 +45,7 @@ pub use orders::{
 };
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
+pub use service::{ServiceSettings, MAX_SERVICE_BP};
 pub use roles::{Permission, Role, Session};
 pub use users::User;
 pub use variants::{Variant, VariantInput};
@@ -59,6 +61,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0002_delivery_customers.sql"),
     include_str!("migrations/0003_item_choices.sql"),
     include_str!("migrations/0004_courses_day_close.sql"),
+    include_str!("migrations/0005_service_charge.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

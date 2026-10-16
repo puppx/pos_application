@@ -12,6 +12,7 @@ mod floors;
 mod lan;
 mod maintenance;
 mod menu;
+mod menu_tools;
 mod options;
 mod orders;
 mod printing;
@@ -37,6 +38,7 @@ pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_
 pub use lan::ServerSettings;
 pub use maintenance::{MenuBackup, MenuCategory, MenuCounts, MenuItem, MenuOptionGroup, MenuPrice, ResetOptions, ResetReport, SalesReset};
 pub use menu::Category;
+pub use menu_tools::{ImportReport, ImportRow};
 pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
 pub use printing::{system_printers, KitchenTicket, PrintJob, PrinterConfig, PrinterTarget, TicketItem};
@@ -63,6 +65,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_courses_day_close.sql"),
     include_str!("migrations/0005_service_charge.sql"),
     include_str!("migrations/0006_deleted_items.sql"),
+    include_str!("migrations/0007_menu_editing.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

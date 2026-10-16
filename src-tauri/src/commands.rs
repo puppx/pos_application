@@ -695,6 +695,26 @@ commands! {
         app.with_session(t, |pos, s| pos.delete_category(s, id))
     }
 
+    fn set_category_defaults(app, t, id: i64, tax_rate_bp: Option<i64>, starter: bool) -> Category {
+        app.with_session(t, |pos, s| pos.set_category_defaults(s, id, tax_rate_bp, starter))
+    }
+
+    fn reorder_categories(app, t, ids: Vec<i64>) -> () {
+        app.with_session(t, |pos, s| pos.reorder_categories(s, &ids))
+    }
+
+    fn reorder_products(app, t, ids: Vec<i64>) -> () {
+        app.with_session(t, |pos, s| pos.reorder_products(s, &ids))
+    }
+
+    fn duplicate_product(app, t, id: i64) -> Product {
+        app.with_session(t, |pos, s| pos.duplicate_product(s, id))
+    }
+
+    fn import_items(app, t, rows: Vec<ImportRow>) -> ImportReport {
+        app.with_session(t, |pos, s| pos.import_items(s, &rows))
+    }
+
     fn get_setting(app, t, key: String) -> Option<String> {
         app.with_session(t, |pos, _| pos.setting(&key))
     }

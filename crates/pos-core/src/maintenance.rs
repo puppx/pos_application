@@ -44,6 +44,12 @@ pub struct MenuCategory {
     pub color: Option<String>,
     #[serde(default)]
     pub sort_order: i64,
+    /// Default tax for new items in this category (None = main default).
+    #[serde(default)]
+    pub tax_rate_bp: Option<i64>,
+    /// New items in this category are starters.
+    #[serde(default)]
+    pub starter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,8 +181,17 @@ impl Pos {
         s.require(Permission::ManageMenu)?;
         let categories = self
             .conn
-            .prepare("SELECT id, name, color, sort_order FROM categories WHERE active = 1 ORDER BY sort_order, name")?
-            .query_map([], |r| Ok(MenuCategory { key: r.get(0)?, name: r.get(1)?, color: r.get(2)?, sort_order: r.get(3)? }))?
+            .prepare("SELECT id, name, color, sort_order, tax_rate_bp, starter FROM categories WHERE active = 1 ORDER BY sort_order, name")?
+            .query_map([], |r| {
+                Ok(MenuCategory {
+                    key: r.get(0)?,
+                    name: r.get(1)?,
+                    color: r.get(2)?,
+                    sort_order: r.get(3)?,
+                    tax_rate_bp: r.get(4)?,
+                    starter: r.get(5)?,
+                })
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut option_groups = self
             .conn
@@ -198,7 +213,7 @@ impl Pos {
             .conn
             .prepare(
                 "SELECT id, name, category_id, sku, barcode, price_cents, cost_cents, tax_rate_bp, track_stock, stock_qty, starter
-                 FROM products WHERE active = 1 ORDER BY name",
+                 FROM products WHERE active = 1 ORDER BY category_id IS NULL, category_id, sort_order, name",
             )?
             .query_map([], |r| {
                 Ok((
@@ -261,9 +276,12 @@ impl Pos {
         let mut cats = HashMap::new();
         for c in &backup.categories {
             let (name, color) = crate::menu::clean(&c.name, c.color.as_deref())?;
+            if c.tax_rate_bp.is_some_and(|t| !(0..=10_000).contains(&t)) {
+                return invalid(format!("category \"{name}\" has an invalid tax rate"));
+            }
             tx.execute(
-                "INSERT INTO categories (name, color, sort_order) VALUES (?1, ?2, ?3)",
-                params![name, color, c.sort_order],
+                "INSERT INTO categories (name, color, sort_order, tax_rate_bp, starter) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![name, color, c.sort_order, c.tax_rate_bp, c.starter],
             )
             .map_err(|e| crate::error::map_unique(e, &format!("the category \"{name}\" appears twice")))?;
             cats.insert(c.key, tx.last_insert_rowid());
@@ -291,12 +309,12 @@ impl Pos {
             }
             groups.insert(g.key, gid);
         }
-        for it in &backup.items {
+        for (pos, it) in backup.items.iter().enumerate() {
             let name = crate::products::validate(&it.name, it.price_cents, it.cost_cents, it.tax_rate_bp)?;
             let code = |c: &Option<String>| c.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
             tx.execute(
-                "INSERT INTO products (category_id, sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, starter)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO products (category_id, sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, starter, sort_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     it.category.and_then(|k| cats.get(&k)),
                     code(&it.sku),
@@ -307,7 +325,8 @@ impl Pos {
                     it.tax_rate_bp,
                     it.stock_qty,
                     it.track_stock,
-                    it.starter
+                    it.starter,
+                    pos as i64 + 1
                 ],
             )
             .map_err(|e| crate::error::map_unique(e, &format!("a SKU or barcode on \"{name}\" is used twice")))?;

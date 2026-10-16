@@ -19,6 +19,8 @@ pub struct Product {
     pub active: bool,
     /// Sent to the kitchen first on dine-in orders (see `send_to_kitchen`).
     pub starter: bool,
+    /// Position within its category on the menu.
+    pub sort_order: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,7 +75,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -91,6 +93,7 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         track_stock: r.get(9)?,
         active: r.get(10)?,
         starter: r.get(11)?,
+        sort_order: r.get(12)?,
     })
 }
 
@@ -173,7 +176,7 @@ impl Pos {
         s.require(Permission::ManageMenu)?;
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {COLS} FROM products p WHERE p.deleted = 0 AND (?1 OR p.active = 1)
-             ORDER BY p.name LIMIT ?2 OFFSET ?3"
+             ORDER BY p.category_id IS NULL, p.category_id, p.sort_order, p.name LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt.query_map(
             params![include_inactive, limit.clamp(1, MAX_LIMIT), offset.max(0)],
@@ -188,8 +191,9 @@ impl Pos {
         self.check_category(p.category_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?9))",
             params![
                 clean_code(p.sku),
                 clean_code(p.barcode),

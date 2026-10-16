@@ -8,6 +8,16 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Floor plan editor** with **multiple floors**: drag tables into place, square or round, resize, rename. A table is just a name, with no seat numbers or covers to enter.
 - **Live table view**: free and occupied tables, running bill, time seated, and a red ring when items haven't been sent to the kitchen
 - **Orders stay open** while you add items over several rounds. *Send to kitchen* marks what has gone; *Move table* moves an order to any free table on any floor.
+- **Fast menu building** (Menu screen):
+  - **Quick-add row**: type a name and price and press Enter, in the category tab you are on
+  - **Save & add another** keeps the category; Enter saves
+  - The item editor shows only name, category and price; **More options** holds tax, starter, choices, extras, stock and codes
+  - **Defaults**: a main tax rate (Settings → Menu defaults) and per-category tax and "items here are starters"
+  - Prices can be typed as 12, 12.5, 12,50 or £12.50
+  - **Paste a menu** from Excel or Google Sheets (name, price, category), with a preview; missing categories are created
+  - **Duplicate** an item with its choices and options
+  - **Category tabs**, and drag ⠿ to reorder categories and items (the order screen follows)
+  - Create an option group from inside the item editor, see a live preview of the item's tile, and errors shown next to the field
 - **Menu** with coloured categories, a tap-to-add item grid, notes per item ("no onions"), line discounts and optional stock counting (for example bottled drinks)
 - **Item choices with their own prices**: one menu item sold in versions, e.g. *Tom Yum Soup*: Chicken 6.50 / Beef 7.50 / Prawn 8.50. Set them up in the item's own editor (no option groups needed); the menu shows "from 6.50", staff tap the soup then the meat, and the bill, kitchen ticket and reports show *Tom Yum Soup (Beef)*.
 - **Item options with prices**: sizes, extras and choices such as "Burger size" (pick exactly one), "Extras" (pick up to 5) or "Cooking". Option groups are reusable across items, and each option's price (+ or −) is added to the item. A group can be paused ("In use") or deleted; deleting removes it from every item, and past orders keep what was chosen.

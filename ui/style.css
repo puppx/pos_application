@@ -395,3 +395,27 @@ button.danger.solid:hover { background: #b91c1c; }
 
 /* history: delete order */
 .delete-order { border-top: 1px dashed var(--line-2); padding-top: 10px; }
+
+/* menu editor */
+.cat-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.cat-tabs button { min-height: 40px; border-radius: 999px; padding: 0 14px; }
+.cat-tabs .dot { width: 10px; height: 10px; border-radius: 3px; background: var(--c); }
+.cat-tabs button.on { background: var(--c, var(--ink)); border-color: var(--c, var(--ink)); color: #fff; }
+.cat-tabs button.on .dot { background: rgba(255, 255, 255, .8); }
+.grip { cursor: grab; touch-action: none; color: var(--muted); font-size: 18px; user-select: none; padding: 0 4px; }
+.menu-list td.grip { width: 34px; text-align: center; }
+.dragging { opacity: .6; outline: 2px dashed var(--brand); }
+.cat-chips button .grip { margin-left: -6px; }
+tr.quick-add td { background: var(--brand-soft); border-bottom: 1px solid var(--line); }
+tr.quick-add input, tr.quick-add select { min-height: 40px; width: 100%; }
+tr.quick-add td:nth-child(2) { min-width: 180px; }
+tr.quick-add select { min-width: 130px; }
+.field-error { color: var(--danger); font-size: 12.5px; font-weight: 600; margin-top: 3px; }
+input.bad, select.bad { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+.field-col { display: inline-flex; flex-direction: column; }
+.field-col input { width: 100%; }
+details.more-options { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface-2); }
+details.more-options[open] summary { margin-bottom: 10px; }
+.tile.preview { display: flex; flex-direction: column; width: 150px; height: 92px; flex: none; cursor: default; pointer-events: none; }
+.card.inset { box-shadow: none; background: var(--surface); }
+tr.bad-row td { background: var(--danger-soft); }

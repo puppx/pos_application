@@ -369,7 +369,8 @@ fn categories_and_menu_order() {
         }).unwrap();
     }
     let names: Vec<_> = pos.menu(&admin).unwrap().into_iter().map(|p| p.name).collect();
-    assert_eq!(names, ["Steak", "Cola", "Water", "Bread"]);
+    // Category order, then the order items were added (drag to change it).
+    assert_eq!(names, ["Steak", "Water", "Cola", "Bread"]);
     assert_eq!(pos.list_categories(&admin, false).unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Mains", "Drinks"]);
     let bad = NewProduct {
         category_id: Some(999), sku: None, barcode: None, name: "X".into(), price_cents: 1,

@@ -12,6 +12,10 @@ pub struct Category {
     pub sort_order: i64,
     pub color: Option<String>,
     pub active: bool,
+    /// Tax rate for new items here; None = the main default in Settings.
+    pub tax_rate_bp: Option<i64>,
+    /// New items here are starters.
+    pub starter: bool,
 }
 
 const NAME_TAKEN: &str = "a category with that name already exists";
@@ -23,6 +27,8 @@ fn category_from_row(r: &Row) -> rusqlite::Result<Category> {
         sort_order: r.get(2)?,
         color: r.get(3)?,
         active: r.get(4)?,
+        tax_rate_bp: r.get(5)?,
+        starter: r.get(6)?,
     })
 }
 
@@ -45,7 +51,7 @@ impl Pos {
     pub fn list_categories(&self, s: &Session, include_inactive: bool) -> Result<Vec<Category>> {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name, sort_order, color, active FROM categories
+            "SELECT id, name, sort_order, color, active, tax_rate_bp, starter FROM categories
              WHERE ?1 OR active = 1 ORDER BY sort_order, name",
         )?;
         let rows = stmt.query_map([include_inactive], category_from_row)?;
@@ -93,7 +99,7 @@ impl Pos {
 
     fn get_category(&self, id: i64) -> Result<Category> {
         self.conn
-            .prepare_cached("SELECT id, name, sort_order, color, active FROM categories WHERE id = ?1")?
+            .prepare_cached("SELECT id, name, sort_order, color, active, tax_rate_bp, starter FROM categories WHERE id = ?1")?
             .query_row([id], category_from_row)
             .optional()?
             .ok_or(PosError::NotFound)
@@ -136,10 +142,10 @@ impl Pos {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents,
-                    p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter
+                    p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order
              FROM products p LEFT JOIN categories c ON c.id = p.category_id AND c.active = 1
              WHERE p.active = 1
-             ORDER BY c.sort_order IS NULL, c.sort_order, c.name, p.name",
+             ORDER BY c.sort_order IS NULL, c.sort_order, c.name, p.sort_order, p.name",
         )?;
         let rows = stmt.query_map([], product_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

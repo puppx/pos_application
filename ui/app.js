@@ -88,11 +88,53 @@ function icon(name, size = 22) {
 }
 const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
 const money = (c) => (c / 100).toFixed(2);
+/// Money as people type it: "12", "12.5", "12,50", "£12.50", " 12.50 ".
 function parseMoney(s) {
-  s = String(s).trim();
-  if (!/^\d+(\.\d{1,2})?$/.test(s)) throw new Error('enter an amount like 12.50');
+  s = String(s).replace(/[£$€\s]/g, '');
+  if (s.includes(',') && !s.includes('.')) s = s.replace(',', '.');
+  else s = s.replace(/,/g, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(s) && !/^\.\d{1,2}$/.test(s)) throw new Error('enter a price like 12.50');
   const [w, f = ''] = s.split('.');
-  return Number(w) * 100 + Number(f.padEnd(2, '0'));
+  return Number(w || 0) * 100 + Number(f.padEnd(2, '0'));
+}
+
+/// Drag to reorder, with mouse or finger: press on `handle` inside an
+/// `item` and move. `onDrop(ids)` gets the new order of `data-id`s.
+function sortable(container, { item, handle, axis = 'y', onDrop }) {
+  container.addEventListener('pointerdown', (e) => {
+    const grip = e.target.closest(handle);
+    if (!grip || !container.contains(grip)) return;
+    const el = grip.closest(item);
+    if (!el) return;
+    e.preventDefault();
+    const order = () => [...el.parentNode.children].filter((x) => x.matches(item)).map((x) => Number(x.dataset.id));
+    const before = order().join();
+    el.classList.add('dragging');
+    // Listen on the whole window: moving the row in the page drops pointer
+    // capture, so listeners on the handle would miss the rest of the drag.
+    const move = (m) => {
+      if (m.pointerId !== e.pointerId) return;
+      const over = document.elementFromPoint(m.clientX, m.clientY)?.closest(item);
+      if (!over || over === el || over.parentNode !== el.parentNode) return;
+      const r = over.getBoundingClientRect();
+      const after = axis === 'y' ? m.clientY > r.top + r.height / 2 : m.clientX > r.left + r.width / 2;
+      over.parentNode.insertBefore(el, after ? over.nextSibling : over);
+    };
+    const up = (u) => {
+      if (u.pointerId !== e.pointerId) return;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      el.classList.remove('dragging');
+      el.dataset.dragged = '1';
+      setTimeout(() => delete el.dataset.dragged, 0);
+      const now = order();
+      if (now.join() !== before) onDrop(now);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
 }
 function parseSignedMoney(s) {
   s = String(s).trim();
@@ -1274,31 +1316,63 @@ async function renderHistory() {
 // ---------- menu (admin) ----------
 
 async function renderMenuAdmin() {
-  const [cats, groups, feed, allVariants] = await Promise.all([
+  const [cats, groups, feed, allVariants, defaultTaxRaw] = await Promise.all([
     call('list_categories', { includeInactive: true }),
     call('list_option_groups', { includeInactive: true }),
     call('menu_options'),
     call('list_variants', { productId: null }),
+    call('get_setting', { key: 'default_tax_bp' }),
   ]);
+  const defaultTax = Math.max(0, parseInt(defaultTaxRaw ?? '0', 10) || 0);
   const variantsOf = {};
   for (const v of allVariants) (variantsOf[v.product_id] ??= []).push(v);
   const activeGroups = groups.filter((g) => g.active);
-  const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
-  const form = h('div', { 'data-hint': 'Tap a menu item, category or option group to edit it, or add a new one.' });
+  const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
+  // What a new item in category `id` starts with.
+  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter });
+  const form = h('div', { 'data-hint': 'Tap a menu item, category or option group to edit it, add one with the quick-add row, or paste a whole menu.' });
   const list = h('div');
-  const filter = h('select', {}, h('option', { value: '' }, 'All categories'), cats.filter((c) => c.active).map((c) => h('option', { value: c.id }, c.name)));
+  const search = h('input', { type: 'search', placeholder: 'Search items' });
   const showInactive = h('input', { type: 'checkbox' });
-  const changed = async () => { state.menu = null; setKids(form); await renderMenuAdmin(); };
+  const tabs = h('div', { class: 'cat-tabs' });
+  state.menuTab ??= 'all';
+  if (state.menuTab !== 'all' && state.menuTab !== 'none' && !catById[state.menuTab]?.active) state.menuTab = 'all';
+  const changed = async (keepForm = false) => { state.menu = null; if (!keepForm) setKids(form); await renderMenuAdmin(); };
+  const tabCat = () => (typeof state.menuTab === 'number' ? state.menuTab : null);
 
+  // ---- error under a field (instead of a pop-up) ----
+  const fieldErr = (input, msg) => {
+    let el = input.parentNode?.querySelector(`.field-error[data-for="${input.dataset.f}"]`);
+    if (!msg) { el?.remove(); input.classList.remove('bad'); return; }
+    input.classList.add('bad');
+    // The message goes as soon as the user starts fixing it.
+    input.addEventListener('input', () => fieldErr(input), { once: true });
+    if (!el) {
+      el = h('div', { class: 'field-error', 'data-for': input.dataset.f });
+      input.insertAdjacentElement('afterend', el);
+    }
+    el.textContent = msg;
+  };
+
+  // ---- the list ----
   const loadProducts = act(async () => {
     let products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
-    if (filter.value) products = products.filter((p) => p.category_id === Number(filter.value));
-    setKids(list, h('table', {},
-      h('tr', {}, h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
+    const q = search.value.trim().toLowerCase();
+    if (q) products = products.filter((p) => p.name.toLowerCase().includes(q));
+    else if (state.menuTab === 'none') products = products.filter((p) => p.category_id == null);
+    else if (tabCat()) products = products.filter((p) => p.category_id === tabCat());
+    // Dragging sets the order inside one category, so it needs a category tab.
+    const canDrag = !q && tabCat() != null;
+    const quick = quickAdd();
+    const table = h('table', { class: 'menu-list' },
+      h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
         h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
-      products.map((p) => h('tr', { class: 'click', style: p.active ? '' : 'opacity:.5', onclick: () => editProduct(p) },
+      quick.row,
+      products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
+        onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
+        canDrag && h('td', { class: 'grip', title: 'Drag to reorder', onclick: (e) => e.stopPropagation() }, '⠿'),
         h('td', {}, p.name, variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
-        h('td', {}, catName[p.category_id] ?? '—'),
+        h('td', {}, catById[p.category_id]?.name ?? '—'),
         h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
           type: 'checkbox', checked: p.starter, title: 'Starter: sent to the kitchen first',
           onchange: act(async (e) => {
@@ -1309,45 +1383,99 @@ async function renderMenuAdmin() {
           }),
         })),
         h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
-        h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—')))));
+        h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—'))));
+    setKids(list, table,
+      !products.length && h('div', { class: 'empty small' }, q ? 'No items match your search.' : 'No items here yet: type a name and price in the row above and press Enter.'),
+      canDrag && products.length > 1 && h('div', { class: 'muted small pad' }, 'Drag ⠿ to change the order items appear on the order screen.'));
+    if (canDrag) sortable(table, { item: 'tr[data-id]', handle: '.grip', onDrop: act(async (ids) => { await call('reorder_products', { ids }); state.menu = null; toast('Order saved'); }) });
+    quick.focus();
   });
 
+  // ---- 2. quick-add row: name + price + Enter ----
+  function quickAdd() {
+    const name = h('input', { placeholder: 'New item name', 'data-f': 'qname' });
+    const price = h('input', { placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', 'data-f': 'qprice' });
+    const cat = h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active).map((c) => h('option', { value: c.id }, c.name)));
+    cat.value = tabCat() ?? '';
+    const add = act(async () => {
+      fieldErr(name); fieldErr(price);
+      if (!name.value.trim()) return fieldErr(name, 'Type a name');
+      let cents;
+      try { cents = parseMoney(price.value); } catch (e) { return fieldErr(price, e.message); }
+      const category_id = cat.value ? Number(cat.value) : null;
+      const d = defaultsFor(category_id);
+      await call('create_product', { product: { name: name.value, price_cents: cents, category_id, tax_rate_bp: d.tax, starter: d.starter } });
+      toast(`${name.value.trim()} added (${money(cents)})`);
+      state.menu = null;
+      state.quickCat = cat.value;
+      await loadProducts();
+    });
+    for (const el of [name, price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(e); });
+    if (state.quickCat != null && tabCat() == null && state.menuTab === 'all') cat.value = state.quickCat;
+    const row = h('tr', { class: 'quick-add' },
+      tabCat() != null && !search.value && h('td', {}),
+      h('td', {}, name), h('td', {}, cat), h('td', {}), h('td', { class: 'num' }, price),
+      h('td', { colspan: 2, class: 'num' }, h('button', { class: 'primary', onclick: add }, icon('plus', 16), 'Add')));
+    return { row, focus: () => { if (!matchMedia('(pointer: coarse)').matches && !form.firstChild) name.focus(); } };
+  }
+
+  // ---- categories (with defaults and drag to reorder) ----
   function editCategory(c) {
-    const name = h('input', { value: c?.name ?? '', placeholder: 'Category name' });
+    const name = h('input', { value: c?.name ?? '', placeholder: 'Category name', 'data-f': 'cname' });
     const color = h('input', { type: 'color', value: c?.color ?? '#9ca3af' });
-    const order = h('input', { value: c?.sort_order ?? cats.length + 1, inputmode: 'numeric', style: 'width:70px', title: 'Position' });
     const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
+    const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (main default)`, inputmode: 'decimal', style: 'width:150px', 'data-f': 'ctax' });
+    const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
+    const save = act(async () => {
+      fieldErr(name); fieldErr(tax);
+      if (!name.value.trim()) return fieldErr(name, 'Type a name');
+      let taxBp = null;
+      if (tax.value.trim()) {
+        const v = Number(tax.value.replace(',', '.').replace('%', ''));
+        if (!Number.isFinite(v) || v < 0 || v > 100) return fieldErr(tax, 'Enter a tax rate from 0 to 100');
+        taxBp = Math.round(v * 100);
+      }
+      const args = { name: name.value, color: color.value };
+      const saved = c
+        ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.checked })
+        : await call('create_category', { ...args, sortOrder: cats.length + 1 });
+      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked });
+      toast('Saved');
+      if (!c) state.menuTab = saved.id;
+      await changed();
+    });
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
     setKids(form, h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
-      h('div', { class: 'row' }, name, 'Colour', color, 'Position', order, c && h('label', {}, active, ' Active')),
+      h('div', { class: 'row' }, name, h('label', { class: 'field' }, 'Colour', color), c && h('label', { class: 'check' }, active, ' Active')),
+      h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
+        h('label', { class: 'check' }, starter, ' Items here are starters')),
       h('div', { class: 'row' },
-        h('button', { class: 'primary', onclick: act(async () => {
-          const args = { name: name.value, color: color.value, sortOrder: parseInt(order.value, 10) || 0 };
-          if (c) await call('update_category', { id: c.id, ...args, active: active.checked });
-          else await call('create_category', args);
-          toast('Saved'); await changed();
-        }) }, 'Save'),
+        h('button', { class: 'primary', onclick: save }, 'Save'),
         h('button', { onclick: () => setKids(form) }, 'Cancel'),
         h('span', { style: 'flex:1' }),
         c && confirmBtn('Delete category', `Tap again to delete "${c.name}"`, async () => {
           await call('delete_category', { id: c.id });
           toast(`${c.name} deleted; its items now have no category`);
+          state.menuTab = 'all';
           await changed();
         }))));
     name.focus();
   }
 
+  // ---- option groups ----
   function editGroup(g) {
     const name = h('input', { value: g?.name ?? '', placeholder: 'Group name, e.g. Burger size' });
     const min = h('input', { type: 'number', value: g?.min_select ?? 0, min: 0, max: 20, style: 'width:70px' });
     const max = h('input', { type: 'number', value: g?.max_select ?? 1, min: 1, max: 20, style: 'width:70px' });
     const active = h('input', { type: 'checkbox', checked: g ? g.active : true });
     const rows = (g?.options ?? []).filter((o) => o.active).map((o) => ({ id: o.id, name: o.name, price: o.price_cents ? signed(o.price_cents) : '' }));
-    const list = h('div', { class: 'stack' });
-    const drawRows = () => setKids(list, ...rows.map((r, i) => h('div', { class: 'row' },
+    const optList = h('div', { class: 'stack' });
+    const drawRows = () => setKids(optList, ...rows.map((r, i) => h('div', { class: 'row' },
       h('input', { value: r.name, placeholder: 'Option, e.g. Large', oninput: (e) => (r.name = e.target.value) }),
       h('input', { value: r.price, placeholder: '+0.00', style: 'width:90px', inputmode: 'decimal', oninput: (e) => (r.price = e.target.value) }),
       h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); drawRows(); } }, '×'))));
-    const addRow = () => { rows.push({ id: null, name: '', price: '' }); drawRows(); list.lastChild.querySelector('input').focus(); };
+    const addRow = () => { rows.push({ id: null, name: '', price: '' }); drawRows(); optList.lastChild.querySelector('input').focus(); };
     const save = act(async () => {
       const args = { name: name.value, minSelect: parseInt(min.value, 10) || 0, maxSelect: parseInt(max.value, 10) || 1 };
       const options = rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, price_cents: parseSignedMoney(r.price) }));
@@ -1357,130 +1485,326 @@ async function renderMenuAdmin() {
       await call('save_group_options', { groupId: saved.id, options });
       toast('Saved'); await changed();
     });
-    // Two taps to delete, so a slip of the finger does nothing.
-    const deleteBtn = h('button', { class: 'danger', onclick: act(async () => {
-      if (!deleteBtn.dataset.sure) {
-        deleteBtn.dataset.sure = '1';
-        deleteBtn.textContent = `Tap again to delete "${g.name}"`;
-        return;
-      }
-      await call('delete_option_group', { id: g.id });
-      toast(`${g.name} deleted`); await changed();
-    }) }, 'Delete group');
     setKids(form, h('div', { class: 'card stack' },
       h('h3', {}, g ? `Edit ${g.name}` : 'New option group'),
       h('div', { class: 'row' }, name, g && h('label', {}, active, ' In use')),
       h('div', { class: 'row' }, 'Customer must choose at least', min, 'and at most', max),
       h('div', { class: 'muted' }, 'Sizes: at least 1, at most 1. Extras: at least 0, at most e.g. 5. Prices are added to the item (use -1.00 for a cheaper option). ' +
         'Untick "In use" to hide it for now; Delete removes it from every item (past orders are not affected).'),
-      list,
+      optList,
       h('div', {}, h('button', { onclick: addRow }, '+ Option')),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'),
-        h('span', { style: 'flex:1' }), g && deleteBtn)));
+        h('span', { style: 'flex:1' }),
+        g && confirmBtn('Delete group', `Tap again to delete "${g.name}"`, async () => {
+          await call('delete_option_group', { id: g.id });
+          toast(`${g.name} deleted`); await changed();
+        }))));
     drawRows();
     if (!rows.length) addRow();
     name.focus();
   }
 
-  function editProduct(p) {
+  // ---- 1, 3, 7, 9, 10, 11: the item editor ----
+  function editProduct(p, preset = {}) {
+    const startCat = p ? p.category_id : (preset.category_id !== undefined ? preset.category_id : tabCat());
+    const d0 = defaultsFor(startCat);
     const f = {
-      name: h('input', { value: p?.name ?? '', placeholder: 'Name' }),
+      name: h('input', { value: p?.name ?? '', placeholder: 'Item name', 'data-f': 'name' }),
       cat: h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name))),
-      price: h('input', { value: p ? money(p.price_cents) : '', placeholder: 'Price', inputmode: 'decimal', style: 'width:100px' }),
-      tax: h('input', { value: p ? pct(p.tax_rate_bp) : '0', inputmode: 'decimal', style: 'width:70px' }),
-      cost: h('input', { value: p ? money(p.cost_cents) : '0', inputmode: 'decimal', style: 'width:100px' }),
+      price: h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', style: 'width:110px', 'data-f': 'price' }),
+      tax: h('input', { value: pct(p ? p.tax_rate_bp : d0.tax), inputmode: 'decimal', style: 'width:80px', 'data-f': 'tax' }),
+      cost: h('input', { value: p ? money(p.cost_cents) : '0', inputmode: 'decimal', style: 'width:100px', 'data-f': 'cost' }),
       barcode: h('input', { value: p?.barcode ?? '', placeholder: 'Barcode (optional)' }),
       sku: h('input', { value: p?.sku ?? '', placeholder: 'Code / PLU (optional)' }),
       track: h('input', { type: 'checkbox', checked: p ? p.track_stock : false }),
       stock: h('input', { value: '0', inputmode: 'numeric', style: 'width:80px' }),
       active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
-      starter: h('input', { type: 'checkbox', checked: p ? p.starter : (cats.find((c) => c.id === Number(filter.value))?.name ?? '').toLowerCase().startsWith('starter') }),
+      starter: h('input', { type: 'checkbox', checked: p ? p.starter : d0.starter }),
     };
+    f.cat.value = startCat ?? '';
+    // A new item follows its category's defaults until the user changes them.
+    let taxTouched = !!p, starterTouched = !!p;
+    f.tax.addEventListener('input', () => (taxTouched = true));
+    f.starter.addEventListener('change', () => (starterTouched = true));
+    f.cat.addEventListener('change', () => {
+      const d = defaultsFor(f.cat.value ? Number(f.cat.value) : null);
+      if (!taxTouched) f.tax.value = pct(d.tax);
+      if (!starterTouched) f.starter.checked = d.starter;
+      preview();
+    });
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
-    // Choices with their own price (e.g. soup: chicken 6.50 / beef 7.50).
     const choices = (variantsOf[p?.id] ?? []).map((v) => ({ id: v.id, name: v.name, price: money(v.price_cents) }));
     const choiceList = h('div', { class: 'stack' });
     const priceHint = h('span', { class: 'muted' });
     const drawChoices = () => {
-      priceHint.textContent = choices.length ? '(the item price above is not used)' : '';
+      priceHint.textContent = choices.length ? '(the item price is not used)' : '';
       setKids(choiceList, ...choices.map((c, i) => h('div', { class: 'row' },
-        h('input', { value: c.name, placeholder: 'e.g. Chicken', oninput: (e) => (c.name = e.target.value) }),
-        h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', oninput: (e) => (c.price = e.target.value) }),
-        h('button', { class: 'danger', onclick: () => { choices.splice(i, 1); drawChoices(); } }, '×'))));
+        h('input', { value: c.name, placeholder: 'e.g. Chicken', oninput: (e) => { c.name = e.target.value; preview(); } }),
+        h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', 'data-f': `choice${i}`, oninput: (e) => { c.price = e.target.value; preview(); } }),
+        h('button', { class: 'danger', onclick: () => { choices.splice(i, 1); drawChoices(); preview(); } }, '×'))));
     };
     const addChoice = () => { choices.push({ id: null, name: '', price: '' }); drawChoices(); choiceList.lastChild.querySelector('input').focus(); };
     drawChoices();
     const groupBoxes = activeGroups.map((g) => ({ g, box: h('input', { type: 'checkbox', checked: linked.has(g.id) }) }));
-    f.cat.value = p ? (p.category_id ?? '') : filter.value;
-    const data = () => ({
-      name: f.name.value, category_id: f.cat.value ? Number(f.cat.value) : null,
-      barcode: f.barcode.value || null, sku: f.sku.value || null,
-      // Items with choices have no price of their own: an empty box means 0.
-      price_cents: !f.price.value.trim() && choices.some((c) => c.name.trim()) ? 0 : parseMoney(f.price.value),
-      cost_cents: parseMoney(f.cost.value || '0'),
-      tax_rate_bp: Math.round(Number(f.tax.value || 0) * 100), track_stock: f.track.checked,
-      starter: f.starter.checked,
-    });
-    const save = act(async () => {
+    const groupRow = h('div', { class: 'row' });
+    const drawGroups = () => setKids(groupRow, groupBoxes.map(({ g, box }) => h('label', { class: 'check' }, box, ` ${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))),
+      !groupBoxes.length && h('span', { class: 'muted' }, 'No option groups yet.'));
+    drawGroups();
+
+    // 9: new option group without leaving the item.
+    const newGroup = h('div');
+    const openNewGroup = () => {
+      const gname = h('input', { placeholder: 'e.g. Spice level' });
+      const rule = h('select', {}, h('option', { value: '1-1' }, 'Customer picks exactly 1'), h('option', { value: '0-1' }, 'Optional, up to 1'), h('option', { value: '0-5' }, 'Optional, up to 5'));
+      const opts = h('textarea', { rows: 3, placeholder: 'One option per line, with an extra price if any:\nMild\nHot\nExtra hot +0.50', style: 'width:100%' });
+      setKids(newGroup, h('div', { class: 'card stack inset' },
+        h('strong', {}, 'New option group'),
+        h('div', { class: 'row' }, gname, rule), opts,
+        h('div', { class: 'row' },
+          h('button', { class: 'primary', onclick: act(async () => {
+            const [mn, mx] = rule.value.split('-').map(Number);
+            const options = opts.value.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+              const m = l.match(/^(.*?)\s*([+-]\s*[£$€]?\d+(?:[.,]\d{1,2})?)$/);
+              return m ? { id: null, name: m[1], price_cents: parseSignedMoney(m[2].replace(/\s|[£$€]/g, '')) } : { id: null, name: l, price_cents: 0 };
+            });
+            if (!options.length) return toast('Add at least one option, one per line', true);
+            const g = await call('create_option_group', { name: gname.value, minSelect: mn, maxSelect: mx });
+            const saved = await call('save_group_options', { groupId: g.id, options });
+            groupBoxes.push({ g: saved, box: h('input', { type: 'checkbox', checked: true }) });
+            activeGroups.push(saved);
+            drawGroups();
+            setKids(newGroup);
+            toast(`${saved.name} created and ticked; Save the item to keep it`);
+          }) }, 'Create group'),
+          h('button', { onclick: () => setKids(newGroup) }, 'Cancel'))));
+      gname.focus();
+    };
+
+    // 10: live preview of the order-screen tile.
+    const tile = h('div', { class: 'tile preview' });
+    const preview = () => {
+      const c = catById[Number(f.cat.value)];
+      let price;
+      try { price = parseMoney(f.price.value || '0'); } catch { price = null; }
+      const named = choices.filter((x) => x.name.trim());
+      const prices = named.map((x) => { try { return parseMoney(x.price); } catch { return null; } }).filter((x) => x != null);
+      const label = named.length && prices.length
+        ? (prices.every((x) => x === prices[0]) ? money(prices[0]) : `from ${money(Math.min(...prices))}`)
+        : price == null ? '?' : money(price);
+      tile.style.setProperty('--c', c?.color || '#94a3b8');
+      setKids(tile, h('span', { class: 'name' }, f.name.value.trim() || 'Item name'),
+        h('span', { class: 'foot' }, h('span', { class: 'price' }, label), f.starter.checked && h('span', { class: 'tag' }, 'Starter'),
+          (named.length || groupBoxes.some((x) => x.box.checked)) && h('span', { class: 'more' }, '•••')));
+    };
+    for (const el of [f.name, f.price]) el.addEventListener('input', preview);
+    f.starter.addEventListener('change', preview);
+    groupRow.addEventListener('change', preview);
+    preview();
+
+    // 11: check everything, showing problems next to the field.
+    const validate = () => {
+      let ok = true;
+      const err = (el, msg) => { fieldErr(el, msg); if (msg) ok = false; };
+      err(f.name, f.name.value.trim() ? null : 'Type a name');
+      const hasChoices = choices.some((c) => c.name.trim());
+      let price = 0;
+      if (!(hasChoices && !f.price.value.trim())) {
+        try { price = parseMoney(f.price.value); err(f.price, null); } catch (e) { err(f.price, e.message); }
+      } else err(f.price, null);
+      const tax = Number(String(f.tax.value).replace(',', '.').replace('%', '') || 0);
+      err(f.tax, Number.isFinite(tax) && tax >= 0 && tax <= 100 ? null : 'From 0 to 100');
+      let cost = 0;
+      try { cost = parseMoney(f.cost.value || '0'); err(f.cost, null); } catch (e) { err(f.cost, e.message); }
+      const variants = [];
+      choices.forEach((c, i) => {
+        if (!c.name.trim()) return;
+        const el = choiceList.querySelector(`[data-f="choice${i}"]`);
+        try { variants.push({ id: c.id, name: c.name, price_cents: parseMoney(c.price) }); err(el, null); } catch (e) { err(el, e.message); }
+      });
+      if (!ok) { more.open = more.open || !!form.querySelector('details .bad'); return null; }
+      return {
+        product: {
+          name: f.name.value, category_id: f.cat.value ? Number(f.cat.value) : null,
+          barcode: f.barcode.value || null, sku: f.sku.value || null, price_cents: price, cost_cents: cost,
+          tax_rate_bp: Math.round(tax * 100), track_stock: f.track.checked, starter: f.starter.checked,
+        },
+        variants,
+      };
+    };
+    const save = (again) => act(async () => {
+      const v = validate();
+      if (!v) return;
       const saved = p
-        ? await call('update_product', { id: p.id, product: { ...data(), active: f.active.checked } })
-        : await call('create_product', { product: { ...data(), stock_qty: parseInt(f.stock.value || '0', 10) } });
+        ? await call('update_product', { id: p.id, product: { ...v.product, active: f.active.checked } })
+        : await call('create_product', { product: { ...v.product, stock_qty: parseInt(f.stock.value || '0', 10) } });
       const groupIds = groupBoxes.filter((x) => x.box.checked).map((x) => x.g.id);
       if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds });
-      const variants = choices.filter((c) => c.name.trim()).map((c) => ({ id: c.id, name: c.name, price_cents: parseMoney(c.price) }));
-      if (p || variants.length) await call('set_variants', { productId: saved.id, variants });
-      toast('Saved'); await changed();
+      if (p || v.variants.length) await call('set_variants', { productId: saved.id, variants: v.variants });
+      state.menu = null;
+      if (again) {
+        // 1: keep going in the same category.
+        toast(`${saved.name} saved. Next item:`);
+        await renderMenuAdmin();
+        state.openEditor?.(null, { category_id: v.product.category_id });
+      } else {
+        toast('Saved');
+        await changed();
+      }
     });
+    for (const el of [f.name, f.price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(!p)(e); });
+
     const delta = h('input', { placeholder: '+/- qty', style: 'width:90px', inputmode: 'numeric' });
     const reason = h('input', { placeholder: 'Reason (delivery, count…)' });
+    // 3: the rarely needed fields wait behind "More options".
+    const more = h('details', { class: 'more-options' },
+      h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, choices, extras, stock, codes')),
+      h('div', { class: 'stack' },
+        h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', f.tax), h('label', { class: 'field' }, 'Cost', f.cost),
+          h('label', { class: 'check' }, f.starter, ' Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)'))),
+        h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
+          h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering.'),
+          choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
+        h('div', { class: 'stack' }, h('strong', {}, 'Options (sizes, extras…)'), groupRow,
+          h('div', {}, h('button', { onclick: openNewGroup }, '+ New option group')), newGroup),
+        h('div', { class: 'row' }, f.barcode, f.sku),
+        h('div', { class: 'row' }, h('label', { class: 'check' }, f.track, ' Count stock (e.g. bottled drinks)'),
+          !p && h('label', { class: 'field' }, 'Opening stock', f.stock), p && h('label', { class: 'check' }, f.active, ' On the menu')),
+        p && p.track_stock && h('div', { class: 'row' }, `Stock: ${p.stock_qty}`, delta, reason,
+          h('button', { onclick: act(async () => {
+            await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
+            toast('Stock updated'); await changed();
+          }) }, 'Adjust'))));
+    more.open = !!p && (choices.length > 0 || linked.size > 0 || !!p.sku || !!p.barcode || p.track_stock || !p.active);
     setKids(form, h('div', { class: 'card stack' },
-      h('h3', {}, p ? `Edit ${p.name}` : 'New menu item'),
-      h('div', { class: 'row' }, f.name, f.cat),
-      h('div', { class: 'row' }, 'Price', f.price, 'Tax %', f.tax, 'Cost', f.cost),
-      h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
-        h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering. Leave empty for a normal item.'),
-        choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
-      h('div', { class: 'row' }, f.barcode, f.sku),
-      groupBoxes.length > 0 && h('div', { class: 'stack' }, h('strong', {}, 'Options'),
-        h('div', { class: 'row' }, groupBoxes.map(({ g, box }) => h('label', {}, box, ` ${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))))),
-      h('label', {}, f.starter, ' Starter ', h('span', { class: 'muted' }, '(dine-in: sent to the kitchen first; the rest waits for "Call mains")')),
-      h('div', { class: 'row' }, h('label', {}, f.track, ' Count stock (e.g. bottled drinks)'),
-        !p && ['Opening stock', f.stock], p && h('label', {}, f.active, ' On the menu')),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'),
+      h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, p ? `Edit ${p.name}` : 'New menu item'), tile),
+      h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, f.name), f.cat),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Price', h('span', { class: 'field-col' }, f.price))),
+      more,
+      h('div', { class: 'row' },
+        !p && h('button', { class: 'primary', onclick: save(true), title: 'Enter' }, 'Save & add another'),
+        h('button', { class: p ? 'primary' : '', onclick: save(false) }, 'Save'),
+        h('button', { onclick: () => setKids(form) }, 'Cancel'),
         h('span', { style: 'flex:1' }),
+        p && h('button', { onclick: act(async () => {
+          const copy = await call('duplicate_product', { id: p.id });
+          toast(`Copied as "${copy.name}": change the name and price`);
+          await renderMenuAdmin();
+          const fresh = (await call('list_products', { includeInactive: true, limit: 500, offset: 0 })).find((x) => x.id === copy.id);
+          state.openEditor?.(fresh ?? copy);
+        }) }, 'Duplicate'),
         p && confirmBtn('Delete item', `Tap again to delete "${p.name}" for good`, async () => {
           await call('delete_product', { id: p.id });
           toast(`${p.name} deleted`);
           await changed();
-        })),
-      p && p.track_stock && h('div', { class: 'row' }, `Stock: ${p.stock_qty}`, delta, reason,
-        h('button', { onclick: act(async () => {
-          await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
-          toast('Stock updated'); await changed();
-        }) }, 'Adjust'))));
-    f.name.focus();
+        }))));
+    (p ? f.name : f.name).focus();
+    if (!p) f.name.select();
+  }
+  state.openEditor = editProduct;
+
+  // ---- 6: paste a whole menu from a spreadsheet ----
+  function pasteImport() {
+    const text = h('textarea', { rows: 10, style: 'width:100%', placeholder: 'Name\tPrice\tCategory\nMargherita\t9.50\tPizza\nGarlic bread\t4.50\tStarters\nCola\t2.50\tDrinks' });
+    const out = h('div', { class: 'stack' });
+    let rows = [];
+    const parse = () => {
+      rows = text.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((line, i) => {
+        // Spreadsheets paste tab-separated; typed lines use commas ("quoted, names" allowed).
+        const cells = line.includes('\t') ? line.split('\t') : splitCsv(line);
+        const [name = '', priceText = '', category = ''] = cells.map((c) => c.trim());
+        let price = null, error = null;
+        try { price = parseMoney(priceText); } catch { error = priceText ? `"${priceText}" is not a price` : 'no price'; }
+        if (!name) error = 'no name';
+        return { line: i + 1, name, price, category, error };
+      });
+      // A header line ("Name, Price, Category") is skipped.
+      if (rows[0]?.error && /price/i.test(text.value.split(/\r?\n/)[0])) rows.shift();
+      const bad = rows.filter((r) => r.error);
+      const byCat = (r) => (r.category ? cats.find((c) => c.active && c.name.toLowerCase() === r.category.toLowerCase()) : null);
+      const fresh = [...new Map(rows.filter((r) => r.category && !byCat(r)).map((r) => [r.category.toLowerCase(), r.category])).values()];
+      setKids(out, rows.length ? h('div', { class: 'panel' }, h('table', {},
+        h('tr', {}, h('th', {}, '#'), h('th', {}, 'Item'), h('th', { class: 'num' }, 'Price'), h('th', {}, 'Category'), h('th', {}, '')),
+        rows.slice(0, 200).map((r) => h('tr', { class: r.error ? 'bad-row' : '' },
+          h('td', { class: 'muted' }, r.line), h('td', {}, r.name), h('td', { class: 'num' }, r.price != null ? money(r.price) : ''),
+          h('td', {}, r.category || h('span', { class: 'muted' }, 'none'), r.category && !byCat(r) ? h('span', { class: 'badge' }, 'new') : ''),
+          h('td', { class: 'field-error' }, r.error ?? ''))))) : '',
+        rows.length > 200 && h('div', { class: 'muted' }, `…and ${rows.length - 200} more`),
+        fresh.length > 0 && h('div', { class: 'muted' }, `New categories will be created: ${fresh.join(', ')}`),
+        h('div', { class: 'row' },
+          h('button', { class: 'primary', disabled: !rows.length || bad.length > 0, onclick: act(async () => {
+            const r = await call('import_items', { rows: rows.map((x) => ({ name: x.name, price_cents: x.price, category: x.category || null })) });
+            toast(`${r.items} items imported` + (r.new_categories.length ? `, ${r.new_categories.length} new categories` : ''));
+            await changed();
+          }) }, bad.length ? `Fix ${bad.length} line(s) first` : `Import ${rows.length} item(s)`),
+          h('button', { onclick: () => setKids(form) }, 'Cancel')));
+    };
+    text.addEventListener('input', parse);
+    setKids(form, h('div', { class: 'card stack' },
+      h('h3', {}, 'Paste a menu'),
+      h('div', { class: 'muted' }, 'Copy rows from Excel or Google Sheets (columns: name, price, category) and paste them here, or type one item per line like "Margherita, 9.50, Pizza". ' +
+        'Missing categories are created; each item gets its category\'s tax and starter defaults. Check the preview, then import.'),
+      text, out));
+    parse();
+    text.focus();
   }
 
-  filter.onchange = loadProducts;
+  // ---- 8: category tabs + drag to reorder categories ----
+  const drawTabs = () => setKids(tabs,
+    h('button', { class: state.menuTab === 'all' ? 'on' : '', onclick: () => { state.menuTab = 'all'; drawTabs(); loadProducts(); } }, 'All'),
+    cats.filter((c) => c.active).map((c) => h('button', { class: state.menuTab === c.id ? 'on' : '', style: `--c:${c.color || '#94a3b8'}`,
+      onclick: () => { state.menuTab = c.id; search.value = ''; drawTabs(); loadProducts(); } }, h('span', { class: 'dot' }), c.name)),
+    h('button', { class: state.menuTab === 'none' ? 'on' : '', onclick: () => { state.menuTab = 'none'; drawTabs(); loadProducts(); } }, 'No category'));
+  drawTabs();
+  let searchTimer;
+  search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadProducts, 150); });
   showInactive.onchange = loadProducts;
+
+  const catChips = h('div', { class: 'row cat-chips' }, cats.map((c) => h('button', {
+    'data-id': c.id, style: `border-left:6px solid ${c.color || '#d9dce1'}${c.active ? '' : ';opacity:.5'}`,
+    onclick: (e) => { if (!e.target.closest('.grip') && !e.currentTarget.dataset.dragged) editCategory(c); },
+    title: [c.tax_rate_bp != null ? `tax ${pct(c.tax_rate_bp)}%` : '', c.starter ? 'starters' : ''].filter(Boolean).join(' · '),
+  }, h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'), c.name, c.starter ? h('small', { class: 'muted' }, ' starters') : '')));
+  sortable(catChips, { item: 'button[data-id]', handle: '.grip', axis: 'x', onDrop: act(async (ids) => {
+    await call('reorder_categories', { ids });
+    state.menu = null;
+    toast('Category order saved');
+    await changed(true);
+  }) });
+
   screen(h('div', { class: 'page split' },
     h('div', { class: 'stack' },
       h('div', { class: 'card stack' },
         h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Categories'), h('button', { onclick: () => editCategory(null) }, '+ Category')),
-        h('div', { class: 'row' }, cats.map((c) => h('button', {
-          style: `border-left:6px solid ${c.color || '#d9dce1'}${c.active ? '' : ';opacity:.5'}`, onclick: () => editCategory(c),
-        }, c.name)))),
+        catChips,
+        cats.length > 1 && h('div', { class: 'muted small' }, 'Drag ⠿ to change the order. Tap a category to set its colour and defaults (tax, starters).')),
       h('div', { class: 'card stack' },
         h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Options (sizes, extras…)'), h('button', { onclick: () => editGroup(null) }, '+ Option group')),
         h('div', { class: 'row' }, groups.length ? groups.map((g) => h('button', {
           style: g.active ? '' : 'opacity:.5', onclick: () => editGroup(g), title: g.options.filter((o) => o.active).map((o) => o.name).join(', '),
         }, g.name, h('small', { class: 'muted' }, ` ${groupRule(g)}`)))
           : h('span', { class: 'muted' }, 'Create a group like "Size" or "Extras", then tick it on the menu items that use it.'))),
-      h('div', { class: 'toolbar' }, h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Menu item'), filter,
+      tabs,
+      h('div', { class: 'toolbar' },
+        h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Menu item'),
+        h('button', { onclick: pasteImport }, 'Paste a menu'),
+        h('div', { class: 'searchbox grow' }, icon('search', 18), search),
         h('label', { class: 'check' }, showInactive, ' Show removed')),
       h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, form)));
   await loadProducts();
+}
+
+/// Split one CSV line, honouring "quoted, values".
+function splitCsv(line) {
+  const out = [];
+  let cur = '', quoted = false;
+  for (const ch of line) {
+    if (ch === '"') quoted = !quoted;
+    else if ((ch === ',' || ch === ';') && !quoted) { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
 }
 
 // ---------- floor plan editor (admin) ----------
@@ -1885,6 +2209,22 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   };
 }
 
+/// Settings card: defaults for new menu items.
+function menuDefaultsCard() {
+  const tax = h('input', { inputmode: 'decimal', style: 'width:90px', placeholder: '0' });
+  invoke('get_setting', { key: 'default_tax_bp' }).then((v) => (tax.value = v ? pct(Number(v)) : '')).catch(() => {});
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Menu defaults'),
+    h('div', { class: 'muted' }, 'Tax rate new menu items start with (e.g. 20 for 20% VAT). A category can use its own rate instead (Menu → tap the category).'),
+    h('div', { class: 'row' }, h('label', { class: 'field' }, 'Default tax', tax, '%'),
+      h('button', { class: 'primary', onclick: act(async () => {
+        const v = Number((tax.value || '0').replace(',', '.').replace('%', ''));
+        if (!Number.isFinite(v) || v < 0 || v > 100) return toast('Enter a tax rate from 0 to 100', true);
+        await call('set_setting', { key: 'default_tax_bp', value: String(Math.round(v * 100)) });
+        toast(`New items start with ${v}% tax`);
+      }) }, 'Save')));
+}
+
 /// Settings card: log out after a few minutes without activity.
 function autoLogoutCard() {
   const sel = h('select', {},
@@ -2012,6 +2352,7 @@ async function renderSettings() {
         await start();
       }) }, 'Save'))),
     serviceCard(),
+    menuDefaultsCard(),
     autoLogoutCard(),
     state.remote ? '' : displayCard(),
     h('div', { class: 'card stack' },

@@ -182,6 +182,14 @@ To restore a backup, close the app and copy the backup over `pos.db`.
    Because the installer is not code-signed yet, Windows may say "Windows protected
    your PC": click **More info → Run anyway**.
 
+**PC without internet?** Use `POS_x.y.z_x64-offline-setup.exe` instead. The app
+draws its screens with Microsoft WebView2, which Windows 10/11 usually already
+have; when it is missing, the normal installer downloads it during setup, so it
+needs internet. The offline installer includes WebView2 (it is bigger, about
+150-200 MB): download it on any computer, copy it to the till with a USB stick and
+run it. Once installed, the POS itself never needs internet (only automatic
+updates do).
+
 **Automatic updates (v0.5.0 and later):** the app checks GitHub Releases when it starts
 and every 6 hours. When a new version is out, a bar appears at the top:
 *Update x.y.z available*. An admin taps **Install update**: the database is backed up

@@ -104,12 +104,40 @@ jobs:
           ' "$exe" "$VERSION" "$GITHUB_REPOSITORY"
           cat latest.json
 
+      # Keep the normal installers before the offline build below writes
+      # its own setup .exe to the same folder.
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/bundle/nsis/*-setup.exe dist/
+          cp target/release/bundle/nsis/*-setup.exe.sig dist/ 2>/dev/null || true
+          cp target/release/bundle/msi/*.msi dist/
+          [ -f latest.json ] && cp latest.json dist/ || true
+          ls -la dist
+
+      # Offline installer: includes the whole Microsoft WebView2 runtime, so
+      # it installs on PCs with no internet (the normal installer downloads
+      # WebView2 during setup when Windows does not have it). Bigger, so it
+      # is an extra download; updates keep using the normal installer.
+      # Built for releases and manual runs, not for every push.
+      - name: Build offline installer (WebView2 included)
+        if: github.event_name == 'workflow_dispatch' || steps.ver.outputs.release == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          npx --yes @tauri-apps/cli@2 build --bundles nsis --config \
+            '{"bundle":{"createUpdaterArtifacts":false,"windows":{"webviewInstallMode":{"type":"offlineInstaller","silent":true}}}}'
+          cp target/release/bundle/nsis/*-setup.exe "dist/POS_${VERSION}_x64-offline-setup.exe"
+          ls -la dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: pos-windows-installers
           path: |
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
+            dist/*.exe
+            dist/*.msi
           if-no-files-found: error
 
       - name: Publish release
@@ -121,12 +149,17 @@ jobs:
           name: POS v${{ steps.ver.outputs.version }}
           fail_on_unmatched_files: false
           files: |
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/nsis/*.exe.sig
-            target/release/bundle/msi/*.msi
-            latest.json
+            dist/*.exe
+            dist/*.exe.sig
+            dist/*.msi
+            dist/latest.json
           body: |
-            **New install:** download `POS_*_x64-setup.exe` below and run it.
+            **New install:** download `POS_${{ steps.ver.outputs.version }}_x64-setup.exe` below and run it.
+
+            **No internet on the PC?** Download `POS_${{ steps.ver.outputs.version }}_x64-offline-setup.exe`
+            instead (bigger: it includes Microsoft WebView2, which the normal
+            installer downloads during setup if Windows does not have it).
+            Copy it to the PC with a USB stick and run it.
 
             **Already installed (v0.5.0 or later):** the app finds this update by
             itself; an admin taps **Install update** and it restarts. All data is

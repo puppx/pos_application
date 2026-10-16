@@ -335,6 +335,8 @@ function startUpdateChecks() {
 
 function renderShell() {
   document.body.classList.remove('locked');
+  lastActivity = Date.now();
+  loadAutoLogout();
   clearInterval(state.clockTimer);
   if (!state.remote) startUpdateChecks();
   if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin()))) state.view = 'floor';
@@ -381,14 +383,62 @@ function closeOrder() {
   renderShell();
 }
 
-document.getElementById('logout').onclick = act(async () => {
-  if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
-  await call('logout');
+async function logOut(message = null) {
+  closeModal();
+  try { await invoke('logout'); } catch { /* already logged out on the server */ }
   Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null });
   document.getElementById('bar').hidden = true;
   document.getElementById('rail').hidden = true;
   renderLogin();
+  if (message) toast(message);
+}
+
+document.getElementById('logout').onclick = act(async () => {
+  if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
+  await logOut();
 });
+
+// ---------- auto logout ----------
+
+/// Minutes without a touch or key press before logging out (Settings >
+/// Auto logout); 0 = never. Shared by the till and every browser device.
+const AUTO_LOGOUT_KEY = 'auto_logout_minutes';
+const AUTO_LOGOUT_DEFAULT = 5;
+const AUTO_LOGOUT_WARNING_MS = 30_000;
+let lastActivity = Date.now();
+let idleWarned = false;
+const parseAutoLogout = (v) => {
+  const n = parseInt(v ?? '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : AUTO_LOGOUT_DEFAULT;
+};
+async function loadAutoLogout() {
+  try { state.autoLogout = parseAutoLogout(await invoke('get_setting', { key: AUTO_LOGOUT_KEY })); } catch { /* keep the last value */ }
+}
+for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+  document.addEventListener(ev, () => {
+    lastActivity = Date.now();
+    if (idleWarned) { idleWarned = false; document.getElementById('toast').hidden = true; }
+  }, { capture: true, passive: true });
+}
+setInterval(() => {
+  const mins = state.autoLogout ?? AUTO_LOGOUT_DEFAULT;
+  if (!state.session || !mins) return;
+  // Never throw away an unsaved floor plan: wait until it is saved or discarded.
+  if (state.planDirty) { lastActivity = Date.now(); return; }
+  const idle = Date.now() - lastActivity;
+  const limit = mins * 60_000;
+  if (idle >= limit) {
+    idleWarned = false;
+    logOut(`Logged out after ${mins} minute${mins === 1 ? '' : 's'} without activity`);
+  } else if (idle >= limit - AUTO_LOGOUT_WARNING_MS && !idleWarned) {
+    idleWarned = true;
+    const t = document.getElementById('toast');
+    t.textContent = 'No activity: logging out in 30 seconds. Tap anywhere to stay logged in.';
+    t.className = '';
+    t.hidden = false;
+    clearTimeout(toastTimer);
+  }
+}, 1000);
 
 // ---------- floor plan canvas (shared by live view and editor) ----------
 
@@ -1810,6 +1860,26 @@ function printerForm(cfg, systemPrinters, noneLabel) {
   };
 }
 
+/// Settings card: log out after a few minutes without activity.
+function autoLogoutCard() {
+  const sel = h('select', {},
+    [[0, 'Never'], [1, '1 minute'], [2, '2 minutes'], [5, '5 minutes'], [10, '10 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']]
+      .map(([v, label]) => h('option', { value: v }, label)));
+  const current = state.autoLogout ?? AUTO_LOGOUT_DEFAULT;
+  if (![...sel.options].some((o) => Number(o.value) === current)) sel.append(h('option', { value: current }, `${current} minutes`));
+  sel.value = String(current);
+  sel.onchange = act(async () => {
+    await call('set_setting', { key: AUTO_LOGOUT_KEY, value: sel.value });
+    state.autoLogout = Number(sel.value);
+    toast(state.autoLogout ? `Auto logout after ${sel.selectedOptions[0].textContent} without activity` : 'Auto logout switched off');
+  });
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Auto logout'),
+    h('div', { class: 'muted' }, 'Log out by itself when nobody touches the screen or presses a key for this long, so the next person must enter their own PIN. ' +
+      'A warning shows 30 seconds before. Open orders are kept. Applies to this till and every device using the local server.'),
+    h('label', { class: 'field' }, 'Log out after', sel));
+}
+
 /// Settings card for the service charge.
 function serviceCard() {
   const card = h('div', { class: 'card stack' });
@@ -1917,6 +1987,7 @@ async function renderSettings() {
         await start();
       }) }, 'Save'))),
     serviceCard(),
+    autoLogoutCard(),
     state.remote ? '' : displayCard(),
     h('div', { class: 'card stack' },
       h('h3', {}, 'Kitchen printer'),

@@ -24,6 +24,7 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Use it on other devices (optional local server)**: turn on **Settings → Local server** and open the address it shows (e.g. `http://192.168.1.20:8080`) in a browser on any tablet, laptop or phone on the same Wi-Fi. Each device logs in with its own PIN and shares the same orders, tables, menu and printers. Tick *Start automatically when the POS opens* to have it always on. See [Other devices](#other-devices-local-server).
 - **Full screen**: press **F11** or tap the full-screen button at the top right. Turn on **Settings → Display → Open in full screen when the POS starts** for a kiosk-style till.
 - **PIN login** with **admin** and **staff** roles
+- **Auto logout**: after 5 minutes without a touch or key press (Settings → Auto logout: never, 1–60 minutes), with a 30-second warning. Applies to the till and every device on the local server; open orders are kept
 - **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items
 - **Backups**: automatic daily copy at startup (last 14 kept), plus "Back up everything now"
 - **Menu backup**: Settings → Menu backup saves just the menu (categories, items, choices, options, prices) to restore later or load on another till (*Restore from a file…*)

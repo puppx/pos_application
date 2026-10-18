@@ -1,6 +1,7 @@
 use pos_core::*;
 
 
+#[allow(dead_code)] // shared setup; not every test uses every item
 struct Menu {
     soup: Product,
     wings: Product,

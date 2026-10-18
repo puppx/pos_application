@@ -426,3 +426,13 @@ tr.bad-row td { background: var(--danger-soft); }
 .alt { font-size: 12.5px; color: var(--muted); font-weight: 500; }
 .quick-names { display: flex; flex-direction: column; gap: 4px; }
 .alt-input { width: 130px; }
+
+/* Menu editors open as a pop-up over the menu list */
+.menu-modal { position: fixed; inset: 0; z-index: 15; display: flex; justify-content: center; align-items: flex-start;
+  padding: 5vh 16px; overflow-y: auto; background: rgba(15, 23, 42, .55); backdrop-filter: blur(3px); }
+.menu-modal:empty { display: none; }
+.menu-modal > .card { position: relative; width: min(720px, 100%); border-radius: 22px; padding: 22px; box-shadow: var(--shadow-lg); animation: pop .14s ease-out; }
+@keyframes pop { from { transform: translateY(8px) scale(.98); opacity: 0; } }
+@media (max-width: 700px) { .menu-modal { padding: 0; } .menu-modal > .card { min-height: 100%; border-radius: 0; } }
+.modal-x { position: absolute; top: 12px; right: 12px; width: 40px; height: 40px; padding: 0; font-size: 24px; line-height: 1; border-radius: 999px; z-index: 1; }
+.menu-modal > .card > h3, .menu-modal > .card > .row:first-of-type { padding-right: 44px; }

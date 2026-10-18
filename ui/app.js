@@ -1331,7 +1331,23 @@ async function renderMenuAdmin() {
   const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
   // What a new item in category `id` starts with.
   const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter });
-  const form = h('div', { 'data-hint': 'Tap a menu item, category or option group to edit it, add one with the quick-add row, or paste a whole menu.' });
+  // Editors open in a pop-up over the menu; empty = closed.
+  const form = h('div', { class: 'menu-modal' });
+  // Every editor gets a close button in its corner.
+  new MutationObserver(() => {
+    const card = form.firstElementChild;
+    if (card && !card.querySelector(':scope > .modal-x')) {
+      card.prepend(h('button', { class: 'modal-x ghost', title: 'Close (Esc)', onclick: () => setKids(form) }, '×'));
+    }
+  }).observe(form, { childList: true });
+  // Escape closes it (one listener for the app, whichever menu screen is current).
+  if (!state.menuEscBound) {
+    state.menuEscBound = true;
+    document.addEventListener('keydown', (e) => {
+      const m = document.querySelector('.menu-modal');
+      if (e.key === 'Escape' && m?.firstChild && document.getElementById('modal').hidden) setKids(m);
+    });
+  }
   const list = h('div');
   const search = h('input', { type: 'search', placeholder: 'Search items' });
   const showInactive = h('input', { type: 'checkbox' });
@@ -1451,7 +1467,7 @@ async function renderMenuAdmin() {
     name.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
     setKids(form, h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
       h('div', { class: 'row' }, name, h('label', { class: 'field' }, 'Colour', color), c && h('label', { class: 'check' }, active, ' Active')),
-      h('div', { class: 'row' }, alt, h('span', { class: 'muted small' }, 'Printed next to the heading on kitchen tickets')),
+      h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, alt, h('div', { class: 'muted small' }, 'Printed next to the heading on kitchen tickets')),
       h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
         h('label', { class: 'check' }, starter, ' Items here are starters')),
@@ -1687,7 +1703,7 @@ async function renderMenuAdmin() {
     setKids(form, h('div', { class: 'card stack' },
       h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, p ? `Edit ${p.name}` : 'New menu item'), tile),
       h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, f.name), f.cat),
-      h('div', { class: 'row' }, h('div', { class: 'grow' }, f.alt), h('span', { class: 'muted small' }, 'Printed under the name on kitchen tickets')),
+      h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, f.alt, h('div', { class: 'muted small' }, 'Printed under the name on kitchen tickets')),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Price', h('span', { class: 'field-col' }, f.price))),
       more,
       h('div', { class: 'row' },
@@ -1781,9 +1797,9 @@ async function renderMenuAdmin() {
     await changed(true);
   }) });
 
-  screen(h('div', { class: 'page split' },
+  screen(h('div', { class: 'page' },
     h('div', { class: 'stack' },
-      h('div', { class: 'card stack' },
+      h('div', { class: 'grid2' }, h('div', { class: 'card stack' },
         h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Categories'), h('button', { onclick: () => editCategory(null) }, '+ Category')),
         catChips,
         cats.length > 1 && h('div', { class: 'muted small' }, 'Drag ⠿ to change the order. Tap a category to set its colour and defaults (tax, starters).')),
@@ -1792,7 +1808,7 @@ async function renderMenuAdmin() {
         h('div', { class: 'row' }, groups.length ? groups.map((g) => h('button', {
           style: g.active ? '' : 'opacity:.5', onclick: () => editGroup(g), title: g.options.filter((o) => o.active).map((o) => o.name).join(', '),
         }, g.name, h('small', { class: 'muted' }, ` ${groupRule(g)}`)))
-          : h('span', { class: 'muted' }, 'Create a group like "Size" or "Extras", then tick it on the menu items that use it.'))),
+          : h('span', { class: 'muted' }, 'Create a group like "Size" or "Extras", then tick it on the menu items that use it.')))),
       tabs,
       h('div', { class: 'toolbar' },
         h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Menu item'),
@@ -1800,7 +1816,7 @@ async function renderMenuAdmin() {
         h('div', { class: 'searchbox grow' }, icon('search', 18), search),
         h('label', { class: 'check' }, showInactive, ' Show removed')),
       h('div', { class: 'panel' }, list)),
-    h('div', { class: 'stack sticky' }, form)));
+    form));
   await loadProducts();
 }
 

@@ -41,10 +41,6 @@ fn dine_in(table_id: i64) -> NewOrder {
     NewOrder { order_type: OrderType::DineIn, table_id: Some(table_id), channel_id: None, details: OrderDetails::default() }
 }
 
-fn names(items: &[OrderItem]) -> Vec<&str> {
-    items.iter().map(|i| i.name.as_str()).collect()
-}
-
 fn printer(copies: u8, starter: Option<u8>, mains: Option<u8>) -> PrinterConfig {
     PrinterConfig {
         target: PrinterTarget::File { path: std::env::temp_dir().join("pos-unused.bin").display().to_string() },

@@ -9,10 +9,10 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Live table view**: free and occupied tables, running bill, time seated, and a red ring when items haven't been sent to the kitchen
 - **Orders stay open** while you add items over several rounds. *Send to kitchen* marks what has gone; *Move table* moves an order to any free table on any floor.
 - **Fast menu building** (Menu screen):
-  - **Quick-add row**: type a name and price and press Enter, in the category tab you are on
+  - Items, categories and option groups are edited in a **pop-up** over the full-width list (Esc or × closes it)
   - **Save & add another** keeps the category; Enter saves
   - The item editor shows only name, category and price; **More options** holds tax, starter, choices, extras, stock and codes
-  - **Defaults**: a main tax rate (Settings → Menu defaults) and per-category tax and "items here are starters"
+  - **Defaults**: a main tax rate (Settings → Menu defaults) and per-category tax and "items here are starters". Saving the main rate can also fill in items still at 0% (a category set to 0% keeps its items tax-free)
   - Prices can be typed as 12, 12.5, 12,50 or £12.50
   - **Paste a menu** from Excel or Google Sheets (name, price, category), with a preview; missing categories are created
   - **Duplicate** an item with its choices and options
@@ -97,7 +97,7 @@ Ground
 
 ### Thai and English names
 
-Give a menu item a **Thai name** (in the item editor, the quick-add row, or the 4th
+Give a menu item a **Thai name** (in the item editor or the 4th
 column of *Paste a menu*), and its kitchen ticket shows the English name with the Thai
 name under it, so every cook can read it. Item choices, options and categories can
 have Thai names too. Under **Item names** each printer prints *English with Thai under

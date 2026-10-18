@@ -408,10 +408,6 @@ button.danger.solid:hover { background: #b91c1c; }
 .menu-list td.grip { width: 34px; text-align: center; }
 .dragging { opacity: .6; outline: 2px dashed var(--brand); }
 .cat-chips button .grip { margin-left: -6px; }
-tr.quick-add td { background: var(--brand-soft); border-bottom: 1px solid var(--line); }
-tr.quick-add input, tr.quick-add select { min-height: 40px; width: 100%; }
-tr.quick-add td:nth-child(2) { min-width: 180px; }
-tr.quick-add select { min-width: 130px; }
 .field-error { color: var(--danger); font-size: 12.5px; font-weight: 600; margin-top: 3px; }
 input.bad, select.bad { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
 .field-col { display: inline-flex; flex-direction: column; }
@@ -424,15 +420,14 @@ tr.bad-row td { background: var(--danger-soft); }
 
 /* Thai (second) names */
 .alt { font-size: 12.5px; color: var(--muted); font-weight: 500; }
-.quick-names { display: flex; flex-direction: column; gap: 4px; }
 .alt-input { width: 130px; }
 
-/* Menu editors open as a pop-up over the menu list */
-.menu-modal { position: fixed; inset: 0; z-index: 15; display: flex; justify-content: center; align-items: flex-start;
+/* Editors (menu, staff) open as a pop-up over the list */
+.popup { position: fixed; inset: 0; z-index: 15; display: flex; justify-content: center; align-items: flex-start;
   padding: 5vh 16px; overflow-y: auto; background: rgba(15, 23, 42, .55); backdrop-filter: blur(3px); }
-.menu-modal:empty { display: none; }
-.menu-modal > .card { position: relative; width: min(720px, 100%); border-radius: 22px; padding: 22px; box-shadow: var(--shadow-lg); animation: pop .14s ease-out; }
+.popup:empty { display: none; }
+.popup > .card { position: relative; width: min(720px, 100%); border-radius: 22px; padding: 22px; box-shadow: var(--shadow-lg); animation: pop .14s ease-out; }
 @keyframes pop { from { transform: translateY(8px) scale(.98); opacity: 0; } }
-@media (max-width: 700px) { .menu-modal { padding: 0; } .menu-modal > .card { min-height: 100%; border-radius: 0; } }
+@media (max-width: 700px) { .popup { padding: 0; } .popup > .card { min-height: 100%; border-radius: 0; } }
 .modal-x { position: absolute; top: 12px; right: 12px; width: 40px; height: 40px; padding: 0; font-size: 24px; line-height: 1; border-radius: 999px; z-index: 1; }
-.menu-modal > .card > h3, .menu-modal > .card > .row:first-of-type { padding-right: 44px; }
+.popup > .card > h3, .popup > .card > .row:first-of-type { padding-right: 44px; }

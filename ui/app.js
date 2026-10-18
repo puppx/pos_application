@@ -1316,6 +1316,26 @@ async function renderHistory() {
 
 // ---------- menu (admin) ----------
 
+/// A pop-up for an editor: put a card in it with setKids(host, card) and
+/// empty it to close. Adds a close button; Escape closes it too.
+function popupHost() {
+  const host = h('div', { class: 'popup' });
+  new MutationObserver(() => {
+    const card = host.firstElementChild;
+    if (card && !card.querySelector(':scope > .modal-x')) {
+      card.prepend(h('button', { class: 'modal-x ghost', title: 'Close (Esc)', onclick: () => setKids(host) }, '×'));
+    }
+  }).observe(host, { childList: true });
+  if (!state.popupEscBound) {
+    state.popupEscBound = true;
+    document.addEventListener('keydown', (e) => {
+      const open = [...document.querySelectorAll('.popup')].find((m) => m.firstChild);
+      if (e.key === 'Escape' && open && document.getElementById('modal').hidden) setKids(open);
+    });
+  }
+  return host;
+}
+
 async function renderMenuAdmin() {
   const [cats, groups, feed, allVariants, defaultTaxRaw] = await Promise.all([
     call('list_categories', { includeInactive: true }),
@@ -1331,23 +1351,7 @@ async function renderMenuAdmin() {
   const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
   // What a new item in category `id` starts with.
   const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter });
-  // Editors open in a pop-up over the menu; empty = closed.
-  const form = h('div', { class: 'menu-modal' });
-  // Every editor gets a close button in its corner.
-  new MutationObserver(() => {
-    const card = form.firstElementChild;
-    if (card && !card.querySelector(':scope > .modal-x')) {
-      card.prepend(h('button', { class: 'modal-x ghost', title: 'Close (Esc)', onclick: () => setKids(form) }, '×'));
-    }
-  }).observe(form, { childList: true });
-  // Escape closes it (one listener for the app, whichever menu screen is current).
-  if (!state.menuEscBound) {
-    state.menuEscBound = true;
-    document.addEventListener('keydown', (e) => {
-      const m = document.querySelector('.menu-modal');
-      if (e.key === 'Escape' && m?.firstChild && document.getElementById('modal').hidden) setKids(m);
-    });
-  }
+  const form = popupHost();
   const list = h('div');
   const search = h('input', { type: 'search', placeholder: 'Search items' });
   const showInactive = h('input', { type: 'checkbox' });
@@ -1380,11 +1384,9 @@ async function renderMenuAdmin() {
     else if (tabCat()) products = products.filter((p) => p.category_id === tabCat());
     // Dragging sets the order inside one category, so it needs a category tab.
     const canDrag = !q && tabCat() != null;
-    const quick = quickAdd();
     const table = h('table', { class: 'menu-list' },
       h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
         h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
-      quick.row,
       products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
         onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
         canDrag && h('td', { class: 'grip', title: 'Drag to reorder', onclick: (e) => e.stopPropagation() }, '⠿'),
@@ -1403,40 +1405,10 @@ async function renderMenuAdmin() {
         h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
         h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—'))));
     setKids(list, table,
-      !products.length && h('div', { class: 'empty small' }, q ? 'No items match your search.' : 'No items here yet: type a name and price in the row above and press Enter.'),
+      !products.length && h('div', { class: 'empty small' }, q ? 'No items match your search.' : 'No items here yet: tap "+ Menu item" to add one, or "Paste a menu" to add many.'),
       canDrag && products.length > 1 && h('div', { class: 'muted small pad' }, 'Drag ⠿ to change the order items appear on the order screen.'));
     if (canDrag) sortable(table, { item: 'tr[data-id]', handle: '.grip', onDrop: act(async (ids) => { await call('reorder_products', { ids }); state.menu = null; toast('Order saved'); }) });
-    quick.focus();
   });
-
-  // ---- 2. quick-add row: name + price + Enter ----
-  function quickAdd() {
-    const name = h('input', { placeholder: 'New item name', 'data-f': 'qname' });
-    const price = h('input', { placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', 'data-f': 'qprice' });
-    const alt = h('input', { placeholder: 'Thai name (optional)', lang: 'th', class: 'alt-input' });
-    const cat = h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active).map((c) => h('option', { value: c.id }, c.name)));
-    cat.value = tabCat() ?? '';
-    const add = act(async () => {
-      fieldErr(name); fieldErr(price);
-      if (!name.value.trim()) return fieldErr(name, 'Type a name');
-      let cents;
-      try { cents = parseMoney(price.value); } catch (e) { return fieldErr(price, e.message); }
-      const category_id = cat.value ? Number(cat.value) : null;
-      const d = defaultsFor(category_id);
-      await call('create_product', { product: { name: name.value, name_alt: alt.value.trim() || null, price_cents: cents, category_id, tax_rate_bp: d.tax, starter: d.starter } });
-      toast(`${name.value.trim()} added (${money(cents)})`);
-      state.menu = null;
-      state.quickCat = cat.value;
-      await loadProducts();
-    });
-    for (const el of [name, alt, price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(e); });
-    if (state.quickCat != null && tabCat() == null && state.menuTab === 'all') cat.value = state.quickCat;
-    const row = h('tr', { class: 'quick-add' },
-      tabCat() != null && !search.value && h('td', {}),
-      h('td', { class: 'quick-names' }, name, alt), h('td', {}, cat), h('td', {}), h('td', { class: 'num' }, price),
-      h('td', { colspan: 2, class: 'num' }, h('button', { class: 'primary', onclick: add }, icon('plus', 16), 'Add')));
-    return { row, focus: () => { if (!matchMedia('(pointer: coarse)').matches && !form.firstChild) name.focus(); } };
-  }
 
   // ---- categories (with defaults and drag to reorder) ----
   function editCategory(c) {
@@ -1994,7 +1966,7 @@ async function renderPlan() {
 
 async function renderUsers() {
   const list = h('div');
-  const form = h('div', { 'data-hint': 'Tap a staff member to edit them or reset their PIN.' });
+  const form = popupHost();
   const load = async () => {
     const users = await call('list_users');
     setKids(list, h('table', {},
@@ -2011,6 +1983,7 @@ async function renderUsers() {
     role.value = u?.role ?? 'staff';
     const active = h('input', { type: 'checkbox', checked: u ? u.active : true });
     const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: u ? 'New PIN (optional)' : 'PIN (4-8 digits)' });
+    for (const el of [name, pin]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
     const save = act(async () => {
       if (u) {
         await call('update_user', { id: u.id, name: name.value, role: role.value, active: active.checked });
@@ -2023,16 +1996,19 @@ async function renderUsers() {
       await start(); // own role/name may have changed
     });
     setKids(form, h('div', { class: 'card stack' },
-      h('h3', {}, u ? `Edit ${u.name}` : 'New user'),
-      h('div', { class: 'row' }, name, role, u && h('label', {}, active, ' Active')),
-      h('div', { class: 'row' }, pin),
+      h('h3', {}, u ? `Edit ${u.name}` : 'New staff member'),
+      h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, 'Name', name),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Role', role), u && h('label', { class: 'check' }, active, ' Active')),
+      h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, u ? 'New PIN' : 'PIN', pin,
+        h('span', { class: 'muted small' }, u ? 'Leave empty to keep the current PIN.' : '4 to 8 digits; used to log in.')),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'))));
     name.focus();
   }
-  screen(h('div', { class: 'page split' },
-    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Staff member')),
+  screen(h('div', { class: 'page' },
+    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Staff member'),
+      h('span', { class: 'muted' }, 'Tap a staff member to edit them or reset their PIN.')),
       h('div', { class: 'panel' }, list)),
-    h('div', { class: 'stack sticky' }, form)));
+    form));
   await load();
 }
 
@@ -2249,17 +2225,28 @@ function printerForm(cfg, systemPrinters, noneLabel, names) {
 /// Settings card: defaults for new menu items.
 function menuDefaultsCard() {
   const tax = h('input', { inputmode: 'decimal', style: 'width:90px', placeholder: '0' });
+  const fill = h('input', { type: 'checkbox', checked: true });
+  const untaxed = h('span', { class: 'muted' });
+  const count = () => invoke('untaxed_items').then((n) => {
+    untaxed.textContent = n ? `(${n} item${n === 1 ? '' : 's'} at 0% now)` : '';
+  }).catch(() => {});
   invoke('get_setting', { key: 'default_tax_bp' }).then((v) => (tax.value = v ? pct(Number(v)) : '')).catch(() => {});
+  count();
   return h('div', { class: 'card stack' },
     h('h3', {}, 'Menu defaults'),
-    h('div', { class: 'muted' }, 'Tax rate new menu items start with (e.g. 20 for 20% VAT). A category can use its own rate instead (Menu → tap the category).'),
+    h('div', { class: 'muted' }, 'Tax rate for menu items (e.g. 20 for 20% VAT). A category can use its own rate instead (Menu → tap the category); ' +
+      'set a category to 0% for items that are really tax-free.'),
     h('div', { class: 'row' }, h('label', { class: 'field' }, 'Default tax', tax, '%'),
       h('button', { class: 'primary', onclick: act(async () => {
         const v = Number((tax.value || '0').replace(',', '.').replace('%', ''));
         if (!Number.isFinite(v) || v < 0 || v > 100) return toast('Enter a tax rate from 0 to 100', true);
         await call('set_setting', { key: 'default_tax_bp', value: String(Math.round(v * 100)) });
-        toast(`New items start with ${v}% tax`);
-      }) }, 'Save')));
+        const n = fill.checked ? await call('apply_default_tax') : 0;
+        state.menu = null;
+        toast(n ? `Default tax ${v}% saved and applied to ${n} item${n === 1 ? '' : 's'} that had 0%` : `Default tax ${v}% saved`);
+        count();
+      }) }, 'Save')),
+    h('label', { class: 'check' }, fill, ' Also apply it to existing items that are at 0% ', untaxed));
 }
 
 /// Settings card: log out after a few minutes without activity.

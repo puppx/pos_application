@@ -699,6 +699,15 @@ commands! {
         app.with_session(t, |pos, s| pos.set_category_defaults(s, id, tax_rate_bp, starter, name_alt.as_deref()))
     }
 
+    fn untaxed_items(app, t) -> i64 {
+        app.with_session(t, |pos, s| pos.untaxed_items(s))
+    }
+
+    /// Items at 0% get their category's rate, else the main default.
+    fn apply_default_tax(app, t) -> usize {
+        app.with_session(t, |pos, s| pos.apply_default_tax(s))
+    }
+
     fn reorder_categories(app, t, ids: Vec<i64>) -> () {
         app.with_session(t, |pos, s| pos.reorder_categories(s, &ids))
     }

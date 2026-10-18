@@ -74,3 +74,46 @@ fn reorder_and_duplicate() {
     assert_eq!((c.tax_rate_bp, c.starter), (Some(500), true));
     assert_eq!(ids(&pos).iter().map(|x| x.1.as_str()).collect::<Vec<_>>(), ["C", "A", "B", "B (copy)"]);
 }
+
+#[test]
+fn default_tax_fills_items_left_at_zero() {
+    let mut pos = Pos::open_in_memory().unwrap();
+    let s = pos.setup_first_admin("Owner", "1111").unwrap();
+    pos.create_category(&s, "Food", None, 1).unwrap();
+    let cold = pos.create_category(&s, "Cold food", None, 2).unwrap();
+    let wine = pos.create_category(&s, "Wine", None, 3).unwrap();
+    pos.set_category_defaults(&s, cold.id, Some(0), false, None).unwrap();
+    pos.set_category_defaults(&s, wine.id, Some(2500), false, None).unwrap();
+    let rows = [
+        row("Burger", 900, Some("Food")),
+        row("Salad", 700, Some("Cold food")),
+        row("Merlot", 2000, Some("Wine")),
+        row("Water", 100, None),
+    ];
+    pos.import_items(&s, &rows).unwrap();
+    let mut items = pos.list_products(&s, false, 100, 0).unwrap();
+    let wine_id = items.iter().find(|p| p.name == "Merlot").unwrap().id;
+    // Merlot got 25% from its category on import; set it back to 0% by hand.
+    let m = items.iter_mut().find(|p| p.id == wine_id).unwrap();
+    pos.update_product(&s, m.id, ProductUpdate {
+        category_id: m.category_id, sku: None, barcode: None, name: m.name.clone(), price_cents: 2000, cost_cents: 0,
+        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: None,
+    })
+    .unwrap();
+    // A sale before the change keeps its tax.
+    let o = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    let burger = items.iter().find(|p| p.name == "Burger").unwrap().id;
+    pos.add_item(&s, o.id, burger, 1, None, None, &[]).unwrap();
+
+    assert_eq!(pos.untaxed_items(&s).unwrap(), 1, "only Merlot: no main default yet");
+    pos.set_setting(&s, "default_tax_bp", "2000").unwrap();
+    assert_eq!(pos.untaxed_items(&s).unwrap(), 3);
+    assert_eq!(pos.apply_default_tax(&s).unwrap(), 3);
+    let tax = |pos: &Pos, name: &str| pos.list_products(&s, false, 100, 0).unwrap().into_iter().find(|p| p.name == name).unwrap().tax_rate_bp;
+    assert_eq!(tax(&pos, "Burger"), 2000);
+    assert_eq!(tax(&pos, "Water"), 2000);
+    assert_eq!(tax(&pos, "Merlot"), 2500, "its category's own rate");
+    assert_eq!(tax(&pos, "Salad"), 0, "category set to 0% on purpose");
+    assert_eq!(pos.untaxed_items(&s).unwrap(), 0);
+    assert_eq!(pos.get_order(&s, o.id).unwrap().items[0].tax_rate_bp, 0);
+}

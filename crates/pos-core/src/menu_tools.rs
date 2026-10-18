@@ -13,6 +13,11 @@ use crate::{Category, Permission, Pos, PosError, Product, Result, Session};
 /// Setting (Settings > Menu): tax rate for new items, in basis points.
 pub(crate) const DEFAULT_TAX_KEY: &str = "default_tax_bp";
 const MAX_IMPORT: usize = 2_000;
+/// The tax an item would get today (`?1` = the main default).
+const RATE: &str = "COALESCE((SELECT c.tax_rate_bp FROM categories c WHERE c.id = p.category_id), ?1)";
+/// Live items at 0% that would get a rate above 0.
+const UNTAXED: &str = "p.deleted = 0 AND p.tax_rate_bp = 0
+    AND COALESCE((SELECT c.tax_rate_bp FROM categories c WHERE c.id = p.category_id), ?1) > 0";
 
 /// One line of a pasted menu.
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +46,28 @@ impl Pos {
     /// The main default tax rate for new items (Settings > Menu).
     pub fn default_tax_bp(&self) -> Result<i64> {
         Ok(self.setting(DEFAULT_TAX_KEY)?.and_then(|v| v.trim().parse().ok()).filter(|v| (0..=10_000).contains(v)).unwrap_or(0))
+    }
+
+    /// Menu items still at 0% tax whose category (or, without one, the main
+    /// default) has a rate: what [`Pos::apply_default_tax`] would change.
+    pub fn untaxed_items(&self, s: &Session) -> Result<i64> {
+        s.require(Permission::ManageMenu)?;
+        let default = self.default_tax_bp()?;
+        Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM products p WHERE {UNTAXED}"), [default], |r| r.get(0))?)
+    }
+
+    /// Give items left at 0% tax (never set up) the tax they would get today:
+    /// their category's rate, else the main default. Categories set to 0%
+    /// keep their items at 0%. Open bills keep the tax they were rung up at.
+    pub fn apply_default_tax(&self, s: &Session) -> Result<usize> {
+        s.require(Permission::ManageMenu)?;
+        let default = self.default_tax_bp()?;
+        let changed = self.conn.execute(
+            &format!("UPDATE products AS p SET tax_rate_bp = {RATE}, updated_at = unixepoch() WHERE {UNTAXED}"),
+            [default],
+        )?;
+        self.audit(Some(s.user_id), "menu.apply_default_tax", &format!("{changed} items, default {default}"))?;
+        Ok(changed)
     }
 
     /// Defaults for new items in a category, and its Thai name.

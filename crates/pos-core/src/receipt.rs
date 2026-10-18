@@ -222,8 +222,8 @@ impl Receipt {
         render_text(&self.layout(width), width)
     }
 
-    pub fn to_escpos(&self, width: usize) -> Vec<u8> {
-        render_escpos(&self.layout(width), width)
+    pub fn to_escpos(&self, width: usize, bold: bool) -> Vec<u8> {
+        render_escpos(&self.layout(width), width, bold)
     }
 }
 
@@ -353,7 +353,7 @@ impl Pos {
             return invalid("no receipt printer is set up (Settings → Receipt printer)");
         }
         let r = self.receipt(s, order_id)?;
-        Ok(PrintJob::new(cfg.printer.target.clone(), r.to_escpos(cfg.printer.width)))
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.to_escpos(cfg.printer.width, cfg.printer.bold)))
     }
 
     /// What to print right after a payment: the receipt (if automatic,
@@ -368,7 +368,7 @@ impl Pos {
         let job = if cfg.auto_print {
             let r = self.build_receipt(order, &cfg)?;
             let p = &cfg.printer;
-            Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width), p.copies, p.copy_delay_secs))
+            Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs))
         } else {
             drawer.then(|| PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()))
         };
@@ -422,6 +422,6 @@ impl Pos {
             payment: vec![("Cash".into(), 4000), ("Change".into(), 865)],
         };
         let p = &cfg.printer;
-        Ok(PrintJob::copies(p.target.clone(), &[], r.to_escpos(p.width), p.copies, p.copy_delay_secs))
+        Ok(PrintJob::copies(p.target.clone(), &[], r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs))
     }
 }

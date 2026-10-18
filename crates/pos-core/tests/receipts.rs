@@ -108,7 +108,7 @@ fn receipt_layout_grouped_with_totals_and_change() {
     assert!(r.find("-- STARTERS --").unwrap() < r.find("-- DRINKS --").unwrap());
 
     // £ goes to the printer as code page 437 (0x9C), not UTF-8.
-    let bytes = pos.receipt(&admin, o.id).unwrap().to_escpos(42);
+    let bytes = pos.receipt(&admin, o.id).unwrap().to_escpos(42, true);
     assert!(bytes.contains(&0x9C));
     assert!(!bytes.windows(2).any(|w| w == "£".as_bytes()));
 
@@ -122,7 +122,7 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
     let (mut pos, admin, m) = setup();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("receipt.bin");
-    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None };
+    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None };
     let mut settings = ReceiptSettings { printer: printer.clone(), ..Default::default() };
 
     // No receipt printer: nothing to print, drawer button explains why.
@@ -196,8 +196,8 @@ fn kitchen_copies_and_old_settings_still_load() {
     let reprint = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
     assert_eq!(count(&reprint.bytes(), &CUT), 1);
 
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0, names: None }).is_err());
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0, names: None }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None }).is_err());
 
     // Receipt settings JSON shape (as the UI sends it).
     let rs: ReceiptSettings = serde_json::from_str(

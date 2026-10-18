@@ -198,7 +198,7 @@ fn end_of_day_closes_summarises_and_moves_on() {
     assert!(pos.day_close_job(&s, &close).unwrap().is_none());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("z.bin");
-    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 0, names: None };
+    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None };
     pos.set_receipt_settings(&s, &ReceiptSettings { printer, ..Default::default() }).unwrap();
     let job = pos.day_close_job(&s, &close).unwrap().unwrap();
     assert_eq!(job.parts.len(), 1, "the report prints once whatever the receipt copies");
@@ -209,7 +209,7 @@ fn copies_are_separate_parts_sent_with_a_delay() {
     let (mut pos, s, m, table) = setup();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kitchen.bin");
-    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 1, names: None };
+    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 3, copy_delay_secs: 1, names: None, bold: true, starter_copies: None, mains_copies: None };
     pos.set_kitchen_printer(&s, &cfg).unwrap();
     let o = pos.open_order(&s, &dine_in(table)).unwrap();
     pos.add_item(&s, o.id, m.burger.id, 1, None, None, &[]).unwrap();

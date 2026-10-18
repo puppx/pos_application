@@ -572,13 +572,23 @@ async function renderFloor() {
 
 // ---------- order screen ----------
 
+/// Settings > Quick notes: one per line; tapped onto an order line's note.
+const QUICK_NOTES_KEY = 'quick_notes';
+const DEFAULT_QUICK_NOTES = ['No onions', 'No chilli', 'Extra spicy', 'Mild', 'No ice', 'Allergy: ask staff'];
+function quickNotes(raw) {
+  return raw == null ? DEFAULT_QUICK_NOTES : raw.split('\n').map((n) => n.trim()).filter(Boolean);
+}
+
 async function loadMenu() {
   if (!state.menu) {
-    const [menu, cats, opts, variants, service] = await Promise.all([
+    const [menu, cats, opts, variants, service, notes, tax] = await Promise.all([
       call('menu'), call('list_categories', { includeInactive: false }), call('menu_options'),
       call('list_variants', { productId: null }), call('get_service_settings'),
+      call('get_setting', { key: QUICK_NOTES_KEY }), call('get_setting', { key: 'default_tax_bp' }),
     ]);
     state.service = service;
+    state.quickNotes = quickNotes(notes);
+    state.defaultTax = Math.max(0, parseInt(tax ?? '0', 10) || 0);
     state.itemVariants = {};
     for (const v of variants) (state.itemVariants[v.product_id] ??= []).push(v);
     const byId = Object.fromEntries(opts.groups.map((g) => [g.id, g]));
@@ -654,7 +664,11 @@ async function renderOrder() {
   const lines = h('div', { class: 'lines' });
   const totals = h('table', { class: 'totals' });
   const sendBtn = h('button', { class: 'send', onclick: act(() => send(allCourses.checked)) });
-  const mainsBtn = h('button', { class: 'mains', onclick: act(() => send(true, 'Mains called')) });
+  // Mains waiting: send them. Mains already in the kitchen: call them again.
+  const mainsBtn = h('button', { class: 'mains', onclick: act(async () => {
+    if (order.items.some((i) => i.held && !i.sent_at)) return send(true, 'Mains called');
+    reportPrint(await call('call_main_course', { orderId }), 'Main course called', true);
+  }) });
   const payBtn = h('button', { class: 'go pay', onclick: () => finish() });
   // Phones: the menu and the ticket take turns on screen.
   let layout = null;
@@ -795,7 +809,23 @@ async function renderOrder() {
       if (editing !== it.id) return row;
       const note = h('input', { value: it.note ?? '', placeholder: 'Note (no onions…)', disabled: sent });
       const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: 'Discount', style: 'width:90px' });
-      return [row, h('tr', {}, h('td', { colspan: 4 }, h('div', { class: 'row' }, note, disc,
+      // Quick notes: tap to add to (or take off) the note.
+      const chips = h('div', { class: 'quick-notes' });
+      const drawChips = () => {
+        const parts = note.value.split(',').map((x) => x.trim()).filter(Boolean);
+        setKids(chips, (state.quickNotes ?? []).map((q) => h('button', {
+          class: parts.some((x) => x.toLowerCase() === q.toLowerCase()) ? 'on' : '',
+          onclick: () => {
+            const has = parts.findIndex((x) => x.toLowerCase() === q.toLowerCase());
+            if (has >= 0) parts.splice(has, 1); else parts.push(q);
+            note.value = parts.join(', ').slice(0, 100);
+            drawChips();
+          },
+        }, q)));
+      };
+      note.addEventListener('input', drawChips);
+      if (!sent) drawChips();
+      return [row, h('tr', {}, h('td', { colspan: 4 }, !sent && chips, h('div', { class: 'row' }, note, disc,
         h('button', { class: 'primary', onclick: act(async () => {
           await setLine(it, { note: note.value || null, discount_cents: disc.value ? parseMoney(disc.value) : 0 });
           editing = null; draw();
@@ -806,7 +836,9 @@ async function renderOrder() {
     setKids(totals, 
       h('tr', {}, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(order.subtotal_cents))),
       order.discount_cents ? h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
-      h('tr', {}, h('td', {}, 'Tax'), h('td', { class: 'num' }, money(order.tax_cents))),
+      h('tr', { class: 'service-row', onclick: showTax, title: 'Change the tax on this order' },
+        h('td', {}, order.tax_bp != null ? `Tax ${pct(order.tax_bp)}% ` : 'Tax ', h('span', { class: 'edit-link' }, 'change')),
+        h('td', { class: 'num' }, money(order.tax_cents))),
       (order.service_bp || state.service?.rate_bp) ? h('tr', { class: 'service-row', onclick: showService, title: 'Change or remove the service charge' },
         h('td', {}, `${state.service?.label || 'Service charge'} ${order.service_bp ? pct(order.service_bp) + '%' : '(none)'} `, h('span', { class: 'edit-link' }, 'change')),
         h('td', { class: 'num' }, money(order.service_cents))) : '',
@@ -820,8 +852,10 @@ async function renderOrder() {
       : byCourse && starters ? `Send starters (${starters})` : `Send to kitchen (${unsent + (allCourses.checked ? waiting : 0)})`;
     sendBtn.disabled = !unsent && !(allCourses.checked && waiting);
     sendBtn.classList.toggle('ready', !sendBtn.disabled);
-    mainsBtn.textContent = `Call mains (${waiting})`;
-    mainsBtn.hidden = !waiting;
+    const mainsSent = order.order_type === 'dine_in' && order.items.some((i) => i.sent_at && !i.starter);
+    mainsBtn.textContent = waiting ? `Call mains (${waiting})` : 'Call mains again';
+    mainsBtn.title = waiting ? 'Send the mains to the kitchen' : 'Print a short "MAIN COURSE" ticket so the kitchen fires the mains now';
+    mainsBtn.hidden = !waiting && !mainsSent;
     setKids(payBtn, h('span', {}, 'Finish & Pay'), h('strong', {}, money(order.total_cents)));
     const count = order.items.reduce((n, i) => n + i.qty, 0);
     setKids(phoneBar, layout?.classList.contains('show-ticket') ? '← Back to menu' : `View order · ${count} item(s)`,
@@ -872,6 +906,29 @@ async function renderOrder() {
           return set(Math.round(v * 100))(e);
         } }, 'Apply'),
         h('button', { onclick: () => setKids(extra) }, 'Close'))));
+  };
+  // Tax on this order only: menu rates, a rate for every line, or none.
+  const showTax = () => {
+    const presets = [...new Set([0, state.defaultTax || 0, 500, 2000])].sort((a, b) => a - b);
+    const custom = h('input', { inputmode: 'decimal', placeholder: '%', style: 'width:80px', value: order.tax_bp != null ? pct(order.tax_bp) : '' });
+    const set = (bp) => act(async () => {
+      order = await call('set_order_tax', { orderId, rateBp: bp });
+      setKids(extra); draw();
+      toast(bp == null ? 'Tax back to each item\'s menu rate' : bp ? `Tax ${pct(bp)}% on every item` : 'No tax on this order');
+    });
+    setKids(extra, h('div', { class: 'stack card' },
+      h('strong', {}, 'Tax on this order'),
+      h('div', { class: 'row' },
+        h('button', { class: order.tax_bp == null ? 'on' : '', onclick: set(null) }, 'Menu rates'),
+        presets.map((bp) => h('button', { class: order.tax_bp === bp ? 'on' : '', onclick: set(bp) }, bp ? `${pct(bp)}%` : 'No tax (0%)'))),
+      h('div', { class: 'row' }, 'Other', custom, '%',
+        h('button', { class: 'primary', onclick: (e) => {
+          const v = Number(custom.value.replace(',', '.'));
+          if (!Number.isFinite(v) || v < 0 || v > 100) return toast('Enter a percentage from 0 to 100', true);
+          return set(Math.round(v * 100))(e);
+        } }, 'Apply'),
+        h('button', { onclick: () => setKids(extra) }, 'Close')),
+      h('div', { class: 'muted small' }, '"Menu rates" uses each item\'s own tax. A rate here applies to every item on this order, including ones added later.')));
   };
   const showCancel = () => {
     const reason = h('input', { placeholder: 'Reason', style: 'flex:1' });
@@ -2174,7 +2231,8 @@ function platformsCard() {
 
 /// Connection, paper and copies for one printer (kitchen or receipt).
 /// `names`: [[value, label]...] for "Names on tickets"; the first is the default.
-function printerForm(cfg, systemPrinters, noneLabel, names) {
+/// `courses`: also offer copies for starters and mains tickets (kitchen).
+function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
   const kind = h('select', {},
     h('option', { value: 'none' }, noneLabel),
     h('option', { value: 'network' }, 'Network printer (IP address)'),
@@ -2195,6 +2253,10 @@ function printerForm(cfg, systemPrinters, noneLabel, names) {
   width.value = String(cfg.width ?? 42);
   const copies = h('input', { type: 'number', min: 1, max: 9, value: cfg.copies ?? 1, style: 'width:70px' });
   const delay = h('input', { type: 'number', min: 0, max: 30, value: cfg.copy_delay_secs ?? 2, style: 'width:70px', title: 'Seconds to wait between copies' });
+  const bold = h('input', { type: 'checkbox', checked: cfg.bold ?? true });
+  const courseCopies = (v) => h('input', { type: 'number', min: 1, max: 9, value: v ?? '', placeholder: 'same', style: 'width:80px' });
+  const starterCopies = courseCopies(cfg.starter_copies), mainsCopies = courseCopies(cfg.mains_copies);
+  const copiesOf = (el) => (el.value.trim() ? Math.min(9, Math.max(1, parseInt(el.value, 10) || 1)) : null);
   const lang = h('select', {}, names.map(([v, label]) => h('option', { value: v }, label)));
   lang.value = names.some(([v]) => v === cfg.names) ? cfg.names : names[0][0];
   const fields = h('div', { class: 'row' });
@@ -2208,13 +2270,19 @@ function printerForm(cfg, systemPrinters, noneLabel, names) {
   drawFields();
   return {
     el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, 'Delay between copies', delay, 'sec'), fields,
+      courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Starters ticket copies', starterCopies),
+        h('label', { class: 'field' }, 'Mains ticket copies', mainsCopies),
+        h('span', { class: 'muted small' }, 'For dine-in courses; empty = same as Copies.')),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
-        h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.'))),
+        h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
+      h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)')),
     none: () => kind.value === 'none',
     config: () => ({
       kind: kind.value, width: Number(width.value), copies: Math.min(9, Math.max(1, parseInt(copies.value, 10) || 1)),
       copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
       names: lang.value,
+      bold: bold.checked,
+      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies) }),
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
       ...(kind.value === 'file' && { path: path.value.trim() }),
@@ -2247,6 +2315,25 @@ function menuDefaultsCard() {
         count();
       }) }, 'Save')),
     h('label', { class: 'check' }, fill, ' Also apply it to existing items that are at 0% ', untaxed));
+}
+
+/// Settings card: the quick notes staff tap onto an order line.
+function quickNotesCard() {
+  const text = h('textarea', { rows: 6, style: 'width:100%', placeholder: 'One note per line, e.g.\nNo onions\nExtra spicy\nNo ice' });
+  invoke('get_setting', { key: QUICK_NOTES_KEY }).then((v) => (text.value = quickNotes(v).join('\n'))).catch(() => {});
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Quick notes'),
+    h('div', { class: 'muted' }, 'Buttons shown when staff tap ✎ on an order line, so common requests are one tap (they print on the kitchen ticket). One per line.'),
+    text,
+    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => {
+      const list = text.value.split('\n').map((n) => n.trim()).filter(Boolean);
+      if (list.some((n) => n.length > 40)) return toast('Keep each quick note to 40 characters', true);
+      if (list.length > 30) return toast('Up to 30 quick notes', true);
+      await call('set_setting', { key: QUICK_NOTES_KEY, value: list.join('\n') });
+      state.menu = null;
+      text.value = list.join('\n');
+      toast(list.length ? `${list.length} quick notes saved` : 'Quick notes removed');
+    }) }, 'Save')));
 }
 
 /// Settings card: log out after a few minutes without activity.
@@ -2354,7 +2441,7 @@ async function renderSettings() {
   ]);
 
   const kitchen = printerForm(kitchenCfg, systemPrinters, 'No kitchen printer',
-    [['both', 'English with Thai under it'], ['english', 'English only'], ['thai', 'Thai only']]);
+    [['both', 'English with Thai under it'], ['english', 'English only'], ['thai', 'Thai only']], true);
 
   const receipt = printerForm(receiptCfg, systemPrinters, 'No receipt printer',
     [['english', 'English only'], ['both', 'English with Thai under it']]);
@@ -2379,6 +2466,7 @@ async function renderSettings() {
       }) }, 'Save'))),
     serviceCard(),
     menuDefaultsCard(),
+    quickNotesCard(),
     autoLogoutCard(),
     state.remote ? '' : displayCard(),
     h('div', { class: 'card stack' },

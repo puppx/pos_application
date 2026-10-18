@@ -152,6 +152,8 @@ pub struct Order {
     pub service_bp: i64,
     /// Service charge amount: rate x (subtotal - discount), not taxed.
     pub service_cents: i64,
+    /// Tax rate set on this order for every line; None = menu rates.
+    pub tax_bp: Option<i64>,
     /// subtotal - discount + tax + service.
     pub total_cents: i64,
     pub payment_method: Option<String>,
@@ -445,7 +447,7 @@ impl Pos {
                 "SELECT o.id, o.order_type, o.status, o.table_id, t.name, f.name, o.customer_name, o.customer_phone,
                         o.delivery_address, o.notes, o.opened_by, u.name, o.opened_at, o.payment_method,
                         o.tendered_cents, o.change_cents, o.paid_by, o.paid_at, o.closed_at, o.close_reason,
-                        o.channel_id, ch.name, o.external_ref, o.customer_id, o.service_bp
+                        o.channel_id, ch.name, o.external_ref, o.customer_id, o.service_bp, o.tax_bp
                  FROM orders o JOIN users u ON u.id = o.opened_by
                  LEFT JOIN dining_tables t ON t.id = o.table_id
                  LEFT JOIN floors f ON f.id = t.floor_id
@@ -479,6 +481,7 @@ impl Pos {
                     external_ref: r.get(22)?,
                     customer_id: r.get(23)?,
                     service_bp: r.get(24)?,
+                    tax_bp: r.get(25)?,
                     subtotal_cents: 0,
                     discount_cents: 0,
                     tax_cents: 0,
@@ -576,6 +579,9 @@ impl Pos {
             .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available".into()))?;
+        // A tax rate chosen for the whole order applies to new lines too.
+        let order_tax: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+        let rate = order_tax.unwrap_or(rate);
         let variant = resolve_variant(&tx, product_id, variant_id)?;
         let variant_id = variant.as_ref().map(|v| v.0);
         let (name, base, alt) = match variant {
@@ -770,6 +776,33 @@ impl Pos {
         require_open(&self.conn, order_id)?;
         self.conn.execute("UPDATE orders SET service_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
         self.audit(Some(s.user_id), "order.service", &format!("{order_id} {rate_bp}"))?;
+        self.get_order(s, order_id)
+    }
+
+    /// Set one tax rate for every line of an open order (e.g. 0% for a
+    /// tax-exempt customer), or None to go back to each item's menu rate.
+    /// Logged.
+    pub fn set_order_tax(&mut self, s: &Session, order_id: i64, rate_bp: Option<i64>) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        if rate_bp.is_some_and(|r| !(0..=10_000).contains(&r)) {
+            return invalid("tax rate must be between 0% and 100%");
+        }
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        require_open(&tx, order_id)?;
+        tx.execute("UPDATE orders SET tax_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
+        match rate_bp {
+            Some(r) => tx.execute("UPDATE order_items SET tax_rate_bp = ?2 WHERE order_id = ?1", params![order_id, r])?,
+            None => tx.execute(
+                "UPDATE order_items SET tax_rate_bp = (SELECT p.tax_rate_bp FROM products p WHERE p.id = order_items.product_id)
+                 WHERE order_id = ?1",
+                [order_id],
+            )?,
+        };
+        tx.execute(
+            "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'order.tax', ?2)",
+            params![s.user_id, format!("{order_id} {rate_bp:?}")],
+        )?;
+        tx.commit()?;
         self.get_order(s, order_id)
     }
 

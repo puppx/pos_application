@@ -224,7 +224,7 @@ impl Pos {
             return Ok(None);
         }
         let store = self.setting("store_name")?.unwrap_or_else(|| "POS".into());
-        let bytes = render_escpos(&d.layout(&store, &cfg.currency, cfg.printer.width), cfg.printer.width);
+        let bytes = render_escpos(&d.layout(&store, &cfg.currency, cfg.printer.width), cfg.printer.width, cfg.printer.bold);
         Ok(Some(PrintJob::new(cfg.printer.target, bytes)))
     }
 }

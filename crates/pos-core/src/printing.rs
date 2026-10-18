@@ -50,6 +50,20 @@ pub struct PrinterConfig {
     /// receipt: English).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub names: Option<PrintNames>,
+    /// Print all text in bold, not only headings (on by default).
+    #[serde(default = "yes")]
+    pub bold: bool,
+    /// Kitchen only: copies of a ticket that sends starters ahead of the
+    /// mains, and of mains tickets (mains away / main course call).
+    /// None = `copies`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter_copies: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mains_copies: Option<u8>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Language of item names on a printout. Items without a Thai name always
@@ -103,6 +117,9 @@ impl Default for PrinterConfig {
             copies: 1,
             copy_delay_secs: default_copy_delay(),
             names: None,
+            bold: true,
+            starter_copies: None,
+            mains_copies: None,
         }
     }
 }
@@ -112,7 +129,7 @@ impl PrinterConfig {
         if !(24..=64).contains(&self.width) {
             return invalid("paper width must be between 24 and 64 characters");
         }
-        if !(1..=9).contains(&self.copies) {
+        if [Some(self.copies), self.starter_copies, self.mains_copies].into_iter().flatten().any(|c| !(1..=9).contains(&c)) {
             return invalid("copies must be between 1 and 9");
         }
         if self.copy_delay_secs > 30 {
@@ -251,6 +268,8 @@ pub struct KitchenTicket {
     pub items: Vec<TicketItem>,
     /// Printed after the items, e.g. "MAINS TO FOLLOW: 3".
     pub footer: Option<String>,
+    /// Just the title, table and dishes (the "main course" call).
+    pub brief: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -295,9 +314,12 @@ pub(crate) fn render_text(lines: &[Line], width: usize) -> String {
 
 /// ESC/POS bytes for laid-out lines, code page 437, ending with a feed and
 /// partial cut. Lines with characters outside code page 437 (Thai) are
-/// printed as images, `width` characters wide.
-pub(crate) fn render_escpos(lines: &[Line], width: usize) -> Vec<u8> {
-    let mut b = vec![0x1B, b'@', 0x1B, b't', 0]; // init, code page 437
+/// printed as images, `width` characters wide. `bold` prints every line in
+/// bold (like the Thai font), not just the headings.
+pub(crate) fn render_escpos(lines: &[Line], width: usize, bold: bool) -> Vec<u8> {
+    // Init, code page 437, and the USA character set: printers set to the UK
+    // set print "#" as "£", which turned "#12" into "£12".
+    let mut b = vec![0x1B, b'@', 0x1B, b't', 0, 0x1B, b'R', 0];
     for l in lines {
         if crate::raster::needs_raster(&l.text) {
             b.extend(crate::raster::escpos_line(l.text.trim_end(), l.size, l.center, width * crate::raster::DOTS_PER_CHAR));
@@ -309,7 +331,7 @@ pub(crate) fn render_escpos(lines: &[Line], width: usize) -> Vec<u8> {
             Size::Tall => 0x01,
             Size::Big => 0x11,
         }]);
-        b.extend_from_slice(&[0x1B, b'E', u8::from(l.bold)]);
+        b.extend_from_slice(&[0x1B, b'E', u8::from(bold || l.bold)]);
         b.extend(l.text.trim_end().chars().map(cp437));
         b.push(b'\n');
     }
@@ -366,7 +388,22 @@ impl KitchenTicket {
             push(Size::Big, true, true, t);
         }
         for t in wrap(&self.heading, big, "", "") {
-            push(Size::Big, true, false, t);
+            push(Size::Big, true, self.brief, t);
+        }
+        if self.brief {
+            push(Size::Normal, false, false, "-".repeat(width));
+            for it in &self.items {
+                for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), width, "", "    ").into_iter().enumerate() {
+                    push(Size::Tall, i == 0, false, t);
+                }
+                if let Some(alt) = &it.name_alt {
+                    for t in wrap(alt, width, "    ", "    ") {
+                        push(Size::Tall, false, false, t);
+                    }
+                }
+            }
+            push(Size::Normal, false, false, "-".repeat(width));
+            return v;
         }
         for d in &self.details {
             for t in wrap(d, width, "", "  ") {
@@ -420,8 +457,8 @@ impl KitchenTicket {
     }
 
     /// ESC/POS bytes, code page 437, ending with a feed and partial cut.
-    pub fn to_escpos(&self, width: usize) -> Vec<u8> {
-        render_escpos(&self.lines(width), width)
+    pub fn to_escpos(&self, width: usize, bold: bool) -> Vec<u8> {
+        render_escpos(&self.lines(width), width, bold)
     }
 }
 
@@ -552,6 +589,7 @@ impl Pos {
                 })
                 .collect(),
             footer: (!reprint && waiting > 0).then(|| format!("MAINS TO FOLLOW: {waiting}")),
+            brief: false,
         })
     }
 
@@ -562,8 +600,70 @@ impl Pos {
             return Ok(None);
         }
         let ticket = self.kitchen_ticket(s, order_id, items, reprint)?;
-        let copies = if reprint { 1 } else { cfg.copies };
-        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width), copies, cfg.copy_delay_secs)))
+        let copies = if reprint {
+            1
+        } else if ticket.title == "MAINS AWAY" {
+            cfg.mains_copies.unwrap_or(cfg.copies)
+        } else if ticket.footer.is_some() && items.iter().all(|i| i.starter) {
+            // Starters going ahead of the mains.
+            cfg.starter_copies.unwrap_or(cfg.copies)
+        } else {
+            cfg.copies
+        };
+        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width, cfg.bold), copies, cfg.copy_delay_secs)))
+    }
+
+    /// "Call mains" again once the mains are already in the kitchen (sent
+    /// with the starters, or called before): a short ticket with the table,
+    /// MAIN COURSE and the main dishes, so the kitchen fires them now.
+    /// Changes nothing on the order. None when no kitchen printer is set up.
+    pub fn main_course_job(&self, s: &Session, order_id: i64) -> Result<Option<PrintJob>> {
+        let o = self.get_order(s, order_id)?;
+        let mains: Vec<OrderItem> = o.items.iter().filter(|i| i.sent_at.is_some() && !i.starter).cloned().collect();
+        if mains.is_empty() {
+            return invalid("no main courses have been sent to the kitchen yet");
+        }
+        self.audit(Some(s.user_id), "kitchen.main_course", &order_id.to_string())?;
+        let cfg = self.kitchen_printer()?;
+        if cfg.target == PrinterTarget::None {
+            return Ok(None);
+        }
+        let ticket = self.main_course_ticket(&o, &mains)?;
+        let copies = cfg.mains_copies.unwrap_or(cfg.copies);
+        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width, cfg.bold), copies, cfg.copy_delay_secs)))
+    }
+
+    fn main_course_ticket(&self, o: &Order, mains: &[OrderItem]) -> Result<KitchenTicket> {
+        let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
+        Ok(KitchenTicket {
+            title: "MAIN COURSE".into(),
+            // "TABLE 4" for numbered tables; named ones ("Patio 2") as they are.
+            heading: match &o.table_name {
+                Some(t) if t.chars().all(|c| c.is_ascii_digit()) => format!("TABLE {t}"),
+                Some(t) => t.clone(),
+                None => heading(o),
+            },
+            details: vec![],
+            order_id: o.id,
+            time: chrono::Local::now().format("%H:%M").to_string(),
+            staff: String::new(),
+            items: mains
+                .iter()
+                .map(|i| {
+                    let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
+                    TicketItem {
+                        category: None,
+                        qty: i.qty,
+                        name: name.to_string(),
+                        name_alt: name_alt.map(str::to_string),
+                        options: vec![],
+                        note: None,
+                    }
+                })
+                .collect(),
+            footer: None,
+            brief: true,
+        })
     }
 
     /// Everything already sent on an order, for "Reprint".
@@ -612,8 +712,9 @@ impl Pos {
                 },
             ],
             footer: None,
+            brief: false,
         };
-        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos(cfg.width), cfg.copies, cfg.copy_delay_secs))
+        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos(cfg.width, cfg.bold), cfg.copies, cfg.copy_delay_secs))
     }
 }
 
@@ -728,6 +829,7 @@ mod tests {
                 TicketItem { category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None },
             ],
             footer: None,
+            brief: false,
         }
     }
 
@@ -747,7 +849,7 @@ mod tests {
         let text = t.to_text(32);
         assert!(text.contains("2 x Burger\n    เบอร์เกอร์\n   + Large / ใหญ่\n"), "{text}");
         // Thai lines go out as raster images; the rest stays text.
-        let b = t.to_escpos(32);
+        let b = t.to_escpos(32, true);
         assert_eq!(b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count(), 2);
         assert!(b.windows(10).any(|w| w == b"2 x Burger"));
         assert!(!b.windows(3).any(|w| w == "เ".as_bytes()));
@@ -775,7 +877,7 @@ mod tests {
 
     #[test]
     fn escpos_bytes() {
-        let b = ticket().to_escpos(42);
+        let b = ticket().to_escpos(42, false);
         assert_eq!(&b[..5], &[0x1B, b'@', 0x1B, b't', 0]);
         assert!(b.ends_with(&[0x1D, b'V', 66, 0]));
         // é and û are mapped to code page 437, not sent as UTF-8.
@@ -794,7 +896,7 @@ mod tests {
             std::io::Read::read_to_end(&mut s, &mut buf).unwrap();
             buf
         });
-        let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, ticket().to_escpos(42));
+        let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, ticket().to_escpos(42, true));
         job.send().unwrap();
         assert_eq!(reader.join().unwrap(), job.bytes());
     }

@@ -484,6 +484,12 @@ commands! {
         Ok(print(job))
     }
 
+    /// "Call mains" again when the mains are already in the kitchen.
+    fn call_main_course(app, t, order_id: i64) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| pos.main_course_job(s, order_id))?;
+        Ok(print(job))
+    }
+
     fn print_receipt(app, t, order_id: i64) -> PrintOutcome {
         let job = app.with_session(t, |pos, s| pos.receipt_job(s, order_id))?;
         Ok(print(Some(job)))
@@ -679,6 +685,11 @@ commands! {
 
     fn set_service_charge(app, t, order_id: i64, rate_bp: i64) -> Order {
         app.with_session(t, |pos, s| pos.set_service_charge(s, order_id, rate_bp))
+    }
+
+    /// One tax rate for the whole order; null = each item's menu rate.
+    fn set_order_tax(app, t, order_id: i64, rate_bp: Option<i64>) -> Order {
+        app.with_session(t, |pos, s| pos.set_order_tax(s, order_id, rate_bp))
     }
 
     fn delete_order(app, t, order_id: i64, reason: Option<String>) -> () {

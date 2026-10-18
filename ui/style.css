@@ -431,3 +431,8 @@ tr.bad-row td { background: var(--danger-soft); }
 @media (max-width: 700px) { .popup { padding: 0; } .popup > .card { min-height: 100%; border-radius: 0; } }
 .modal-x { position: absolute; top: 12px; right: 12px; width: 40px; height: 40px; padding: 0; font-size: 24px; line-height: 1; border-radius: 999px; z-index: 1; }
 .popup > .card > h3, .popup > .card > .row:first-of-type { padding-right: 44px; }
+
+/* Quick notes on an order line */
+.quick-notes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.quick-notes button { min-height: 34px; padding: 4px 12px; border-radius: 999px; font-size: 13px; }
+.quick-notes button.on { background: var(--brand); border-color: var(--brand); color: #fff; }

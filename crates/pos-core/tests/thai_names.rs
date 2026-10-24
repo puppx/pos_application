@@ -64,7 +64,7 @@ fn order_lines_keep_the_thai_name() {
     // Kitchen: English with Thai under it, by default.
     let t = pos.kitchen_ticket(&s, order, &o.items, false).unwrap().to_text(42);
     assert!(t.contains("-- MAINS / อาหารจานหลัก --"), "{t}");
-    assert!(t.contains("1 x Pad Thai (Chicken)\n    ผัดไทย (ไก่)\n   + Fried egg / ไข่ดาว\n"), "{t}");
+    assert!(t.contains("1 x Pad Thai\n  (Chicken)\n  ผัดไทย (ไก่)\n  + Fried egg / ไข่ดาว\n"), "{t}");
     assert!(t.contains("2 x Cola\n-"), "{t}");
 
     // Thai only.
@@ -72,7 +72,7 @@ fn order_lines_keep_the_thai_name() {
     cfg.names = Some(PrintNames::Thai);
     pos.set_kitchen_printer(&s, &cfg).unwrap();
     let t = pos.kitchen_ticket(&s, order, &o.items, false).unwrap().to_text(42);
-    assert!(t.contains("-- อาหารจานหลัก --") && t.contains("1 x ผัดไทย (ไก่)\n   + ไข่ดาว\n") && t.contains("2 x Cola"), "{t}");
+    assert!(t.contains("-- อาหารจานหลัก --") && t.contains("1 x ผัดไทย (ไก่)\n  + ไข่ดาว\n") && t.contains("2 x Cola"), "{t}");
     assert!(!t.contains("Chicken"), "{t}");
 
     // English only.
@@ -100,7 +100,7 @@ fn thai_prints_as_an_image() {
     let b = job.bytes();
     let images = b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count();
     assert_eq!(images, 2, "category heading and the Thai name");
-    assert!(b.windows(21).any(|w| w == b"1 x Pad Thai (Chicken"));
+    assert!(b.windows(12).any(|w| w == b"1 x Pad Thai"));
     assert!(!b.windows(3).any(|w| w == "ผ".as_bytes()), "no raw UTF-8 Thai");
 }
 

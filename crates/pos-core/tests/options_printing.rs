@@ -142,20 +142,22 @@ fn kitchen_tickets_per_round() {
     assert!(text.contains("NEW ORDER"), "{text}");
     assert!(text.contains("DINE-IN T3"));
     assert!(text.contains("Ground"));
-    assert!(text.contains("2 x Burger\n   + Large\n   + Cheese\n   ** no onions\n"), "{text}");
+    assert!(text.contains("2 x Burger\n  + Large\n  + Cheese\n  ** no onions\n"), "{text}");
+    // The table again at the bottom.
+    assert!(text.trim_end().ends_with("DINE-IN T3"), "{text}");
 
     // Second round is marked as additional and only lists the new items.
     pos.add_item(&admin, o.id, burger.id, 1, None, None, &[id(&size, "Regular")]).unwrap();
     let sent = pos.send_to_kitchen(&admin, o.id).unwrap();
     let text = pos.kitchen_ticket(&admin, o.id, &sent, false).unwrap().to_text(42);
     assert!(text.contains("ADDITIONAL"));
-    assert!(text.contains("1 x Burger\n   + Regular\n"));
+    assert!(text.contains("1 x Burger\n  + Regular\n"));
     assert!(!text.contains("2 x Burger"));
 
     // Configure a file printer and reprint everything.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kitchen.bin");
-    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 32, copies: 1, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None };
+    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 32, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None };
     pos.set_kitchen_printer(&admin, &cfg).unwrap();
     assert_eq!(pos.kitchen_printer().unwrap(), cfg);
     let job = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
@@ -171,11 +173,11 @@ fn kitchen_tickets_per_round() {
 fn printer_settings_are_admin_only_and_validated() {
     let (mut pos, admin) = setup();
     assert_eq!(pos.kitchen_printer().unwrap().target, PrinterTarget::None);
-    let bad = PrinterConfig { target: PrinterTarget::Network { host: "".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None };
+    let bad = PrinterConfig { target: PrinterTarget::Network { host: "".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None };
     assert!(pos.set_kitchen_printer(&admin, &bad).is_err());
     pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
     let staff = pos.login("2222").unwrap();
-    let good = PrinterConfig { target: PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None };
+    let good = PrinterConfig { target: PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None };
     assert!(matches!(pos.set_kitchen_printer(&staff, &good), Err(PosError::Forbidden)));
     assert!(matches!(pos.test_print_job(&staff, &good), Err(PosError::Forbidden)));
     pos.set_kitchen_printer(&admin, &good).unwrap();
@@ -221,7 +223,8 @@ fn item_choices_with_their_own_prices() {
     // Kitchen ticket shows which meat.
     let sent = pos.send_to_kitchen(&admin, o.id).unwrap();
     let text = pos.kitchen_ticket(&admin, o.id, &sent, false).unwrap().to_text(42);
-    assert!(text.contains("2 x Tom Yum Soup (Beef)") && text.contains("1 x Tom Yum Soup (Chicken)\n   + Extra noodles"), "{text}");
+    // Large text: 21 per line, so the choice wraps under the dish.
+    assert!(text.contains("2 x Tom Yum Soup\n  (Beef)") && text.contains("1 x Tom Yum Soup\n  (Chicken)\n  + Extra noodles"), "{text}");
 
     // Reports count each choice separately.
     pos.pay_order(&admin, o.id, PaymentMethod::Card, 0).unwrap();

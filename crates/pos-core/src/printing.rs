@@ -53,6 +53,10 @@ pub struct PrinterConfig {
     /// Print all text in bold, not only headings (on by default).
     #[serde(default = "yes")]
     pub bold: bool,
+    /// Kitchen only: dishes, options and notes in double-size text (on by
+    /// default); off = double height only, more per line.
+    #[serde(default = "yes")]
+    pub large_text: bool,
     /// Kitchen only: copies of a ticket that sends starters ahead of the
     /// mains, and of mains tickets (mains away / main course call).
     /// None = `copies`.
@@ -118,6 +122,7 @@ impl Default for PrinterConfig {
             copy_delay_secs: default_copy_delay(),
             names: None,
             bold: true,
+            large_text: true,
             starter_copies: None,
             mains_copies: None,
         }
@@ -270,6 +275,8 @@ pub struct KitchenTicket {
     pub footer: Option<String>,
     /// Just the title, table and dishes (the "main course" call).
     pub brief: bool,
+    /// Dishes in double-size text (see `PrinterConfig::large_text`).
+    pub large: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -304,7 +311,7 @@ pub(crate) fn render_text(lines: &[Line], width: usize) -> String {
     let mut s = String::new();
     for l in lines {
         let w = if l.size == Size::Big { width / 2 } else { width };
-        let pad = if l.center { w.saturating_sub(l.text.chars().count()) / 2 } else { 0 };
+        let pad = if l.center { w.saturating_sub(cols(&l.text)) / 2 } else { 0 };
         s.push_str(&" ".repeat(pad));
         s.push_str(l.text.trim_end());
         s.push('\n');
@@ -346,13 +353,14 @@ pub(crate) fn render_escpos(lines: &[Line], width: usize, bold: bool) -> Vec<u8>
 pub(crate) fn wrap(text: &str, width: usize, first: &str, indent: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = first.to_string();
-    let mut start = first.chars().count();
+    let mut start = cols(first);
     for word in text.split_whitespace() {
         let mut word: Vec<char> = word.chars().collect();
         loop {
-            let used = cur.chars().count();
+            let used = cols(&cur);
             let space = usize::from(used > start);
-            if used + space + word.len() <= width {
+            let len = word.iter().filter(|c| !is_mark(**c)).count();
+            if used + space + len <= width {
                 if space == 1 {
                     cur.push(' ');
                 }
@@ -361,22 +369,40 @@ pub(crate) fn wrap(text: &str, width: usize, first: &str, indent: &str) -> Vec<S
             }
             if used > start {
                 out.push(std::mem::replace(&mut cur, indent.to_string()));
-                start = indent.chars().count();
+                start = cols(indent);
                 continue;
             }
-            let take = width.saturating_sub(used).max(1).min(word.len());
+            // Split an over-long word, keeping marks with their letter.
+            let room = width.saturating_sub(used).max(1);
+            let mut take = 0;
+            let mut seen = 0;
+            while take < word.len() && (seen < room || is_mark(word[take])) {
+                seen += usize::from(!is_mark(word[take]));
+                take += 1;
+            }
             cur.extend(word.drain(..take));
             out.push(std::mem::replace(&mut cur, indent.to_string()));
-            start = indent.chars().count();
+            start = cols(indent);
             if word.is_empty() {
                 break;
             }
         }
     }
-    if cur.chars().count() > start || out.is_empty() {
+    if cols(&cur) > start || out.is_empty() {
         out.push(cur);
     }
     out
+}
+
+/// Thai vowel and tone marks sit above or below the letter before them and
+/// take no width of their own.
+fn is_mark(c: char) -> bool {
+    matches!(c, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}')
+}
+
+/// Printed width in characters.
+pub(crate) fn cols(text: &str) -> usize {
+    text.chars().filter(|c| !is_mark(*c)).count()
 }
 
 impl KitchenTicket {
@@ -384,35 +410,27 @@ impl KitchenTicket {
         let mut v = Vec::new();
         let mut push = |size, bold, center, text: String| v.push(Line { size, bold, center, text });
         let big = width / 2;
+        // Dishes, options and notes: double size (large) or double height.
+        let (size, w) = if self.large { (Size::Big, big) } else { (Size::Tall, width) };
+        let (cont, opt, opt_cont, note, note_cont) =
+            if self.large { ("  ", "  + ", "    ", "  ** ", "     ") } else { ("    ", "   + ", "     ", "   ** ", "      ") };
+        let small = if self.large { Size::Tall } else { Size::Normal };
         for t in wrap(&self.title, big, "", "") {
             push(Size::Big, true, true, t);
         }
         for t in wrap(&self.heading, big, "", "") {
             push(Size::Big, true, self.brief, t);
         }
-        if self.brief {
-            push(Size::Normal, false, false, "-".repeat(width));
-            for it in &self.items {
-                for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), width, "", "    ").into_iter().enumerate() {
-                    push(Size::Tall, i == 0, false, t);
-                }
-                if let Some(alt) = &it.name_alt {
-                    for t in wrap(alt, width, "    ", "    ") {
-                        push(Size::Tall, false, false, t);
-                    }
+        if !self.brief {
+            for d in &self.details {
+                for t in wrap(d, width, "", "  ") {
+                    push(small, false, false, t);
                 }
             }
-            push(Size::Normal, false, false, "-".repeat(width));
-            return v;
+            push(small, false, false, format!("#{}  {}  {}", self.order_id, self.time, self.staff));
         }
-        for d in &self.details {
-            for t in wrap(d, width, "", "  ") {
-                push(Size::Normal, false, false, t);
-            }
-        }
-        push(Size::Normal, false, false, format!("#{}  {}  {}", self.order_id, self.time, self.staff));
         push(Size::Normal, false, false, "-".repeat(width));
-        let grouped = self.items.iter().any(|i| i.category.is_some());
+        let grouped = !self.brief && self.items.iter().any(|i| i.category.is_some());
         let mut current: Option<Option<&str>> = None;
         for it in &self.items {
             let cat = it.category.as_deref();
@@ -420,25 +438,25 @@ impl KitchenTicket {
                 if current.is_some() {
                     push(Size::Normal, false, false, String::new());
                 }
-                push(Size::Normal, true, true, category_heading(cat));
+                push(small, true, true, category_heading(cat));
                 current = Some(cat);
             }
-            for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), width, "", "    ").into_iter().enumerate() {
-                push(Size::Tall, i == 0, false, t);
+            for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), w, "", cont).into_iter().enumerate() {
+                push(size, i == 0, false, t);
             }
             if let Some(alt) = &it.name_alt {
-                for t in wrap(alt, width, "    ", "    ") {
-                    push(Size::Tall, false, false, t);
+                for t in wrap(alt, w, cont, cont) {
+                    push(size, false, false, t);
                 }
             }
             for o in &it.options {
-                for t in wrap(o, width, "   + ", "     ") {
-                    push(Size::Tall, false, false, t);
+                for t in wrap(o, w, opt, opt_cont) {
+                    push(size, false, false, t);
                 }
             }
             if let Some(n) = &it.note {
-                for t in wrap(n, width, "   ** ", "      ") {
-                    push(Size::Tall, true, false, t);
+                for t in wrap(n, w, note, note_cont) {
+                    push(size, true, false, t);
                 }
             }
         }
@@ -447,6 +465,10 @@ impl KitchenTicket {
             for t in wrap(f, big, "", "") {
                 push(Size::Big, true, true, t);
             }
+        }
+        // The table again at the bottom, where the ticket is read on the pass.
+        for t in wrap(&self.heading, big, "", "") {
+            push(Size::Big, true, true, t);
         }
         v
     }
@@ -590,6 +612,7 @@ impl Pos {
                 .collect(),
             footer: (!reprint && waiting > 0).then(|| format!("MAINS TO FOLLOW: {waiting}")),
             brief: false,
+            large: self.kitchen_printer()?.large_text,
         })
     }
 
@@ -663,6 +686,7 @@ impl Pos {
                 .collect(),
             footer: None,
             brief: true,
+            large: self.kitchen_printer()?.large_text,
         })
     }
 
@@ -713,6 +737,7 @@ impl Pos {
             ],
             footer: None,
             brief: false,
+            large: cfg.large_text,
         };
         Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos(cfg.width, cfg.bold), cfg.copies, cfg.copy_delay_secs))
     }
@@ -830,6 +855,7 @@ mod tests {
             ],
             footer: None,
             brief: false,
+            large: false,
         }
     }
 
@@ -837,8 +863,26 @@ mod tests {
     fn text_layout() {
         let t = ticket().to_text(32);
         let expected = "   NEW ORDER\nDINE-IN T3\nGround\n#12  19:05  Sam\n--------------------------------\n\
-                        2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n1 x Crème brûlée\n--------------------------------\n";
+                        2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n1 x Crème brûlée\n--------------------------------\n   DINE-IN T3\n";
         assert_eq!(t, expected);
+    }
+
+    #[test]
+    fn large_text_and_table_at_the_bottom() {
+        let t = KitchenTicket { large: true, ..ticket() };
+        let lines = t.lines(42);
+        // Dishes, options and notes are double size (21 per line on 80 mm).
+        for text in ["2 x Burger", "  + Large", "  ** no onions"] {
+            assert!(lines.iter().any(|l| l.text == text && l.size == Size::Big), "{text}");
+        }
+        // The table is printed again at the end, big and centred.
+        let last = lines.last().unwrap();
+        assert!(last.text == "DINE-IN T3" && last.size == Size::Big && last.center);
+        let long = KitchenTicket {
+            items: vec![TicketItem { category: None, qty: 1, name: "Chicken satay with peanut sauce".into(), name_alt: None, options: vec![], note: None }],
+            ..t
+        };
+        assert!(long.lines(42).iter().filter(|l| l.size == Size::Big).all(|l| l.text.chars().count() <= 21));
     }
 
     #[test]
@@ -873,6 +917,9 @@ mod tests {
         assert_eq!(wrap("ABCDEFGHIJKLMNOPQRST", 8, "", ""), ["ABCDEFGH", "IJKLMNOP", "QRST"]);
         assert_eq!(wrap("no onions please", 14, "   ** ", "      "), ["   ** no", "      onions", "      please"]);
         assert_eq!(wrap("", 8, "", ""), [""]);
+        // Thai marks take no width: 6 letters + 3 marks fit in 6 columns.
+        assert_eq!(wrap("+ ไข่ดาว", 8, "", ""), ["+ ไข่ดาว"]);
+        assert_eq!(wrap("ไข่ดาวไข่ดาว", 4, "", ""), ["ไข่ดา", "วไข่ด", "าว"]);
     }
 
     #[test]

@@ -62,7 +62,7 @@ fn kitchen_ticket_grouped_by_category_in_menu_order() {
     assert!(at("-- STARTERS --") < at("1 x Soup"));
     assert!(at("1 x Soup") < at("-- MAINS --"));
     assert!(at("-- MAINS --") < at("1 x Burger"));
-    assert!(at("1 x Burger\n   + Large\n   ** no onions") < at("-- DRINKS --"));
+    assert!(at("1 x Burger\n  + Large\n  ** no onions") < at("-- DRINKS --"));
     assert!(at("-- DRINKS --") < at("2 x Cola"));
     assert!(at("2 x Cola") < at("-- OTHER --"));
     assert!(at("-- OTHER --") < at("1 x Bread"));
@@ -122,7 +122,7 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
     let (mut pos, admin, m) = setup();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("receipt.bin");
-    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None };
+    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None };
     let mut settings = ReceiptSettings { printer: printer.clone(), ..Default::default() };
 
     // No receipt printer: nothing to print, drawer button explains why.
@@ -196,8 +196,8 @@ fn kitchen_copies_and_old_settings_still_load() {
     let reprint = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
     assert_eq!(count(&reprint.bytes(), &CUT), 1);
 
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None }).is_err());
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0, names: None, bold: true, starter_copies: None, mains_copies: None }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None }).is_err());
 
     // Receipt settings JSON shape (as the UI sends it).
     let rs: ReceiptSettings = serde_json::from_str(

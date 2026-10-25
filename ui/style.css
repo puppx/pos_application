@@ -436,3 +436,4 @@ tr.bad-row td { background: var(--danger-soft); }
 .quick-notes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .quick-notes button { min-height: 34px; padding: 4px 12px; border-radius: 999px; font-size: 13px; }
 .quick-notes button.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.badge.prep { background: #fef3c7; color: #92400e; }

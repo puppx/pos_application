@@ -11,12 +11,12 @@ fn setup() -> (Pos, Session, Menu, i64) {
     let mut pos = Pos::open_in_memory().unwrap();
     let s = pos.setup_first_admin("Owner", "1111").unwrap();
     let mains = pos.create_category(&s, "Mains", None, 1).unwrap();
-    let mains = pos.set_category_defaults(&s, mains.id, None, false, Some(" อาหารจานหลัก ")).unwrap();
+    let mains = pos.set_category_defaults(&s, mains.id, None, false, false, Some(" อาหารจานหลัก ")).unwrap();
     assert_eq!(mains.name_alt.as_deref(), Some("อาหารจานหลัก"));
     let item = |pos: &mut Pos, name: &str, alt: Option<&str>| {
         pos.create_product(&s, NewProduct {
             category_id: Some(mains.id), sku: None, barcode: None, name: name.into(), price_cents: 1000,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: alt.map(str::to_string),
+            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: alt.map(str::to_string), prep: false,
         })
         .unwrap()
     };
@@ -55,7 +55,7 @@ fn order_lines_keep_the_thai_name() {
     let p = &m.pad_thai;
     pos.update_product(&s, p.id, ProductUpdate {
         category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0,
-        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: Some("ผัดไท".into()),
+        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: Some("ผัดไท".into()), prep: false,
     })
     .unwrap();
     let o = pos.get_order(&s, order).unwrap();

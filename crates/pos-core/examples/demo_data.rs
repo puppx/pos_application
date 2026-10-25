@@ -72,7 +72,7 @@ fn main() -> Result<()> {
                 tax_rate_bp: 1000,
                 stock_qty: 0,
                 track_stock: false,
-                starter: *cat == "Starters", name_alt: None,
+                starter: *cat == "Starters", name_alt: None, prep: false,
             })?;
             if !groups.is_empty() {
                 pos.set_product_option_groups(&admin, p.id, groups)?;

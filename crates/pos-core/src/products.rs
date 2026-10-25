@@ -23,6 +23,9 @@ pub struct Product {
     pub sort_order: i64,
     /// Second name (Thai), printed under the name on kitchen tickets.
     pub name_alt: Option<String>,
+    /// Prepare ahead: printed for the kitchen as soon as the order is sent,
+    /// even while the mains wait (see `send_prep`).
+    pub prep: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +51,8 @@ pub struct NewProduct {
     pub starter: bool,
     #[serde(default)]
     pub name_alt: Option<String>,
+    #[serde(default)]
+    pub prep: bool,
 }
 
 /// Stock is not editable here: it only changes through sales and
@@ -74,6 +79,8 @@ pub struct ProductUpdate {
     pub starter: bool,
     #[serde(default)]
     pub name_alt: Option<String>,
+    #[serde(default)]
+    pub prep: bool,
 }
 
 fn yes() -> bool {
@@ -81,7 +88,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -101,6 +108,7 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         starter: r.get(11)?,
         sort_order: r.get(12)?,
         name_alt: r.get(13)?,
+        prep: r.get(14)?,
     })
 }
 
@@ -208,8 +216,8 @@ impl Pos {
         self.check_category(p.category_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter, name_alt, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter, name_alt, prep, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                      (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?9))",
             params![
                 clean_code(p.sku),
@@ -222,7 +230,8 @@ impl Pos {
                 p.track_stock,
                 p.category_id,
                 p.starter,
-                name_alt
+                name_alt,
+                p.prep
             ],
         )
         .map_err(|e| map_unique(e, CODE_TAKEN))?;
@@ -250,7 +259,7 @@ impl Pos {
             .conn
             .execute(
                 "UPDATE products SET sku = ?2, barcode = ?3, name = ?4, price_cents = ?5, cost_cents = ?6,
-                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, starter = ?11, name_alt = ?12, updated_at = unixepoch()
+                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, starter = ?11, name_alt = ?12, prep = ?13, updated_at = unixepoch()
                  WHERE id = ?1",
                 params![
                     id,
@@ -264,7 +273,8 @@ impl Pos {
                     p.active,
                     p.category_id,
                     p.starter,
-                    name_alt
+                    name_alt,
+                    p.prep
                 ],
             )
             .map_err(|e| map_unique(e, CODE_TAKEN))?;
@@ -317,6 +327,17 @@ impl Pos {
             return Err(PosError::NotFound);
         }
         self.audit(Some(s.user_id), "product.starter", &format!("{id} {starter}"))
+    }
+
+    /// Quick "Prepare ahead" toggle from the menu list.
+    pub fn set_prep(&self, s: &Session, id: i64, prep: bool) -> Result<()> {
+        s.require(Permission::ManageMenu)?;
+        let changed =
+            self.conn.execute("UPDATE products SET prep = ?2, updated_at = unixepoch() WHERE id = ?1", params![id, prep])?;
+        if changed == 0 {
+            return Err(PosError::NotFound);
+        }
+        self.audit(Some(s.user_id), "product.prep", &format!("{id} {prep}"))
     }
 
     /// Manual stock change (delivery, count correction, damage...).

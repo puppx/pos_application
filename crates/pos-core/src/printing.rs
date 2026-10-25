@@ -64,6 +64,9 @@ pub struct PrinterConfig {
     pub starter_copies: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mains_copies: Option<u8>,
+    /// Kitchen only: copies of PREPARE NOW tickets. None = `copies`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prep_copies: Option<u8>,
 }
 
 fn yes() -> bool {
@@ -125,6 +128,7 @@ impl Default for PrinterConfig {
             large_text: true,
             starter_copies: None,
             mains_copies: None,
+            prep_copies: None,
         }
     }
 }
@@ -134,7 +138,7 @@ impl PrinterConfig {
         if !(24..=64).contains(&self.width) {
             return invalid("paper width must be between 24 and 64 characters");
         }
-        if [Some(self.copies), self.starter_copies, self.mains_copies].into_iter().flatten().any(|c| !(1..=9).contains(&c)) {
+        if [Some(self.copies), self.starter_copies, self.mains_copies, self.prep_copies].into_iter().flatten().any(|c| !(1..=9).contains(&c)) {
             return invalid("copies must be between 1 and 9");
         }
         if self.copy_delay_secs > 30 {
@@ -634,6 +638,28 @@ impl Pos {
             cfg.copies
         };
         Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width, cfg.bold), copies, cfg.copy_delay_secs)))
+    }
+
+    /// PREPARE NOW ticket for prepare-ahead dishes that wait for the mains
+    /// (from [`Pos::send_prep`]). None when no kitchen printer is set up.
+    pub fn prep_job(&self, s: &Session, order_id: i64, items: &[OrderItem]) -> Result<Option<PrintJob>> {
+        let cfg = self.kitchen_printer()?;
+        if cfg.target == PrinterTarget::None || items.is_empty() {
+            return Ok(None);
+        }
+        let ticket = self.prep_ticket(s, order_id, items)?;
+        let copies = cfg.prep_copies.unwrap_or(cfg.copies);
+        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width, cfg.bold), copies, cfg.copy_delay_secs)))
+    }
+
+    /// The PREPARE NOW ticket: like a kitchen ticket, saying the dishes are
+    /// to be got ready now and served with the mains.
+    pub fn prep_ticket(&self, s: &Session, order_id: i64, items: &[OrderItem]) -> Result<KitchenTicket> {
+        let thai = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both) != PrintNames::English;
+        let mut t = self.kitchen_ticket(s, order_id, items, false)?;
+        t.title = if thai { "PREPARE NOW / เตรียมก่อน" } else { "PREPARE NOW" }.into();
+        t.footer = Some(if thai { "SERVE WITH MAINS / เสิร์ฟพร้อมจานหลัก" } else { "SERVE WITH MAINS" }.into());
+        Ok(t)
     }
 
     /// "Call mains" again once the mains are already in the kitchen (sent

@@ -766,9 +766,11 @@ async function renderOrder() {
     order = await call('get_order', { id: orderId });
     draw();
     const n = r.items.reduce((n, i) => n + i.qty, 0);
-    if (!n) return toast('Nothing new to send');
+    const prep = (r.prep ?? []).reduce((n, i) => n + i.qty, 0);
+    if (!n && !prep) return toast('Nothing new to send');
     const waiting = order.items.filter((i) => i.held && !i.sent_at).reduce((n, i) => n + i.qty, 0);
-    reportPrint(r.print, `${what}: ${n} item(s)` + (waiting ? ` · ${waiting} main(s) wait for "Call mains"` : ''));
+    const msg = `${what}: ${n} item(s)` + (prep ? ` · PREPARE NOW for ${prep}` : '') + (waiting ? ` · ${waiting} main(s) wait for "Call mains"` : '');
+    reportPrint(r.prep_print?.error ? r.prep_print : r.print, msg);
   }
   const finish = act(async () => {
     if (!order.items.length) return toast('The order is empty', true);
@@ -792,7 +794,8 @@ async function renderOrder() {
       const row = h('tr', {},
         h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
-          it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : ''),
+          it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
+          it.prep && !sent ? h('span', { class: 'badge prep' }, it.prep_sent_at ? 'preparing' : 'prep ahead') : ''),
           it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt),
           it.options.length > 0 && h('div', { class: 'muted' }, it.options.map((o) => o.name).join(', ')),
           it.note && h('div', { class: 'muted' }, '“', it.note, '”'),
@@ -1407,7 +1410,7 @@ async function renderMenuAdmin() {
   const activeGroups = groups.filter((g) => g.active);
   const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
   // What a new item in category `id` starts with.
-  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter });
+  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep });
   const form = popupHost();
   const list = h('div');
   const search = h('input', { type: 'search', placeholder: 'Search items' });
@@ -1443,6 +1446,7 @@ async function renderMenuAdmin() {
     const canDrag = !q && tabCat() != null;
     const table = h('table', { class: 'menu-list' },
       h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
+        h('th', { title: 'Prepare ahead: a PREPARE NOW ticket prints while the mains wait' }, 'Prep'),
         h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
       products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
         onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
@@ -1457,6 +1461,14 @@ async function renderMenuAdmin() {
             p.starter = e.target.checked;
             state.menu = null;
             toast(`${p.name}: ${p.starter ? 'starter' : 'not a starter'}`);
+          }),
+        })),
+        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+          type: 'checkbox', checked: p.prep, title: 'Prepare ahead: the kitchen gets a PREPARE NOW ticket while the mains wait',
+          onchange: act(async (e) => {
+            await call('set_prep', { id: p.id, prep: e.target.checked });
+            p.prep = e.target.checked;
+            toast(`${p.name}: ${p.prep ? 'prepared ahead' : 'not prepared ahead'}`);
           }),
         })),
         h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
@@ -1475,6 +1487,7 @@ async function renderMenuAdmin() {
     const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
     const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (main default)`, inputmode: 'decimal', style: 'width:150px', 'data-f': 'ctax' });
     const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
+    const prep = h('input', { type: 'checkbox', checked: c ? c.prep : false });
     const save = act(async () => {
       fieldErr(name); fieldErr(tax);
       if (!name.value.trim()) return fieldErr(name, 'Type a name');
@@ -1488,7 +1501,7 @@ async function renderMenuAdmin() {
       const saved = c
         ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.checked })
         : await call('create_category', { ...args, sortOrder: cats.length + 1 });
-      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked, nameAlt: alt.value.trim() || null });
+      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked, prep: prep.checked, nameAlt: alt.value.trim() || null });
       toast('Saved');
       if (!c) state.menuTab = saved.id;
       await changed();
@@ -1499,7 +1512,8 @@ async function renderMenuAdmin() {
       h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, alt, h('div', { class: 'muted small' }, 'Printed next to the heading on kitchen tickets')),
       h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
-        h('label', { class: 'check' }, starter, ' Items here are starters')),
+        h('label', { class: 'check' }, starter, ' Items here are starters'),
+        h('label', { class: 'check' }, prep, ' Items here are prepared ahead')),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: save }, 'Save'),
         h('button', { onclick: () => setKids(form) }, 'Cancel'),
@@ -1572,16 +1586,19 @@ async function renderMenuAdmin() {
       stock: h('input', { value: '0', inputmode: 'numeric', style: 'width:80px' }),
       active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
       starter: h('input', { type: 'checkbox', checked: p ? p.starter : d0.starter }),
+      prep: h('input', { type: 'checkbox', checked: p ? p.prep : d0.prep }),
     };
     f.cat.value = startCat ?? '';
     // A new item follows its category's defaults until the user changes them.
-    let taxTouched = !!p, starterTouched = !!p;
+    let taxTouched = !!p, starterTouched = !!p, prepTouched = !!p;
     f.tax.addEventListener('input', () => (taxTouched = true));
     f.starter.addEventListener('change', () => (starterTouched = true));
+    f.prep.addEventListener('change', () => (prepTouched = true));
     f.cat.addEventListener('change', () => {
       const d = defaultsFor(f.cat.value ? Number(f.cat.value) : null);
       if (!taxTouched) f.tax.value = pct(d.tax);
       if (!starterTouched) f.starter.checked = d.starter;
+      if (!prepTouched) f.prep.checked = d.prep;
       preview();
     });
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
@@ -1680,7 +1697,7 @@ async function renderMenuAdmin() {
         product: {
           name: f.name.value, name_alt: f.alt.value.trim() || null, category_id: f.cat.value ? Number(f.cat.value) : null,
           barcode: f.barcode.value || null, sku: f.sku.value || null, price_cents: price, cost_cents: cost,
-          tax_rate_bp: Math.round(tax * 100), track_stock: f.track.checked, starter: f.starter.checked,
+          tax_rate_bp: Math.round(tax * 100), track_stock: f.track.checked, starter: f.starter.checked, prep: f.prep.checked,
         },
         variants,
       };
@@ -1714,7 +1731,8 @@ async function renderMenuAdmin() {
       h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, choices, extras, stock, codes')),
       h('div', { class: 'stack' },
         h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', f.tax), h('label', { class: 'field' }, 'Cost', f.cost),
-          h('label', { class: 'check' }, f.starter, ' Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)'))),
+          h('label', { class: 'check' }, f.starter, ' Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)')),
+          h('label', { class: 'check' }, f.prep, ' Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)'))),
         h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
           h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering.'),
           choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
@@ -2256,7 +2274,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
   const bold = h('input', { type: 'checkbox', checked: cfg.bold ?? true });
   const large = h('input', { type: 'checkbox', checked: cfg.large_text ?? true });
   const courseCopies = (v) => h('input', { type: 'number', min: 1, max: 9, value: v ?? '', placeholder: 'same', style: 'width:80px' });
-  const starterCopies = courseCopies(cfg.starter_copies), mainsCopies = courseCopies(cfg.mains_copies);
+  const starterCopies = courseCopies(cfg.starter_copies), mainsCopies = courseCopies(cfg.mains_copies), prepCopies = courseCopies(cfg.prep_copies);
   const copiesOf = (el) => (el.value.trim() ? Math.min(9, Math.max(1, parseInt(el.value, 10) || 1)) : null);
   const lang = h('select', {}, names.map(([v, label]) => h('option', { value: v }, label)));
   lang.value = names.some(([v]) => v === cfg.names) ? cfg.names : names[0][0];
@@ -2273,6 +2291,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
     el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, 'Delay between copies', delay, 'sec'), fields,
       courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Starters ticket copies', starterCopies),
         h('label', { class: 'field' }, 'Mains ticket copies', mainsCopies),
+        h('label', { class: 'field' }, 'Prepare ticket copies', prepCopies),
         h('span', { class: 'muted small' }, 'For dine-in courses; empty = same as Copies.')),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
         h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
@@ -2284,7 +2303,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
       copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
       names: lang.value,
       bold: bold.checked,
-      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), large_text: large.checked }),
+      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), large_text: large.checked }),
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
       ...(kind.value === 'file' && { path: path.value.trim() }),

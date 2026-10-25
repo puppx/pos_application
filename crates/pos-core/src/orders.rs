@@ -118,6 +118,10 @@ pub struct OrderItem {
     pub sent_at: Option<i64>,
     /// A starter: goes to the kitchen before the rest of a dine-in order.
     pub starter: bool,
+    /// Prepare ahead: gets a PREPARE NOW ticket while it waits for mains.
+    pub prep: bool,
+    /// When that PREPARE NOW ticket printed.
+    pub prep_sent_at: Option<i64>,
     /// Held back behind the starters. Unsent and held = waiting for
     /// "Call mains"; sent and held = it went out in the "MAINS AWAY" round.
     pub held: bool,
@@ -269,7 +273,7 @@ fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
 const TABLE_BUSY: &str = "that table already has an open order";
 
 const ITEM_COLS: &str =
-    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt";
+    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt, prep, prep_sent_at";
 
 fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
     let (price, rate, qty, disc): (i64, i64, i64, i64) = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
@@ -289,6 +293,8 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         starter: r.get(10)?,
         held: r.get(11)?,
         name_alt: r.get(12)?,
+        prep: r.get(13)?,
+        prep_sent_at: r.get(14)?,
         line_total_cents: net,
         tax_cents: tax_of(net, rate),
     })
@@ -574,9 +580,9 @@ impl Pos {
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, base, rate, starter, alt): (String, i64, i64, bool, Option<String>) = tx
-            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt FROM products WHERE id = ?1 AND active = 1")?
-            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        let (name, base, rate, starter, alt, prep): (String, i64, i64, bool, Option<String>, bool) = tx
+            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep FROM products WHERE id = ?1 AND active = 1")?
+            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available".into()))?;
         // A tax rate chosen for the whole order applies to new lines too.
@@ -629,10 +635,10 @@ impl Pos {
                 return invalid("this order has too many lines");
             }
             tx.prepare_cached(
-                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id, starter, name_alt)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id, starter, name_alt, prep)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?
-            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id, starter, alt])?;
+            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id, starter, alt, prep])?;
             let item_id = tx.last_insert_rowid();
             let mut ins = tx.prepare_cached(
                 "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents, name_alt)
@@ -671,6 +677,8 @@ impl Pos {
                     starter: r.get(11)?,
                     held: r.get(12)?,
                     name_alt: r.get(13)?,
+                    prep: r.get(14)?,
+                    prep_sent_at: r.get(15)?,
                     line_total_cents: 0,
                     tax_cents: 0,
                 };
@@ -766,6 +774,30 @@ impl Pos {
         };
         tx.commit()?;
         Ok(sent)
+    }
+
+    /// Prepare-ahead dishes that are waiting for "Call mains" and have not
+    /// had a PREPARE NOW ticket yet: marks them and returns them, so the
+    /// kitchen can start them now. They are still served with the mains.
+    pub fn send_prep(&mut self, s: &Session, order_id: i64) -> Result<Vec<OrderItem>> {
+        s.require(Permission::Sell)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        require_open(&tx, order_id)?;
+        let ids: Vec<i64> = tx
+            .prepare_cached(
+                "UPDATE order_items SET prep_sent_at = unixepoch()
+                 WHERE order_id = ?1 AND prep = 1 AND held = 1 AND sent_at IS NULL AND prep_sent_at IS NULL
+                 RETURNING id",
+            )?
+            .query_map([order_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let items = if ids.is_empty() {
+            Vec::new()
+        } else {
+            load_items(&tx, order_id)?.into_iter().filter(|i| ids.contains(&i.id)).collect()
+        };
+        tx.commit()?;
+        Ok(items)
     }
 
     /// Change or remove (0) the service charge on an open order, e.g. at the

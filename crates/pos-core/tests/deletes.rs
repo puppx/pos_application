@@ -9,7 +9,7 @@ fn setup() -> (Pos, Session, Session, Product, Product, Category) {
     let mut item = |name: &str, sku: &str, stock| {
         pos.create_product(&admin, NewProduct {
             category_id: Some(drinks.id), sku: Some(sku.into()), barcode: None, name: name.into(), price_cents: 300,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: stock, track_stock: stock > 0, starter: false, name_alt: None,
+            cost_cents: 0, tax_rate_bp: 0, stock_qty: stock, track_stock: stock > 0, starter: false, name_alt: None, prep: false,
         })
         .unwrap()
     };
@@ -75,7 +75,7 @@ fn menu_items_and_categories_are_deleted_for_good() {
     // Its SKU is free again.
     pos.create_product(&admin, NewProduct {
         category_id: Some(drinks.id), sku: Some("C1".into()), barcode: None, name: "Cola".into(), price_cents: 350,
-        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None,
+        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false,
     })
     .unwrap();
 

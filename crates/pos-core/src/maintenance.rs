@@ -53,6 +53,9 @@ pub struct MenuCategory {
     /// Thai name (v0.7.4+; absent in older backups).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_alt: Option<String>,
+    /// Prepare ahead (v0.7.9+).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prep: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +106,9 @@ pub struct MenuItem {
     /// Thai name (v0.7.4+; absent in older backups).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_alt: Option<String>,
+    /// Prepare ahead (v0.7.9+).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prep: bool,
 }
 
 /// What a menu restore created.
@@ -190,7 +196,7 @@ impl Pos {
         s.require(Permission::ManageMenu)?;
         let categories = self
             .conn
-            .prepare("SELECT id, name, color, sort_order, tax_rate_bp, starter, name_alt FROM categories WHERE active = 1 ORDER BY sort_order, name")?
+            .prepare("SELECT id, name, color, sort_order, tax_rate_bp, starter, name_alt, prep FROM categories WHERE active = 1 ORDER BY sort_order, name")?
             .query_map([], |r| {
                 Ok(MenuCategory {
                     key: r.get(0)?,
@@ -200,6 +206,7 @@ impl Pos {
                     tax_rate_bp: r.get(4)?,
                     starter: r.get(5)?,
                     name_alt: r.get(6)?,
+                    prep: r.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -222,7 +229,7 @@ impl Pos {
         let mut items: Vec<(i64, MenuItem)> = self
             .conn
             .prepare(
-                "SELECT id, name, category_id, sku, barcode, price_cents, cost_cents, tax_rate_bp, track_stock, stock_qty, starter, name_alt
+                "SELECT id, name, category_id, sku, barcode, price_cents, cost_cents, tax_rate_bp, track_stock, stock_qty, starter, name_alt, prep
                  FROM products WHERE active = 1 ORDER BY category_id IS NULL, category_id, sort_order, name",
             )?
             .query_map([], |r| {
@@ -242,6 +249,7 @@ impl Pos {
                         choices: vec![],
                         option_groups: vec![],
                         name_alt: r.get(11)?,
+                        prep: r.get(12)?,
                     },
                 ))
             })?
@@ -292,8 +300,8 @@ impl Pos {
                 return invalid(format!("category \"{name}\" has an invalid tax rate"));
             }
             tx.execute(
-                "INSERT INTO categories (name, color, sort_order, tax_rate_bp, starter, name_alt) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![name, color, c.sort_order, c.tax_rate_bp, c.starter, alt(&c.name_alt, 40)?],
+                "INSERT INTO categories (name, color, sort_order, tax_rate_bp, starter, name_alt, prep) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![name, color, c.sort_order, c.tax_rate_bp, c.starter, alt(&c.name_alt, 40)?, c.prep],
             )
             .map_err(|e| crate::error::map_unique(e, &format!("the category \"{name}\" appears twice")))?;
             cats.insert(c.key, tx.last_insert_rowid());
@@ -325,8 +333,8 @@ impl Pos {
             let name = crate::products::validate(&it.name, it.price_cents, it.cost_cents, it.tax_rate_bp)?;
             let code = |c: &Option<String>| c.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
             tx.execute(
-                "INSERT INTO products (category_id, sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, starter, sort_order, name_alt)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO products (category_id, sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, starter, sort_order, name_alt, prep)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     it.category.and_then(|k| cats.get(&k)),
                     code(&it.sku),
@@ -339,7 +347,8 @@ impl Pos {
                     it.track_stock,
                     it.starter,
                     pos as i64 + 1,
-                    alt(&it.name_alt, 120)?
+                    alt(&it.name_alt, 120)?,
+                    it.prep
                 ],
             )
             .map_err(|e| crate::error::map_unique(e, &format!("a SKU or barcode on \"{name}\" is used twice")))?;

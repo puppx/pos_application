@@ -16,7 +16,7 @@ fn import_uses_category_defaults_and_creates_categories() {
     pos.set_setting(&s, "default_tax_bp", "2000").unwrap();
     assert_eq!(pos.default_tax_bp().unwrap(), 2000);
     let starters = pos.create_category(&s, "Starters", None, 1).unwrap();
-    let starters = pos.set_category_defaults(&s, starters.id, Some(0), true, None).unwrap();
+    let starters = pos.set_category_defaults(&s, starters.id, Some(0), true, false, None).unwrap();
     assert_eq!((starters.tax_rate_bp, starters.starter), (Some(0), true));
 
     let r = pos
@@ -37,7 +37,7 @@ fn import_uses_category_defaults_and_creates_categories() {
     let err = pos.import_items(&s, &[row("Ok", 100, None), row("", 100, None)]).unwrap_err();
     assert!(err.to_string().starts_with("line 2:"), "{err}");
     assert_eq!(pos.menu(&s).unwrap().len(), 4);
-    assert!(pos.set_category_defaults(&s, starters.id, Some(10_001), false, None).is_err());
+    assert!(pos.set_category_defaults(&s, starters.id, Some(10_001), false, false, None).is_err());
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn reorder_and_duplicate() {
     assert_eq!(pos.list_categories(&s, false).unwrap()[0].name, "X");
 
     // A menu backup keeps the defaults and the order.
-    pos.set_category_defaults(&s, cat, Some(500), true, None).unwrap();
+    pos.set_category_defaults(&s, cat, Some(500), true, false, None).unwrap();
     let backup = pos.export_menu(&s).unwrap();
     pos.import_menu(&s, &backup).unwrap();
     let c = pos.list_categories(&s, false).unwrap().into_iter().find(|c| c.name == "Cat").unwrap();
@@ -82,8 +82,8 @@ fn default_tax_fills_items_left_at_zero() {
     pos.create_category(&s, "Food", None, 1).unwrap();
     let cold = pos.create_category(&s, "Cold food", None, 2).unwrap();
     let wine = pos.create_category(&s, "Wine", None, 3).unwrap();
-    pos.set_category_defaults(&s, cold.id, Some(0), false, None).unwrap();
-    pos.set_category_defaults(&s, wine.id, Some(2500), false, None).unwrap();
+    pos.set_category_defaults(&s, cold.id, Some(0), false, false, None).unwrap();
+    pos.set_category_defaults(&s, wine.id, Some(2500), false, false, None).unwrap();
     let rows = [
         row("Burger", 900, Some("Food")),
         row("Salad", 700, Some("Cold food")),
@@ -97,7 +97,7 @@ fn default_tax_fills_items_left_at_zero() {
     let m = items.iter_mut().find(|p| p.id == wine_id).unwrap();
     pos.update_product(&s, m.id, ProductUpdate {
         category_id: m.category_id, sku: None, barcode: None, name: m.name.clone(), price_cents: 2000, cost_cents: 0,
-        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: None,
+        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: None, prep: false,
     })
     .unwrap();
     // A sale before the change keeps its tax.

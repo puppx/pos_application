@@ -18,7 +18,7 @@ fn setup() -> (Pos, Session, Menu, i64) {
     let mut item = |name: &str, price, cat: i64, starter| {
         pos.create_product(&admin, NewProduct {
             category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter, name_alt: None,
+            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter, name_alt: None, prep: false,
         })
         .unwrap()
     };
@@ -125,7 +125,7 @@ fn tax_can_be_changed_on_one_order() {
     let p = &m.burger;
     pos.update_product(&s, p.id, ProductUpdate {
         category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0,
-        tax_rate_bp: 2000, track_stock: false, active: true, starter: false, name_alt: None,
+        tax_rate_bp: 2000, track_stock: false, active: true, starter: false, name_alt: None, prep: false,
     })
     .unwrap();
     pos.create_user(&s, "Sam", Role::Staff, "2222").unwrap();
@@ -157,4 +157,65 @@ fn tax_can_be_changed_on_one_order() {
     assert!(pos.set_order_tax(&staff, paid.id, None).is_err());
     let r = pos.receipt(&staff, paid.id).unwrap().to_text(42);
     assert!(r.contains("Tax") && r.contains("£0.00"), "{r}");
+}
+
+#[test]
+fn prepare_ahead_dishes_get_a_ticket_while_mains_wait() {
+    let (mut pos, s, m, table) = setup();
+    pos.set_kitchen_printer(&s, &PrinterConfig { prep_copies: Some(2), ..printer(1, None, None) }).unwrap();
+    pos.set_prep(&s, m.burger.id, true).unwrap();
+    assert!(pos.get_product(&s, m.burger.id).unwrap().prep);
+    let o = pos.open_order(&s, &dine_in(table)).unwrap();
+    pos.add_item(&s, o.id, m.soup.id, 1, None, None, &[]).unwrap();
+    pos.add_item(&s, o.id, m.burger.id, 2, Some("medium"), None, &[]).unwrap();
+    pos.add_item(&s, o.id, m.cola.id, 1, None, None, &[]).unwrap();
+
+    // Starters go; burger and cola wait. The burger gets a PREPARE NOW ticket.
+    let sent = pos.send_to_kitchen(&s, o.id).unwrap();
+    assert_eq!(sent.len(), 1);
+    let prep = pos.send_prep(&s, o.id).unwrap();
+    assert_eq!(prep.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Burger"]);
+    let job = pos.prep_job(&s, o.id, &prep).unwrap().unwrap();
+    assert_eq!(job.parts.len(), 2, "prep copies");
+    let text = pos.prep_ticket(&s, o.id, &prep).unwrap().to_text(42);
+    assert!(text.contains("PREPARE NOW") && text.contains("2 x Burger") && text.contains("medium"), "{text}");
+    assert!(text.contains("SERVE WITH MAINS") && !text.contains("Cola") && !text.contains("Soup"), "{text}");
+    // Only once: sending again prints no second PREPARE NOW.
+    pos.send_to_kitchen(&s, o.id).unwrap();
+    assert!(pos.send_prep(&s, o.id).unwrap().is_empty());
+    // The burger still waits and goes out with the mains.
+    let o2 = pos.get_order(&s, o.id).unwrap();
+    let burger = o2.items.iter().find(|i| i.name == "Burger").unwrap();
+    assert!(burger.held && burger.sent_at.is_none() && burger.prep_sent_at.is_some());
+    let mains = pos.call_mains(&s, o.id).unwrap();
+    assert_eq!(mains.len(), 2);
+
+    // Takeaway (no courses): everything goes at once, no PREPARE NOW.
+    let t = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: OrderDetails::default() }).unwrap();
+    pos.add_item(&s, t.id, m.soup.id, 1, None, None, &[]).unwrap();
+    pos.add_item(&s, t.id, m.burger.id, 1, None, None, &[]).unwrap();
+    assert_eq!(pos.send_to_kitchen(&s, t.id).unwrap().len(), 2);
+    assert!(pos.send_prep(&s, t.id).unwrap().is_empty());
+}
+
+#[test]
+fn prepare_ahead_follows_category_and_backups() {
+    let (mut pos, s, _, _) = setup();
+    let cakes = pos.create_category(&s, "Cakes", None, 9).unwrap();
+    let cakes = pos.set_category_defaults(&s, cakes.id, None, false, true, None).unwrap();
+    assert!(cakes.prep);
+    pos.import_items(&s, &[ImportRow { name: "Lava cake".into(), price_cents: 700, category: Some("cakes".into()), tax_rate_bp: None, name_alt: None }]).unwrap();
+    let all = pos.list_products(&s, false, 100, 0).unwrap();
+    let lava = all.iter().find(|p| p.name == "Lava cake").unwrap();
+    assert!(lava.prep);
+    assert!(pos.duplicate_product(&s, lava.id).unwrap().prep);
+    let backup = pos.export_menu(&s).unwrap();
+    assert!(backup.items.iter().any(|i| i.name == "Lava cake" && i.prep));
+    pos.import_menu(&s, &backup).unwrap();
+    let again = pos.export_menu(&s).unwrap();
+    assert!(again.items.iter().any(|i| i.name == "Lava cake" && i.prep));
+    assert!(again.categories.iter().any(|c| c.name == "Cakes" && c.prep));
+    // Older backups (no "prep") still load.
+    let old: MenuItem = serde_json::from_str(r#"{"name":"Tea","price_cents":200}"#).unwrap();
+    assert!(!old.prep);
 }

@@ -77,6 +77,7 @@ impl Pos {
         id: i64,
         tax_rate_bp: Option<i64>,
         starter: bool,
+        prep: bool,
         name_alt: Option<&str>,
     ) -> Result<Category> {
         s.require(Permission::ManageMenu)?;
@@ -85,13 +86,13 @@ impl Pos {
         }
         let name_alt = crate::products::clean_alt(name_alt, 40)?;
         let changed = self.conn.execute(
-            "UPDATE categories SET tax_rate_bp = ?2, starter = ?3, name_alt = ?4 WHERE id = ?1",
-            params![id, tax_rate_bp, starter, name_alt],
+            "UPDATE categories SET tax_rate_bp = ?2, starter = ?3, name_alt = ?4, prep = ?5 WHERE id = ?1",
+            params![id, tax_rate_bp, starter, name_alt, prep],
         )?;
         if changed == 0 {
             return Err(PosError::NotFound);
         }
-        self.audit(Some(s.user_id), "category.defaults", &format!("{id} tax={tax_rate_bp:?} starter={starter}"))?;
+        self.audit(Some(s.user_id), "category.defaults", &format!("{id} tax={tax_rate_bp:?} starter={starter} prep={prep}"))?;
         self.list_categories(s, true)?.into_iter().find(|c| c.id == id).ok_or(PosError::NotFound)
     }
 
@@ -134,8 +135,8 @@ impl Pos {
             params![id, sort],
         )?;
         tx.execute(
-            "INSERT INTO products (category_id, name, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order, name_alt)
-             SELECT category_id, ?2, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order + 1, name_alt
+            "INSERT INTO products (category_id, name, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order, name_alt, prep)
+             SELECT category_id, ?2, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order + 1, name_alt, prep
              FROM products WHERE id = ?1",
             params![id, copy],
         )?;
@@ -171,10 +172,10 @@ impl Pos {
         }
         let default_tax = self.default_tax_bp()?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        // name (lower case) -> (id, tax, starter)
-        let mut cats: HashMap<String, (i64, Option<i64>, bool)> = tx
-            .prepare("SELECT id, name, tax_rate_bp, starter FROM categories WHERE active = 1")?
-            .query_map([], |r| Ok((r.get::<_, String>(1)?.to_lowercase(), (r.get(0)?, r.get(2)?, r.get(3)?))))?
+        // name (lower case) -> (id, tax, starter, prep)
+        let mut cats: HashMap<String, (i64, Option<i64>, bool, bool)> = tx
+            .prepare("SELECT id, name, tax_rate_bp, starter, prep FROM categories WHERE active = 1")?
+            .query_map([], |r| Ok((r.get::<_, String>(1)?.to_lowercase(), (r.get(0)?, r.get(2)?, r.get(3)?, r.get(4)?))))?
             .collect::<rusqlite::Result<_>>()?;
         let mut report = ImportReport { items: 0, new_categories: vec![] };
         for (line, row) in rows.iter().enumerate() {
@@ -190,7 +191,7 @@ impl Pos {
                             [&name],
                         )
                         .map_err(|e| map_unique(e, "duplicate category"))?;
-                        let entry = (tx.last_insert_rowid(), None, false);
+                        let entry = (tx.last_insert_rowid(), None, false, false);
                         cats.insert(name.to_lowercase(), entry);
                         report.new_categories.push(name);
                         entry
@@ -202,9 +203,9 @@ impl Pos {
             let category_id = cat.map(|c| c.0);
             let alt = crate::products::clean_alt(row.name_alt.as_deref(), 120).map_err(|e| at(e.to_string()))?;
             tx.execute(
-                "INSERT INTO products (category_id, name, price_cents, tax_rate_bp, starter, sort_order, name_alt)
-                 VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?1), ?6)",
-                params![category_id, name, row.price_cents, tax, cat.is_some_and(|c| c.2), alt],
+                "INSERT INTO products (category_id, name, price_cents, tax_rate_bp, starter, sort_order, name_alt, prep)
+                 VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?1), ?6, ?7)",
+                params![category_id, name, row.price_cents, tax, cat.is_some_and(|c| c.2), alt, cat.is_some_and(|c| c.3)],
             )?;
             report.items += 1;
         }

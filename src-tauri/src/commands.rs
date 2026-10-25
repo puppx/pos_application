@@ -132,6 +132,9 @@ fn print(job: Option<PrintJob>) -> PrintOutcome {
 pub struct SendResult {
     items: Vec<OrderItem>,
     print: PrintOutcome,
+    /// Prepare-ahead dishes put on a PREPARE NOW ticket this time.
+    prep: Vec<OrderItem>,
+    prep_print: PrintOutcome,
 }
 
 #[derive(Serialize)]
@@ -301,13 +304,15 @@ commands! {
     /// `all_courses`: also send mains held behind the starters ("Call mains",
     /// or "send all courses together").
     fn send_to_kitchen(app, t, order_id: i64, all_courses: Option<bool>) -> SendResult {
-        let (items, job) = app.with_session(t, |pos, s| {
+        let (items, job, prep, prep_job) = app.with_session(t, |pos, s| {
             let items =
                 if all_courses.unwrap_or(false) { pos.call_mains(s, order_id)? } else { pos.send_to_kitchen(s, order_id)? };
             let job = pos.kitchen_job(s, order_id, &items, false)?;
-            Ok((items, job))
+            let prep = pos.send_prep(s, order_id)?;
+            let prep_job = pos.prep_job(s, order_id, &prep)?;
+            Ok((items, job, prep, prep_job))
         })?;
-        Ok(SendResult { items, print: print(job) })
+        Ok(SendResult { items, print: print(job), prep, prep_print: print(prep_job) })
     }
 
     fn search_products(app, t, query: String, limit: Option<i64>) -> Vec<Product> {
@@ -332,6 +337,10 @@ commands! {
 
     fn set_starter(app, t, id: i64, starter: bool) -> () {
         app.with_session(t, |pos, s| pos.set_starter(s, id, starter))
+    }
+
+    fn set_prep(app, t, id: i64, prep: bool) -> () {
+        app.with_session(t, |pos, s| pos.set_prep(s, id, prep))
     }
 
     fn adjust_stock(app, t, id: i64, delta: i64, reason: String) -> Product {
@@ -706,8 +715,8 @@ commands! {
         app.with_session(t, |pos, s| pos.delete_category(s, id))
     }
 
-    fn set_category_defaults(app, t, id: i64, tax_rate_bp: Option<i64>, starter: bool, name_alt: Option<String>) -> Category {
-        app.with_session(t, |pos, s| pos.set_category_defaults(s, id, tax_rate_bp, starter, name_alt.as_deref()))
+    fn set_category_defaults(app, t, id: i64, tax_rate_bp: Option<i64>, starter: bool, prep: Option<bool>, name_alt: Option<String>) -> Category {
+        app.with_session(t, |pos, s| pos.set_category_defaults(s, id, tax_rate_bp, starter, prep.unwrap_or(false), name_alt.as_deref()))
     }
 
     fn untaxed_items(app, t) -> i64 {

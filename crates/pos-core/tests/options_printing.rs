@@ -9,7 +9,7 @@ fn setup() -> (Pos, Session) {
 fn product(pos: &mut Pos, admin: &Session, name: &str, price: i64) -> Product {
     pos.create_product(admin, NewProduct {
         category_id: None, sku: None, barcode: None, name: name.into(), price_cents: price,
-        cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None,
+        cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false,
     })
     .unwrap()
 }
@@ -157,7 +157,7 @@ fn kitchen_tickets_per_round() {
     // Configure a file printer and reprint everything.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kitchen.bin");
-    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 32, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None };
+    let cfg = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 32, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None };
     pos.set_kitchen_printer(&admin, &cfg).unwrap();
     assert_eq!(pos.kitchen_printer().unwrap(), cfg);
     let job = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
@@ -173,11 +173,11 @@ fn kitchen_tickets_per_round() {
 fn printer_settings_are_admin_only_and_validated() {
     let (mut pos, admin) = setup();
     assert_eq!(pos.kitchen_printer().unwrap().target, PrinterTarget::None);
-    let bad = PrinterConfig { target: PrinterTarget::Network { host: "".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None };
+    let bad = PrinterConfig { target: PrinterTarget::Network { host: "".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None };
     assert!(pos.set_kitchen_printer(&admin, &bad).is_err());
     pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
     let staff = pos.login("2222").unwrap();
-    let good = PrinterConfig { target: PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None };
+    let good = PrinterConfig { target: PrinterTarget::Network { host: "192.168.1.50".into(), port: 9100 }, width: 42, copies: 1, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None };
     assert!(matches!(pos.set_kitchen_printer(&staff, &good), Err(PosError::Forbidden)));
     assert!(matches!(pos.test_print_job(&staff, &good), Err(PosError::Forbidden)));
     pos.set_kitchen_printer(&admin, &good).unwrap();

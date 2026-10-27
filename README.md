@@ -33,6 +33,7 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Tax per order**: tap **Tax** under the totals to use each item's menu rate (the default), no tax, or one rate for every item on that order (e.g. a tax-free customer). Lines added later follow it; paid orders keep theirs (logged).
 - **Quick notes**: Settings → Quick notes lists common requests (No onions, Extra spicy…); tap ✎ on an order line and tap a note to add it. They print on the kitchen ticket, in Thai too.
 - **Kitchen tickets** print dishes, options and notes in large (double-size) text, with the table name at both the top and the bottom (Settings → Kitchen printer → Large text).
+- **Look**: "paper and ink". Warm paper work area, near-black side rail and primary buttons, one cobalt accent from the logo, solid status colours (tables: sunflower = occupied, teal = mains waiting, red ring = not sent), flat 1px rules instead of shadows and small corners. The menu tiles carry their category colour as a solid edge, and text on a category colour is black or white, whichever reads better. The bundled Sarabun font (Latin and Thai, SIL Open Font License, `ui/fonts/`) is used everywhere, so Thai looks right on every device and offline.
 - **Printouts** are bold throughout (Settings → printer → Bold text) and always print "#" as "#", even on printers set to the UK character set.
 - **Finish & Pay**: one button opens the payment screen. Choose **Cash** or **Card** (or *Paid by Uber Eats* for platform orders). For cash, type or tap the amount received (with quick buttons for exact and common notes) and the change is shown as you type, then again in large figures after payment. Unsent items go to the kitchen automatically when paid.
 - **End of day**: **Reports → Close day & print summary** prints the day's sales summary (orders, totals, tax, cash/card, order types, platforms, categories, voids) on the receipt printer and moves to the next business date. A day with no sales, voids or cancellations closes without printing, shown at the top of the screen. A day runs from one close to the next, so service after midnight still counts for the day it started. All orders must be paid or cancelled first. Previous days can be viewed and reprinted.
@@ -299,7 +300,7 @@ crates/pos-core/     Business logic + SQLite (all rules, permissions, tests)
 src-tauri/           Desktop shell: window, backups, updates, installer config
   src/commands.rs    Every command, shared by the window and the local server
   src/server.rs      Optional local network server (browsers on other devices)
-ui/                  Touch UI (index.html, app.js, style.css), no build step
+ui/                  Touch UI (index.html, app.js, style.css, fonts/), no build step
 ```
 
 ## Next steps (not built yet)

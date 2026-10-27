@@ -25,6 +25,10 @@ const INDEX_HTML: &[u8] = include_bytes!("../../ui/index.html");
 const APP_JS: &[u8] = include_bytes!("../../ui/app.js");
 const STYLE_CSS: &[u8] = include_bytes!("../../ui/style.css");
 const ICON_PNG: &[u8] = include_bytes!("../../ui/icon.png");
+// Sarabun (SIL Open Font License, see ui/fonts/OFL.txt): Latin and Thai in one family.
+const FONT_REGULAR: &[u8] = include_bytes!("../../ui/fonts/Sarabun-Regular.ttf");
+const FONT_SEMIBOLD: &[u8] = include_bytes!("../../ui/fonts/Sarabun-SemiBold.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../../ui/fonts/Sarabun-Bold.ttf");
 
 pub struct Server {
     http: Arc<tiny_http::Server>,
@@ -89,6 +93,14 @@ fn file(body: &'static [u8], kind: &str) -> Response<std::io::Cursor<Vec<u8>>> {
         .with_header(header("X-Content-Type-Options", "nosniff"))
 }
 
+/// Fonts never change within a version, so browsers may keep them for a day.
+fn font(body: &'static [u8]) -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_data(body)
+        .with_header(header("Content-Type", "font/ttf"))
+        .with_header(header("Cache-Control", "max-age=86400"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+}
+
 fn json(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(body)
         .with_status_code(status)
@@ -114,6 +126,9 @@ fn respond(handle: &AppHandle, mut rq: Request) {
         (Method::Get, "/app.js") => rq.respond(file(APP_JS, "text/javascript; charset=utf-8")),
         (Method::Get, "/style.css") => rq.respond(file(STYLE_CSS, "text/css; charset=utf-8")),
         (Method::Get, "/icon.png" | "/favicon.ico") => rq.respond(file(ICON_PNG, "image/png")),
+        (Method::Get, "/fonts/Sarabun-Regular.ttf") => rq.respond(font(FONT_REGULAR)),
+        (Method::Get, "/fonts/Sarabun-SemiBold.ttf") => rq.respond(font(FONT_SEMIBOLD)),
+        (Method::Get, "/fonts/Sarabun-Bold.ttf") => rq.respond(font(FONT_BOLD)),
         (Method::Post, p) if p.starts_with("/api/") => {
             let cmd = p["/api/".len()..].to_string();
             let response = api(handle, &mut rq, &cmd);

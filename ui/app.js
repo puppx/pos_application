@@ -86,6 +86,17 @@ function icon(name, size = 22) {
   el.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] ?? ''}</svg>`;
   return el;
 }
+/// Text colour that stays readable on a user-chosen category colour.
+const onColor = (hex) => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return '#fff';
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255)
+    .map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.2 ? '#17150f' : '#fff';
+};
+/// Inline style giving an element its category colour (--c) and the text colour to use on it (--on).
+const catStyle = (color) => `--c:${color || '#9a9484'};--on:${onColor(color || '#9a9484')}`;
+const logoImg = () => h('img', { src: 'icon.png', alt: '' });
 const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
 const money = (c) => (c / 100).toFixed(2);
 /// Money as people type it: "12", "12.5", "12,50", "£12.50", " 12.50 ".
@@ -239,7 +250,7 @@ function lockScreen(...kids) {
   state.clockTimer = setInterval(tick, 10000);
   screen(h('div', { class: 'lock' },
     h('div', { class: 'lock-side' },
-      h('div', { class: 'brand-mark' }, initials(state.storeName || 'POS') || 'P'),
+      h('div', { class: 'brand-mark' }, logoImg()),
       h('div', { class: 'lock-store' }, state.storeName || 'POS'),
       clock, date,
       h('div', { class: 'lock-foot' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`)),
@@ -384,7 +395,7 @@ function renderShell() {
   if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin()))) state.view = 'floor';
   document.getElementById('bar').hidden = false;
   document.getElementById('rail').hidden = false;
-  document.getElementById('brand').textContent = initials(state.storeName || 'POS') || 'P';
+  setKids(document.getElementById('brand'), logoImg());
   document.getElementById('brand').title = state.storeName || 'POS';
   document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , adm]) => !adm || isAdmin()).map(([id, label]) =>
     h('button', { class: !state.orderId && id === state.view ? 'on' : '', onclick: () => go(id), title: label }, icon(id), h('span', {}, label))));
@@ -631,16 +642,16 @@ async function renderOrder() {
   const catColor = Object.fromEntries(state.cats.map((c) => [c.id, c.color]));
   const drawMenu = () => {
     setKids(cats, 
-      h('button', { class: state.catId == null ? 'on' : '', style: '--c:#64748b', onclick: () => { state.catId = null; search.value = ''; drawMenu(); } },
+      h('button', { class: state.catId == null ? 'on' : '', style: catStyle('#5c574a'), onclick: () => { state.catId = null; search.value = ''; drawMenu(); } },
         h('span', { class: 'dot' }), 'All items'),
       ...state.cats.map((c) => h('button', {
-        class: state.catId === c.id ? 'on' : '', style: `--c:${c.color || '#94a3b8'}`,
+        class: state.catId === c.id ? 'on' : '', style: catStyle(c.color),
         onclick: () => { state.catId = c.id; search.value = ''; closePicker(); drawMenu(); },
       }, h('span', { class: 'dot' }), c.name)));
     const q = search.value.trim().toLowerCase();
     const list = state.menu.filter((p) => q ? matches(p, q) : state.catId == null || p.category_id === state.catId);
     setKids(grid, ...list.slice(0, 300).map((p) => h('button', {
-      class: 'tile', style: `--c:${catColor[p.category_id] || '#94a3b8'}`, onclick: choose(p),
+      class: 'tile', style: catStyle(catColor[p.category_id]), onclick: choose(p),
     }, h('span', { class: 'names' }, h('span', { class: 'name' }, p.name), p.name_alt && h('span', { class: 'alt', lang: 'th' }, p.name_alt)),
       h('span', { class: 'foot' },
         h('span', { class: 'price' }, itemPrice(p, state.itemVariants[p.id])),
@@ -1330,7 +1341,7 @@ async function renderOrders() {
       : h('div', { class: 'empty small' }, icon('orders', 36), h('p', {}, 'No open orders. Dine-in orders start from Tables.')));
   };
   const newTile = (label, ico, onclick, color = null) =>
-    h('button', { class: 'new-tile', style: color ? `--c:${color}` : '', onclick }, icon(ico, 26), h('span', {}, label));
+    h('button', { class: 'new-tile', style: color ? catStyle(color) : '', onclick }, icon(ico, 26), h('span', {}, label));
   screen(h('div', { class: 'page' },
     h('div', { class: 'new-tiles' },
       newTile('Takeaway', 'bag', newOrder('takeaway')),
@@ -1483,7 +1494,7 @@ async function renderMenuAdmin() {
   function editCategory(c) {
     const name = h('input', { value: c?.name ?? '', placeholder: 'Category name', 'data-f': 'cname' });
     const alt = h('input', { value: c?.name_alt ?? '', placeholder: 'Thai name (optional)', lang: 'th', 'data-f': 'calt' });
-    const color = h('input', { type: 'color', value: c?.color ?? '#9ca3af' });
+    const color = h('input', { type: 'color', value: c?.color ?? '#9a9484' });
     const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
     const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (main default)`, inputmode: 'decimal', style: 'width:150px', 'data-f': 'ctax' });
     const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
@@ -1662,7 +1673,7 @@ async function renderMenuAdmin() {
       const label = named.length && prices.length
         ? (prices.every((x) => x === prices[0]) ? money(prices[0]) : `from ${money(Math.min(...prices))}`)
         : price == null ? '?' : money(price);
-      tile.style.setProperty('--c', c?.color || '#94a3b8');
+      tile.style.setProperty('--c', c?.color || '#9a9484');
       setKids(tile, h('span', { class: 'names' }, h('span', { class: 'name' }, f.name.value.trim() || 'Item name'), f.alt.value.trim() && h('span', { class: 'alt', lang: 'th' }, f.alt.value.trim())),
         h('span', { class: 'foot' }, h('span', { class: 'price' }, label), f.starter.checked && h('span', { class: 'tag' }, 'Starter'),
           (named.length || groupBoxes.some((x) => x.box.checked)) && h('span', { class: 'more' }, '•••')));
@@ -1824,7 +1835,7 @@ async function renderMenuAdmin() {
   // ---- 8: category tabs + drag to reorder categories ----
   const drawTabs = () => setKids(tabs,
     h('button', { class: state.menuTab === 'all' ? 'on' : '', onclick: () => { state.menuTab = 'all'; drawTabs(); loadProducts(); } }, 'All'),
-    cats.filter((c) => c.active).map((c) => h('button', { class: state.menuTab === c.id ? 'on' : '', style: `--c:${c.color || '#94a3b8'}`,
+    cats.filter((c) => c.active).map((c) => h('button', { class: state.menuTab === c.id ? 'on' : '', style: catStyle(c.color),
       onclick: () => { state.menuTab = c.id; search.value = ''; drawTabs(); loadProducts(); } }, h('span', { class: 'dot' }), c.name)),
     h('button', { class: state.menuTab === 'none' ? 'on' : '', onclick: () => { state.menuTab = 'none'; drawTabs(); loadProducts(); } }, 'No category'));
   drawTabs();

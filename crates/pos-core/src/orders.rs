@@ -156,6 +156,9 @@ pub struct Order {
     pub service_bp: i64,
     /// Service charge amount: rate x (subtotal - discount), not taxed.
     pub service_cents: i64,
+    /// Menu prices on this order include the tax (so `tax_cents` is the part
+    /// of the price that is tax and is not added again).
+    pub tax_incl: bool,
     /// Tax rate set on this order for every line; None = menu rates.
     pub tax_bp: Option<i64>,
     /// subtotal - discount + tax + service.
@@ -193,9 +196,24 @@ pub struct OrderSummary {
     pub held_count: i64,
 }
 
-/// Tax on a pre-tax amount, rounded half up. Prices are tax-exclusive.
+/// Tax on a pre-tax amount, rounded half up (tax added on top of the price).
 fn tax_of(amount: i64, rate_bp: i64) -> i64 {
     (amount * rate_bp + 5_000) / 10_000
+}
+
+/// The tax inside a price that already includes it, rounded half up:
+/// 10.00 at 20% holds 1.67 of tax (10 x 20 / 120) and 8.33 of food.
+pub(crate) fn tax_in(amount: i64, rate_bp: i64) -> i64 {
+    (amount * rate_bp + (10_000 + rate_bp) / 2) / (10_000 + rate_bp)
+}
+
+/// A line's tax: added on top, or taken out of the price.
+fn line_tax(amount: i64, rate_bp: i64, included: bool) -> i64 {
+    if included {
+        tax_in(amount, rate_bp)
+    } else {
+        tax_of(amount, rate_bp)
+    }
 }
 
 fn parse_type(s: &str) -> OrderType {
@@ -303,6 +321,11 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
 fn load_items(conn: &Connection, order_id: i64) -> Result<Vec<OrderItem>> {
     let mut stmt = conn.prepare_cached(&format!("SELECT {ITEM_COLS} FROM order_items WHERE order_id = ?1 ORDER BY id"))?;
     let mut items: Vec<OrderItem> = stmt.query_map([order_id], item_from_row)?.collect::<rusqlite::Result<_>>()?;
+    let included: bool =
+        conn.query_row("SELECT tax_incl FROM orders WHERE id = ?1", [order_id], |r| r.get(0)).optional()?.unwrap_or(false);
+    for it in &mut items {
+        it.tax_cents = line_tax(it.line_total_cents, it.tax_rate_bp, included);
+    }
     let mut opts = conn.prepare_cached(
         "SELECT o.item_id, o.option_id, o.group_name, o.name, o.price_cents, o.name_alt
          FROM order_item_options o JOIN order_items i ON i.id = o.item_id
@@ -338,12 +361,13 @@ struct Totals {
     total: i64,
 }
 
-fn totals(items: &[OrderItem], service_bp: i64) -> Totals {
+fn totals(items: &[OrderItem], service_bp: i64, tax_incl: bool) -> Totals {
     let subtotal: i64 = items.iter().map(|i| i.unit_price_cents * i.qty).sum();
     let discount: i64 = items.iter().map(|i| i.discount_cents).sum();
     let tax = items.iter().map(|i| i.tax_cents).sum();
     let service = service_of(subtotal - discount, service_bp);
-    Totals { subtotal, discount, tax, service, total: subtotal - discount + tax + service }
+    // Included tax is already in the prices; otherwise it is added on top.
+    Totals { subtotal, discount, tax, service, total: subtotal - discount + if tax_incl { 0 } else { tax } + service }
 }
 
 pub(crate) const SUMMARY_SQL: &str = "
@@ -351,7 +375,8 @@ pub(crate) const SUMMARY_SQL: &str = "
            o.opened_at, o.paid_at, ch.name, o.external_ref,
            COALESCE(o.total_cents, (
                SELECT SUM(i.unit_price_cents * i.qty - i.discount_cents
-                          + ((i.unit_price_cents * i.qty - i.discount_cents) * i.tax_rate_bp + 5000) / 10000)
+                          + CASE WHEN o.tax_incl = 1 THEN 0
+                                 ELSE ((i.unit_price_cents * i.qty - i.discount_cents) * i.tax_rate_bp + 5000) / 10000 END)
                       + (SUM(i.unit_price_cents * i.qty - i.discount_cents) * o.service_bp + 5000) / 10000
                FROM order_items i WHERE i.order_id = o.id), 0),
            (SELECT COALESCE(SUM(qty), 0) FROM order_items i WHERE i.order_id = o.id),
@@ -407,14 +432,15 @@ impl Pos {
             self.check_channel(ch)?;
         }
         let service_bp = self.service_rate_for(new.order_type)?;
+        let tax_incl = self.prices_include_tax()?;
         let tx = self.conn.unchecked_transaction()?;
         if let Some(c) = new.details.customer_id {
             self.touch_customer(c)?;
         }
         tx.prepare_cached(
             "INSERT INTO orders (order_type, table_id, customer_name, customer_phone, delivery_address, notes,
-                                 channel_id, external_ref, customer_id, opened_by, service_bp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                 channel_id, external_ref, customer_id, opened_by, service_bp, tax_incl)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?
         .execute(params![
             new.order_type.as_str(),
@@ -427,7 +453,8 @@ impl Pos {
             d.external_ref,
             new.details.customer_id,
             s.user_id,
-            service_bp
+            service_bp,
+            tax_incl
         ])
         .map_err(|e| map_unique(e, TABLE_BUSY))?;
         let id = tx.last_insert_rowid();
@@ -453,7 +480,7 @@ impl Pos {
                 "SELECT o.id, o.order_type, o.status, o.table_id, t.name, f.name, o.customer_name, o.customer_phone,
                         o.delivery_address, o.notes, o.opened_by, u.name, o.opened_at, o.payment_method,
                         o.tendered_cents, o.change_cents, o.paid_by, o.paid_at, o.closed_at, o.close_reason,
-                        o.channel_id, ch.name, o.external_ref, o.customer_id, o.service_bp, o.tax_bp
+                        o.channel_id, ch.name, o.external_ref, o.customer_id, o.service_bp, o.tax_bp, o.tax_incl
                  FROM orders o JOIN users u ON u.id = o.opened_by
                  LEFT JOIN dining_tables t ON t.id = o.table_id
                  LEFT JOIN floors f ON f.id = t.floor_id
@@ -488,6 +515,7 @@ impl Pos {
                     customer_id: r.get(23)?,
                     service_bp: r.get(24)?,
                     tax_bp: r.get(25)?,
+                    tax_incl: r.get(26)?,
                     subtotal_cents: 0,
                     discount_cents: 0,
                     tax_cents: 0,
@@ -509,7 +537,7 @@ impl Pos {
             }
         }
         o.items = load_items(&self.conn, id)?;
-        let t = totals(&o.items, o.service_bp);
+        let t = totals(&o.items, o.service_bp, o.tax_incl);
         (o.subtotal_cents, o.discount_cents, o.tax_cents, o.service_cents, o.total_cents) =
             (t.subtotal, t.discount, t.tax, t.service, t.total);
         Ok(o)
@@ -847,8 +875,9 @@ impl Pos {
         if items.is_empty() {
             return invalid("the order is empty");
         }
-        let service_bp: i64 = tx.query_row("SELECT service_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
-        let t = totals(&items, service_bp);
+        let (service_bp, tax_incl): (i64, bool) =
+            tx.query_row("SELECT service_bp, tax_incl FROM orders WHERE id = ?1", [order_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let t = totals(&items, service_bp, tax_incl);
         let tendered = match method {
             PaymentMethod::Cash if tendered_cents < t.total => return invalid("cash tendered is less than the total"),
             PaymentMethod::Cash => tendered_cents,

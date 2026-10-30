@@ -22,6 +22,10 @@ pub struct SalesSummary {
     /// Service charges taken (included in `total_cents`).
     #[serde(default)]
     pub service_cents: i64,
+    /// Part of `tax_cents` that sits inside menu prices (orders rung up with
+    /// "prices include tax"); the rest was added on top of the prices.
+    #[serde(default)]
+    pub tax_included_cents: i64,
     pub total_cents: i64,
     pub voided_count: i64,
     pub voided_total_cents: i64,
@@ -31,7 +35,7 @@ pub struct SalesSummary {
     /// Delivery platforms; orders taken directly are under "Direct".
     pub by_channel: Vec<GroupTotal>,
     /// Menu categories: `count` is items sold, `total_cents` is sales after
-    /// discounts and before tax (so they add up to subtotal - discount).
+    /// discounts and before tax (tax inside the prices is taken out).
     #[serde(default)]
     pub by_category: Vec<GroupTotal>,
 }
@@ -67,7 +71,8 @@ impl Pos {
                     COALESCE(SUM(total_cents) FILTER (WHERE status = 'paid'), 0),
                     COUNT(*) FILTER (WHERE status = 'voided'),
                     COALESCE(SUM(total_cents) FILTER (WHERE status = 'voided'), 0),
-                    COALESCE(SUM(service_cents) FILTER (WHERE status = 'paid'), 0)
+                    COALESCE(SUM(service_cents) FILTER (WHERE status = 'paid'), 0),
+                    COALESCE(SUM(tax_cents) FILTER (WHERE status = 'paid' AND tax_incl = 1), 0)
                  FROM orders WHERE paid_at >= ?1 AND paid_at < ?2",
             )?
             .query_row(params![from, to], |r| {
@@ -79,6 +84,7 @@ impl Pos {
                     discount_cents: r.get(2)?,
                     tax_cents: r.get(3)?,
                     service_cents: r.get(7)?,
+                    tax_included_cents: r.get(8)?,
                     total_cents: r.get(4)?,
                     voided_count: r.get(5)?,
                     voided_total_cents: r.get(6)?,
@@ -117,7 +123,12 @@ impl Pos {
         })?;
         sum.by_channel = rows.collect::<rusqlite::Result<_>>()?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT COALESCE(c.name, 'Other'), SUM(i.qty), SUM(i.unit_price_cents * i.qty - i.discount_cents)
+            "SELECT COALESCE(c.name, 'Other'), SUM(i.qty),
+                    SUM(i.unit_price_cents * i.qty - i.discount_cents
+                        - CASE WHEN o.tax_incl = 1
+                               THEN ((i.unit_price_cents * i.qty - i.discount_cents) * i.tax_rate_bp + (10000 + i.tax_rate_bp) / 2)
+                                    / (10000 + i.tax_rate_bp)
+                               ELSE 0 END)
              FROM orders o JOIN order_items i ON i.order_id = o.id
              JOIN products p ON p.id = i.product_id
              LEFT JOIN categories c ON c.id = p.category_id

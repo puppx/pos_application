@@ -25,6 +25,7 @@ const INDEX_HTML: &[u8] = include_bytes!("../../ui/index.html");
 const APP_JS: &[u8] = include_bytes!("../../ui/app.js");
 const STYLE_CSS: &[u8] = include_bytes!("../../ui/style.css");
 const ICON_PNG: &[u8] = include_bytes!("../../ui/icon.png");
+const KEYBOARD_JS: &[u8] = include_bytes!("../../ui/keyboard.js");
 // Sarabun (SIL Open Font License, see ui/fonts/OFL.txt): Latin and Thai in one family.
 const FONT_REGULAR: &[u8] = include_bytes!("../../ui/fonts/Sarabun-Regular.ttf");
 const FONT_SEMIBOLD: &[u8] = include_bytes!("../../ui/fonts/Sarabun-SemiBold.ttf");
@@ -123,6 +124,7 @@ fn respond(handle: &AppHandle, mut rq: Request) {
     let path = rq.url().split('?').next().unwrap_or("/").to_string();
     let result = match (rq.method(), path.as_str()) {
         (Method::Get, "/" | "/index.html") => rq.respond(file(INDEX_HTML, "text/html; charset=utf-8")),
+        (Method::Get, "/keyboard.js") => rq.respond(file(KEYBOARD_JS, "text/javascript; charset=utf-8")),
         (Method::Get, "/app.js") => rq.respond(file(APP_JS, "text/javascript; charset=utf-8")),
         (Method::Get, "/style.css") => rq.respond(file(STYLE_CSS, "text/css; charset=utf-8")),
         (Method::Get, "/icon.png" | "/favicon.ico") => rq.respond(file(ICON_PNG, "image/png")),

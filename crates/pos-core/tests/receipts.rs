@@ -20,6 +20,7 @@ struct Menu {
 fn setup() -> (Pos, Session, Menu) {
     let mut pos = Pos::open_in_memory().unwrap();
     let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+    pos.set_setting(&admin, "prices_include_tax", "0").unwrap(); // these tests check tax added on top
     pos.set_setting(&admin, "store_name", "Demo Bistro").unwrap();
     // Created out of order on purpose: grouping follows the category position.
     let drinks = pos.create_category(&admin, "Drinks", None, 3).unwrap();

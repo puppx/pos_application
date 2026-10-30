@@ -87,15 +87,22 @@ impl DayClose {
         two_col(&mut v, Size::Normal, false, "Closed by", &self.closed_by_name, width, "");
         v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
         two_col(&mut v, Size::Normal, false, "Orders", &sum.order_count.to_string(), width, "");
-        two_col(&mut v, Size::Normal, false, "Sales before tax", &m(sum.subtotal_cents), width, "");
+        let included = sum.tax_included_cents;
+        two_col(&mut v, Size::Normal, false, if included != 0 { "Sales (menu prices)" } else { "Sales before tax" }, &m(sum.subtotal_cents), width, "");
         if sum.discount_cents != 0 {
             two_col(&mut v, Size::Normal, false, "Discounts", &m(-sum.discount_cents), width, "");
         }
-        two_col(&mut v, Size::Normal, false, "Tax", &m(sum.tax_cents), width, "");
+        // Tax added on top of prices (older orders, or "prices include tax" off).
+        if included == 0 || sum.tax_cents != included {
+            two_col(&mut v, Size::Normal, false, "Tax", &m(sum.tax_cents - included), width, "");
+        }
         if sum.service_cents != 0 {
             two_col(&mut v, Size::Normal, false, "Service charge", &m(sum.service_cents), width, "");
         }
         two_col(&mut v, Size::Big, true, "TOTAL", &m(sum.total_cents), big, "");
+        if included != 0 {
+            two_col(&mut v, Size::Normal, false, "  tax included in prices", &m(included), width, "");
+        }
         let section = |v: &mut Vec<Line>, title: &str, rows: Vec<(String, i64, i64)>| {
             if rows.is_empty() {
                 return;

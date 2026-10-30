@@ -59,6 +59,7 @@ function setKids(el, ...kids) {
 }
 /// Line icons (24px grid, stroke = currentColor).
 const ICONS = {
+  keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/>',
   floor: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   orders: '<path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
   history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -851,7 +852,7 @@ async function renderOrder() {
       h('tr', {}, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(order.subtotal_cents))),
       order.discount_cents ? h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
       h('tr', { class: 'service-row', onclick: showTax, title: 'Change the tax on this order' },
-        h('td', {}, order.tax_bp != null ? `Tax ${pct(order.tax_bp)}% ` : 'Tax ', h('span', { class: 'edit-link' }, 'change')),
+        h('td', {}, (order.tax_bp != null ? `Tax ${pct(order.tax_bp)}% ` : 'Tax ') + (order.tax_incl ? '(included) ' : ''), h('span', { class: 'edit-link' }, 'change')),
         h('td', { class: 'num' }, money(order.tax_cents))),
       (order.service_bp || state.service?.rate_bp) ? h('tr', { class: 'service-row', onclick: showService, title: 'Change or remove the service charge' },
         h('td', {}, `${state.service?.label || 'Service charge'} ${order.service_bp ? pct(order.service_bp) + '%' : '(none)'} `, h('span', { class: 'edit-link' }, 'change')),
@@ -1257,7 +1258,7 @@ function orderDetail(o, onChange) {
       h('td', { class: 'num' }, `${i.qty} × ${money(i.unit_price_cents)}`),
       h('td', { class: 'num' }, i.discount_cents ? '-' + money(i.discount_cents) : ''),
       h('td', { class: 'num' }, money(i.line_total_cents))))),
-    h('div', {}, `Tax ${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
+    h('div', {}, `Tax ${o.tax_incl ? 'included ' : ''}${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
       o.tendered_cents != null ? ` · Tendered ${money(o.tendered_cents)} · Change ${money(o.change_cents)}` : ''),
     o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
     o.status !== 'cancelled' && h('div', {}, h('button', { onclick: act(async () => {
@@ -1416,6 +1417,7 @@ async function renderMenuAdmin() {
     call('get_setting', { key: 'default_tax_bp' }),
   ]);
   const defaultTax = Math.max(0, parseInt(defaultTaxRaw ?? '0', 10) || 0);
+  const taxIncluded = (await call('get_setting', { key: 'prices_include_tax' })) !== '0';
   const variantsOf = {};
   for (const v of allVariants) (variantsOf[v.product_id] ??= []).push(v);
   const activeGroups = groups.filter((g) => g.active);
@@ -1762,7 +1764,8 @@ async function renderMenuAdmin() {
       h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, p ? `Edit ${p.name}` : 'New menu item'), tile),
       h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, f.name), f.cat),
       h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, f.alt, h('div', { class: 'muted small' }, 'Printed under the name on kitchen tickets')),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Price', h('span', { class: 'field-col' }, f.price))),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, taxIncluded ? 'Price (tax included)' : 'Price (before tax)', h('span', { class: 'field-col' }, f.price)),
+        taxIncluded && h('span', { class: 'muted small' }, 'What the customer pays; the tax is worked out from it.')),
       more,
       h('div', { class: 'row' },
         !p && h('button', { class: 'primary', onclick: save(true), title: 'Enter' }, 'Save & add another'),
@@ -2154,8 +2157,10 @@ async function renderReports() {
     setKids(out, h('div', { class: 'grid2' },
       h('div', { class: 'stack' },
         h('div', { class: 'card' }, h('h3', {}, 'Summary'), rows([
-          ['Paid orders', s.order_count], ['Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
-          ['Tax', money(s.tax_cents)], ['Service charge', money(s.service_cents)], ['Total', money(s.total_cents)],
+          ['Paid orders', s.order_count], [s.tax_included_cents ? 'Sales (menu prices)' : 'Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
+          ...(s.tax_cents - s.tax_included_cents ? [['Tax added on top', money(s.tax_cents - s.tax_included_cents)]] : []),
+          ['Service charge', money(s.service_cents)], ['Total', money(s.total_cents)],
+          ...(s.tax_included_cents ? [['Tax included in prices', money(s.tax_included_cents)]] : []),
           ['Voided / refunded', `${s.voided_count} (${money(s.voided_total_cents)})`], ['Cancelled', s.cancelled_count]])),
         h('div', { class: 'card' }, h('h3', {}, 'By order type'),
           rows(s.by_type.map((g) => [TYPE[g.key] ?? g.key, `${g.count} · ${money(g.total_cents)}`]))),
@@ -2326,6 +2331,13 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
 function menuDefaultsCard() {
   const tax = h('input', { inputmode: 'decimal', style: 'width:90px', placeholder: '0' });
   const fill = h('input', { type: 'checkbox', checked: true });
+  const incl = h('input', { type: 'checkbox', checked: true });
+  invoke('get_setting', { key: 'prices_include_tax' }).then((v) => (incl.checked = v !== '0')).catch(() => {});
+  incl.onchange = act(async () => {
+    await call('set_setting', { key: 'prices_include_tax', value: incl.checked ? '1' : '0' });
+    state.menu = null;
+    toast(incl.checked ? 'New orders: menu prices include the tax' : 'New orders: tax is added on top of menu prices');
+  });
   const untaxed = h('span', { class: 'muted' });
   const count = () => invoke('untaxed_items').then((n) => {
     untaxed.textContent = n ? `(${n} item${n === 1 ? '' : 's'} at 0% now)` : '';
@@ -2334,6 +2346,9 @@ function menuDefaultsCard() {
   count();
   return h('div', { class: 'card stack' },
     h('h3', {}, 'Menu defaults'),
+    h('label', { class: 'switch' }, incl, h('span', {}, ''), 'Menu prices include tax'),
+    h('div', { class: 'muted' }, 'On: the price on the menu is what the customer pays and the tax is worked out inside it (10.00 at 20% = 8.33 + 1.67 tax). ' +
+      'Off: the tax is added on top (10.00 + 2.00 = 12.00). Orders already open keep the way they were rung up.'),
     h('div', { class: 'muted' }, 'Tax rate for menu items (e.g. 20 for 20% VAT). A category can use its own rate instead (Menu → tap the category); ' +
       'set a category to 0% for items that are really tax-free.'),
     h('div', { class: 'row' }, h('label', { class: 'field' }, 'Default tax', tax, '%'),
@@ -2687,6 +2702,14 @@ document.addEventListener('keydown', (e) => {
   }
 });
 document.getElementById('fullscreen').append(icon('expand', 20));
+// On-screen keyboard: on by default on the main till, off on other devices (they have their own).
+{
+  const kb = document.getElementById('keyboard');
+  kb.append(icon('keyboard', 22));
+  kb.onclick = () => { OSK.enabled = !OSK.enabled; toast(OSK.enabled ? 'On-screen keyboard on: tap a field to type' : 'On-screen keyboard off'); };
+  OSK.onchange = () => kb.classList.toggle('on', OSK.enabled);
+  OSK.init(!!TAURI);
+}
 document.getElementById('fullscreen').onclick = act(toggleFullscreen);
 
 document.getElementById('logout').append(icon('logout'));

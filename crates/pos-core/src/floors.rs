@@ -212,16 +212,17 @@ impl Pos {
              FROM dining_tables t
              LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'
              LEFT JOIN (
-                 SELECT order_id,
-                        SUM(unit_price_cents * qty - discount_cents
-                            + ((unit_price_cents * qty - discount_cents) * tax_rate_bp + 5000) / 10000) AS total,
-                        SUM(unit_price_cents * qty - discount_cents) AS net,
-                        SUM(qty) AS items,
-                        SUM(sent_at IS NULL AND held = 0) AS unsent,
-                        SUM(sent_at IS NULL AND held = 1) AS held
-                 FROM order_items
-                 WHERE order_id IN (SELECT id FROM orders WHERE status = 'open')
-                 GROUP BY order_id
+                 SELECT oi.order_id,
+                        SUM(oi.unit_price_cents * oi.qty - oi.discount_cents
+                            + CASE WHEN oo.tax_incl = 1 THEN 0
+                                   ELSE ((oi.unit_price_cents * oi.qty - oi.discount_cents) * oi.tax_rate_bp + 5000) / 10000 END) AS total,
+                        SUM(oi.unit_price_cents * oi.qty - oi.discount_cents) AS net,
+                        SUM(oi.qty) AS items,
+                        SUM(oi.sent_at IS NULL AND oi.held = 0) AS unsent,
+                        SUM(oi.sent_at IS NULL AND oi.held = 1) AS held
+                 FROM order_items oi JOIN orders oo ON oo.id = oi.order_id
+                 WHERE oo.status = 'open'
+                 GROUP BY oi.order_id
              ) i ON i.order_id = o.id
              WHERE t.floor_id = ?1 AND t.active = 1
              ORDER BY t.id",

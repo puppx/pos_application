@@ -3,6 +3,7 @@ use pos_core::*;
 fn setup() -> (Pos, Session) {
     let mut pos = Pos::open_in_memory().unwrap();
     let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+    pos.set_setting(&admin, "prices_include_tax", "0").unwrap(); // these tests check tax added on top
     (pos, admin)
 }
 

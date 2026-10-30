@@ -14,6 +14,7 @@ struct Menu {
 fn setup() -> (Pos, Session, Menu, i64) {
     let mut pos = Pos::open_in_memory().unwrap();
     let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+    pos.set_setting(&admin, "prices_include_tax", "0").unwrap(); // these tests check tax added on top
     let starters = pos.create_category(&admin, "Starters", None, 1).unwrap();
     let mains = pos.create_category(&admin, "Mains", None, 2).unwrap();
     let drinks = pos.create_category(&admin, "Drinks", None, 3).unwrap();

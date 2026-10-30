@@ -12,6 +12,8 @@ use crate::{Category, Permission, Pos, PosError, Product, Result, Session};
 
 /// Setting (Settings > Menu): tax rate for new items, in basis points.
 pub(crate) const DEFAULT_TAX_KEY: &str = "default_tax_bp";
+/// Setting: "1" (or unset) = menu prices include tax, "0" = tax is added on top.
+pub(crate) const INCLUDE_TAX_KEY: &str = "prices_include_tax";
 const MAX_IMPORT: usize = 2_000;
 /// The tax an item would get today (`?1` = the main default).
 const RATE: &str = "COALESCE((SELECT c.tax_rate_bp FROM categories c WHERE c.id = p.category_id), ?1)";
@@ -43,6 +45,13 @@ pub struct ImportReport {
 }
 
 impl Pos {
+    /// Menu prices already include the tax (Settings > Menu defaults). On by
+    /// default; read when an order is opened, so changing it only affects
+    /// new orders.
+    pub fn prices_include_tax(&self) -> Result<bool> {
+        Ok(self.setting(INCLUDE_TAX_KEY)?.is_none_or(|v| v.trim() != "0"))
+    }
+
     /// The main default tax rate for new items (Settings > Menu).
     pub fn default_tax_bp(&self) -> Result<i64> {
         Ok(self.setting(DEFAULT_TAX_KEY)?.and_then(|v| v.trim().parse().ok()).filter(|v| (0..=10_000).contains(v)).unwrap_or(0))

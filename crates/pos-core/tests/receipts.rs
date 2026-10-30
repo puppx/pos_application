@@ -92,7 +92,6 @@ fn receipt_layout_grouped_with_totals_and_change() {
     println!("{r}");
     for needle in [
         "Demo Bistro", "1 High Street, London", "VAT 123 4567 89", "RECEIPT #", "TAKEAWAY",
-        "-- STARTERS --", "-- MAINS --", "-- DRINKS --", "-- OTHER --",
         "Thank you for your visit!",
     ] {
         assert!(r.contains(needle), "{needle} missing in\n{r}");
@@ -106,7 +105,9 @@ fn receipt_layout_grouped_with_totals_and_change() {
     assert!(line("TOTAL").ends_with("£26.40"));
     assert!(line("Cash").ends_with("£30.00"));
     assert!(line("Change").ends_with("£3.60"));
-    assert!(r.find("-- STARTERS --").unwrap() < r.find("-- DRINKS --").unwrap());
+    // No category headings on bills; the dishes still follow the menu order.
+    assert!(!r.contains("-- ") && !r.contains("STARTERS"), "{r}");
+    assert!(r.find("1 x Soup").unwrap() < r.find("1 x Burger").unwrap() && r.find("1 x Burger").unwrap() < r.find("2 x Cola").unwrap());
 
     // £ goes to the printer as code page 437 (0x9C), not UTF-8.
     let bytes = pos.receipt(&admin, o.id).unwrap().to_escpos(42, true);
@@ -243,4 +244,17 @@ fn staff_copy_breaks_the_tax_down_by_class() {
     cfg.staff_copy = false;
     pos.set_receipt_settings(&s, &cfg).unwrap();
     assert_eq!(pos.payment_print_job(&s, &paid).unwrap().unwrap().parts.len(), 1);
+}
+
+#[test]
+fn order_words_on_tickets_can_be_changed() {
+    let (mut pos, s, m) = setup();
+    let o = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    pos.add_item(&s, o.id, m.soup.id, 1, None, None, &[]).unwrap();
+    assert!(pos.receipt(&s, o.id).unwrap().to_text(42).contains("TAKEAWAY"));
+    pos.set_setting(&s, "label_takeaway", "TO GO").unwrap();
+    assert!(pos.receipt(&s, o.id).unwrap().to_text(42).contains("TO GO"));
+    // Empty falls back to the standard word.
+    pos.set_setting(&s, "label_takeaway", "  ").unwrap();
+    assert!(pos.receipt(&s, o.id).unwrap().to_text(42).contains("TAKEAWAY"));
 }

@@ -2420,6 +2420,26 @@ function teamsCard() {
       h('button', { onclick: act(async () => { printResult(await call('test_teams_print'), 'Sample tickets printed'); }) }, 'Print sample tickets')));
 }
 
+/// Settings card: what tickets and bills call each kind of order.
+function ticketLabelsCard() {
+  const defs = [['label_dine_in', 'Dine-in', 'DINE-IN', 'Printed before the table, e.g. DINE-IN T3. Leave empty to print the table alone.'],
+    ['label_takeaway', 'Takeaway', 'TAKEAWAY'], ['label_collection', 'Collection', 'COLLECTION'], ['label_delivery', 'Delivery', 'DELIVERY'],
+    ['label_table', 'Table (main course call)', 'TABLE', 'Before the number on the "Call mains again" ticket. Leave empty for the number alone.']];
+  const inputs = defs.map(([key, , def]) => {
+    const el = h('input', { placeholder: def, style: 'width:200px' });
+    invoke('get_setting', { key }).then((v) => { if (v != null) el.value = v; }).catch(() => {});
+    return el;
+  });
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Words on tickets and bills'),
+    h('div', { class: 'muted' }, 'What kitchen tickets, bills and receipts call each kind of order. Empty = the standard word.'),
+    defs.map(([, label, , hint], i) => h('div', { class: 'row' }, h('label', { class: 'field' }, label, inputs[i]), hint && h('span', { class: 'muted small' }, hint))),
+    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => {
+      for (const [i, [key]] of defs.entries()) await call('set_setting', { key, value: inputs[i].value.trim() });
+      toast('Saved');
+    }) }, 'Save')));
+}
+
 /// Settings card: the quick notes staff tap onto an order line.
 function quickNotesCard() {
   const text = h('textarea', { rows: 6, style: 'width:100%', placeholder: 'One note per line, e.g.\nNo onions\nExtra spicy\nNo ice' });
@@ -2573,6 +2593,7 @@ async function renderSettings() {
     serviceCard(),
     menuDefaultsCard(),
     teamsCard(),
+    ticketLabelsCard(),
     quickNotesCard(),
     autoLogoutCard(),
     state.remote ? '' : displayCard(),

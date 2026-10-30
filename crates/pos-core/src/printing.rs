@@ -550,20 +550,43 @@ pub(crate) fn cp437(c: char) -> u8 {
     }
 }
 
-pub(crate) fn heading(o: &Order) -> String {
-    if let Some(ch) = &o.channel_name {
-        let r = o.external_ref.as_deref().map(|r| format!(" {r}")).unwrap_or_default();
-        return format!("{}{r}", ch.to_uppercase());
-    }
-    match o.order_type {
-        OrderType::DineIn => format!("DINE-IN {}", o.table_name.as_deref().unwrap_or("?")),
-        OrderType::Takeaway => "TAKEAWAY".into(),
-        OrderType::Collection => "COLLECTION".into(),
-        OrderType::Delivery => "DELIVERY".into(),
-    }
-}
+/// What the tickets call each kind of order, editable in Settings
+/// (settings `label_dine_in`, `label_takeaway`, `label_collection`,
+/// `label_delivery`, and `label_table` for the "main course" call).
+pub const LABEL_KEYS: [(&str, &str); 5] = [
+    ("label_dine_in", "DINE-IN"),
+    ("label_takeaway", "TAKEAWAY"),
+    ("label_collection", "COLLECTION"),
+    ("label_delivery", "DELIVERY"),
+    ("label_table", "TABLE"),
+];
 
 impl Pos {
+    /// A saved label, else the default. A dine-in label may be blank (the
+    /// table alone is printed); the others fall back to their default.
+    fn label(&self, key: &str) -> Result<String> {
+        let default = LABEL_KEYS.iter().find(|(k, _)| *k == key).map_or("", |(_, d)| *d);
+        Ok(match self.setting(key)? {
+            Some(v) if key == "label_dine_in" || key == "label_table" => v.trim().to_string(),
+            Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => default.to_string(),
+        })
+    }
+
+    /// "DINE-IN T3", "TAKEAWAY"... with the labels from Settings.
+    pub(crate) fn heading(&self, o: &Order) -> Result<String> {
+        if let Some(ch) = &o.channel_name {
+            let r = o.external_ref.as_deref().map(|r| format!(" {r}")).unwrap_or_default();
+            return Ok(format!("{}{r}", ch.to_uppercase()));
+        }
+        Ok(match o.order_type {
+            OrderType::DineIn => format!("{} {}", self.label("label_dine_in")?, o.table_name.as_deref().unwrap_or("?")).trim().to_string(),
+            OrderType::Takeaway => self.label("label_takeaway")?,
+            OrderType::Collection => self.label("label_collection")?,
+            OrderType::Delivery => self.label("label_delivery")?,
+        })
+    }
+
     /// Items in menu-category order (category position, then name; items
     /// without a category last), each with its category name. Within a
     /// category the order they were added is kept.
@@ -640,7 +663,7 @@ impl Pos {
         let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
         Ok(KitchenTicket {
             title: title.into(),
-            heading: heading(&o),
+            heading: self.heading(&o)?,
             details,
             order_id,
             time: chrono::Local::now().format("%H:%M").to_string(),
@@ -810,13 +833,14 @@ impl Pos {
 
     fn main_course_ticket(&self, o: &Order, mains: &[OrderItem]) -> Result<KitchenTicket> {
         let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
+        let table = self.label("label_table")?;
         Ok(KitchenTicket {
             title: "MAIN COURSE".into(),
             // "TABLE 4" for numbered tables; named ones ("Patio 2") as they are.
             heading: match &o.table_name {
-                Some(t) if t.chars().all(|c| c.is_ascii_digit()) => format!("TABLE {t}"),
+                Some(t) if t.chars().all(|c| c.is_ascii_digit()) => format!("{table} {t}").trim().to_string(),
                 Some(t) => t.clone(),
-                None => heading(o),
+                None => self.heading(o)?,
             },
             details: vec![],
             order_id: o.id,

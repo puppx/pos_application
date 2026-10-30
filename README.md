@@ -145,6 +145,9 @@ Settings → Receipt printer lets you set the **name at the top of the bill**, t
 When an order is paid a second, **staff copy** prints after the customer's receipt: the items and the tax by class (rate, net, VAT, gross), marked "not for customer", to keep for the books.
 Switch it off in the same card; "Print staff copy" on a paid order in History reprints it.
 
+Bills and receipts list the dishes without category headings (still in menu order).
+Settings → **Words on tickets and bills** changes what tickets call each kind of order (DINE-IN, TAKEAWAY, COLLECTION, DELIVERY, and TABLE on the "main course" call); leave dine-in empty to print just the table.
+
 ### Receipt printer and cash drawer
 
 **Settings → Receipt printer & cash drawer** works the same way (it can be the same

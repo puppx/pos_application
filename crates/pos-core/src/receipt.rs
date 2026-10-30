@@ -9,7 +9,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::printing::{category_heading, heading, render_escpos, render_text, wrap, Line, Size};
+use crate::printing::{render_escpos, render_text, wrap, Line, Size};
 use crate::{Order, OrderType, Permission, Pos, PosError, PrintJob, PrintNames, PrinterConfig, PrinterTarget, Result, Session};
 
 const SETTING_KEY: &str = "_receipt_printer";
@@ -87,7 +87,6 @@ impl ReceiptSettings {
 }
 
 pub struct ReceiptLine {
-    pub category: Option<String>,
     pub qty: i64,
     pub name: String,
     /// Printed under the name (Thai), when receipts print both.
@@ -190,17 +189,7 @@ impl Receipt {
         v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
         v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
 
-        let grouped = self.lines.iter().any(|l| l.category.is_some());
-        let mut current: Option<Option<&str>> = None;
         for l in &self.lines {
-            let cat = l.category.as_deref();
-            if grouped && current != Some(cat) {
-                if current.is_some() {
-                    v.push(Line::new(Size::Normal, false, false, ""));
-                }
-                v.push(Line::new(Size::Normal, true, true, category_heading(cat)));
-                current = Some(cat);
-            }
             two_col(&mut v, Size::Normal, false, &format!("{} x {}", l.qty, l.name), &self.money(l.amount_cents), width, "    ");
             if let Some(alt) = &l.name_alt {
                 for t in wrap(alt, width, "    ", "    ") {
@@ -396,9 +385,8 @@ impl Pos {
         let lines = self
             .by_category(&o.items, names)?
             .into_iter()
-            .map(|(category, i)| ReceiptLine {
-                category,
-                qty: i.qty,
+            .map(|(_, i)| ReceiptLine {
+                                qty: i.qty,
                 name: i.name.clone(),
                 name_alt: names.pick(&i.name, i.name_alt.as_deref()).1.map(str::to_string),
                 options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
@@ -436,7 +424,7 @@ impl Pos {
             .into(),
             order_id: o.id,
             time: local_time(o.paid_at.unwrap_or_else(|| chrono::Local::now().timestamp())),
-            heading: heading(o),
+            heading: self.heading(o)?,
             details,
             staff,
             lines,
@@ -533,8 +521,8 @@ impl Pos {
             details: vec![],
             staff: s.name.clone(),
             lines: vec![
-                ReceiptLine { category: Some("Starters".into()), qty: 1, name: "Soup of the day".into(), name_alt: alt("ซุปประจำวัน"), options: vec![], amount_cents: 550, discount_cents: 0 },
-                ReceiptLine { category: Some("Mains".into()), qty: 2, name: "Example burger".into(), name_alt: alt("เบอร์เกอร์"), options: vec!["Large".into()], amount_cents: 2300, discount_cents: 0 },
+                ReceiptLine { qty: 1, name: "Soup of the day".into(), name_alt: alt("ซุปประจำวัน"), options: vec![], amount_cents: 550, discount_cents: 0 },
+                ReceiptLine { qty: 2, name: "Example burger".into(), name_alt: alt("เบอร์เกอร์"), options: vec!["Large".into()], amount_cents: 2300, discount_cents: 0 },
             ],
             subtotal_cents: 2850,
             discount_cents: 0,

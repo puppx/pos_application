@@ -28,7 +28,7 @@ fn busy_restaurant() {
                     tax_rate_bp: 1500,
                     stock_qty: 1_000,
                     track_stock: i % 10 == 0,
-                    starter: false, name_alt: None, prep: false,
+                    starter: false, name_alt: None, prep: false, team_id: None,
                 })
                 .unwrap();
             items.push(p.id);

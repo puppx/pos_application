@@ -10,7 +10,7 @@ fn setup() -> (Pos, Session) {
 fn product(pos: &mut Pos, admin: &Session, name: &str, price: i64) -> Product {
     pos.create_product(admin, NewProduct {
         category_id: None, sku: None, barcode: None, name: name.into(), price_cents: price,
-        cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false,
+        cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap()
 }

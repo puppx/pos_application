@@ -7,7 +7,7 @@ fn setup() -> (Pos, Session, Product, i64) {
     let dish = pos
         .create_product(&admin, NewProduct {
             category_id: Some(mains.id), sku: None, barcode: None, name: "Steak".into(), price_cents: 1000,
-            cost_cents: 0, tax_rate_bp: 2000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false,
+            cost_cents: 0, tax_rate_bp: 2000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap();
     let floor = pos.create_floor(&admin, "Ground").unwrap();
@@ -34,7 +34,7 @@ fn the_price_already_holds_the_tax() {
     // The same, from the 7% Thai VAT point of view: 1.07 holds 0.07.
     let p = pos.update_product(&s, dish.id, ProductUpdate {
         category_id: dish.category_id, sku: None, barcode: None, name: "Steak".into(), price_cents: 107, cost_cents: 0,
-        tax_rate_bp: 700, track_stock: false, active: true, starter: false, name_alt: None, prep: false,
+        tax_rate_bp: 700, track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap();
     let t2 = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();

@@ -499,6 +499,25 @@ commands! {
         Ok(print(job))
     }
 
+    /// Teams: the list (menu editor and Settings) and saving it.
+    fn list_teams(app, t) -> Vec<Team> {
+        app.with_session(t, |pos, s| pos.list_teams(s))
+    }
+
+    fn save_teams(app, t, teams: Vec<TeamInput>) -> Vec<Team> {
+        app.with_session(t, |pos, s| pos.save_teams(s, &teams))
+    }
+
+    fn set_category_team(app, t, id: i64, team_id: Option<i64>, move_items: bool) -> usize {
+        app.with_session(t, |pos, s| pos.set_category_team(s, id, team_id, move_items))
+    }
+
+    /// A sample ticket for every team on the kitchen printer.
+    fn test_teams_print(app, t) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| pos.test_teams_job(s))?;
+        Ok(print(job))
+    }
+
     fn print_receipt(app, t, order_id: i64) -> PrintOutcome {
         let job = app.with_session(t, |pos, s| pos.receipt_job(s, order_id))?;
         Ok(print(Some(job)))

@@ -14,7 +14,7 @@ fn staff(pos: &mut Pos, admin: &Session) -> Session {
 fn item(pos: &mut Pos, admin: &Session) -> Product {
     pos.create_product(admin, NewProduct {
         category_id: None, sku: None, barcode: None, name: "Pizza".into(), price_cents: 1000,
-        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false,
+        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap()
 }
@@ -188,7 +188,7 @@ fn upgrades_a_v0_1_0_database() {
     assert_eq!(pos.setting("store_name").unwrap().as_deref(), Some("Old Shop"));
     let conn = rusqlite::Connection::open(&path).unwrap();
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let (name, channel): (String, Option<i64>) = conn
         .query_row("SELECT customer_name, channel_id FROM orders WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();

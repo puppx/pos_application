@@ -30,9 +30,19 @@ pub struct MenuBackup {
     pub version: u32,
     /// Unix seconds.
     pub exported_at: i64,
+    /// Kitchen teams (v0.8.2+; absent in older backups).
+    #[serde(default)]
+    pub teams: Vec<MenuTeam>,
     pub categories: Vec<MenuCategory>,
     pub option_groups: Vec<MenuOptionGroup>,
     pub items: Vec<MenuItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MenuTeam {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_alt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +66,9 @@ pub struct MenuCategory {
     /// Prepare ahead (v0.7.9+).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prep: bool,
+    /// Kitchen team, by name (restoring creates any that are missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +122,9 @@ pub struct MenuItem {
     /// Prepare ahead (v0.7.9+).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prep: bool,
+    /// Kitchen team, by name (restoring creates any that are missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
 }
 
 /// What a menu restore created.
@@ -196,7 +212,7 @@ impl Pos {
         s.require(Permission::ManageMenu)?;
         let categories = self
             .conn
-            .prepare("SELECT id, name, color, sort_order, tax_rate_bp, starter, name_alt, prep FROM categories WHERE active = 1 ORDER BY sort_order, name")?
+            .prepare("SELECT c.id, c.name, c.color, c.sort_order, c.tax_rate_bp, c.starter, c.name_alt, c.prep, t.name FROM categories c LEFT JOIN teams t ON t.id = c.team_id AND t.active = 1 WHERE c.active = 1 ORDER BY c.sort_order, c.name")?
             .query_map([], |r| {
                 Ok(MenuCategory {
                     key: r.get(0)?,
@@ -207,6 +223,7 @@ impl Pos {
                     starter: r.get(5)?,
                     name_alt: r.get(6)?,
                     prep: r.get(7)?,
+                    team: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -229,8 +246,9 @@ impl Pos {
         let mut items: Vec<(i64, MenuItem)> = self
             .conn
             .prepare(
-                "SELECT id, name, category_id, sku, barcode, price_cents, cost_cents, tax_rate_bp, track_stock, stock_qty, starter, name_alt, prep
-                 FROM products WHERE active = 1 ORDER BY category_id IS NULL, category_id, sort_order, name",
+                "SELECT p.id, p.name, p.category_id, p.sku, p.barcode, p.price_cents, p.cost_cents, p.tax_rate_bp, p.track_stock, p.stock_qty, p.starter, p.name_alt, p.prep, t.name
+                 FROM products p LEFT JOIN teams t ON t.id = p.team_id AND t.active = 1
+                 WHERE p.active = 1 ORDER BY p.category_id IS NULL, p.category_id, p.sort_order, p.name",
             )?
             .query_map([], |r| {
                 Ok((
@@ -250,6 +268,7 @@ impl Pos {
                         option_groups: vec![],
                         name_alt: r.get(11)?,
                         prep: r.get(12)?,
+                        team: r.get(13)?,
                     },
                 ))
             })?
@@ -274,6 +293,10 @@ impl Pos {
             format: MENU_FORMAT.into(),
             version: 1,
             exported_at: chrono::Utc::now().timestamp(),
+            teams: crate::teams::load_teams(&self.conn)?
+                .into_iter()
+                .map(|t| MenuTeam { name: t.name, name_alt: t.name_alt })
+                .collect(),
             categories,
             option_groups,
             items: items.into_iter().map(|(_, it)| it).collect(),
@@ -293,6 +316,26 @@ impl Pos {
         let alt = |n: &Option<String>, max| crate::products::clean_alt(n.as_deref(), max);
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         clear_menu(&tx)?;
+        // Teams by name: keep the ones this till has, create the missing ones.
+        for t in &backup.teams {
+            let name = t.name.trim();
+            if name.is_empty() || name.chars().count() > 30 {
+                return invalid("a team name in the backup is not valid");
+            }
+            let exists: bool =
+                tx.query_row("SELECT EXISTS (SELECT 1 FROM teams WHERE active = 1 AND name = ?1 COLLATE NOCASE)", [name], |r| r.get(0))?;
+            if !exists {
+                tx.execute(
+                    "INSERT INTO teams (name, name_alt, sort_order) VALUES (?1, ?2, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM teams))",
+                    params![name, alt(&t.name_alt, 30)?],
+                )?;
+            }
+        }
+        let team_ids: HashMap<String, i64> = tx
+            .prepare("SELECT lower(name), id FROM teams WHERE active = 1")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let team_of = |n: &Option<String>| n.as_deref().and_then(|n| team_ids.get(&n.trim().to_lowercase()).copied());
         let mut cats = HashMap::new();
         for c in &backup.categories {
             let (name, color) = crate::menu::clean(&c.name, c.color.as_deref())?;
@@ -300,8 +343,8 @@ impl Pos {
                 return invalid(format!("category \"{name}\" has an invalid tax rate"));
             }
             tx.execute(
-                "INSERT INTO categories (name, color, sort_order, tax_rate_bp, starter, name_alt, prep) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![name, color, c.sort_order, c.tax_rate_bp, c.starter, alt(&c.name_alt, 40)?, c.prep],
+                "INSERT INTO categories (name, color, sort_order, tax_rate_bp, starter, name_alt, prep, team_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![name, color, c.sort_order, c.tax_rate_bp, c.starter, alt(&c.name_alt, 40)?, c.prep, team_of(&c.team)],
             )
             .map_err(|e| crate::error::map_unique(e, &format!("the category \"{name}\" appears twice")))?;
             cats.insert(c.key, tx.last_insert_rowid());
@@ -333,8 +376,8 @@ impl Pos {
             let name = crate::products::validate(&it.name, it.price_cents, it.cost_cents, it.tax_rate_bp)?;
             let code = |c: &Option<String>| c.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
             tx.execute(
-                "INSERT INTO products (category_id, sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, starter, sort_order, name_alt, prep)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO products (category_id, sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, starter, sort_order, name_alt, prep, team_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     it.category.and_then(|k| cats.get(&k)),
                     code(&it.sku),
@@ -348,7 +391,8 @@ impl Pos {
                     it.starter,
                     pos as i64 + 1,
                     alt(&it.name_alt, 120)?,
-                    it.prep
+                    it.prep,
+                    team_of(&it.team)
                 ],
             )
             .map_err(|e| crate::error::map_unique(e, &format!("a SKU or barcode on \"{name}\" is used twice")))?;

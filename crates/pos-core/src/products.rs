@@ -26,6 +26,8 @@ pub struct Product {
     /// Prepare ahead: printed for the kitchen as soon as the order is sent,
     /// even while the mains wait (see `send_prep`).
     pub prep: bool,
+    /// The kitchen team that cooks it (its ticket has the team's header).
+    pub team_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +55,8 @@ pub struct NewProduct {
     pub name_alt: Option<String>,
     #[serde(default)]
     pub prep: bool,
+    #[serde(default)]
+    pub team_id: Option<i64>,
 }
 
 /// Stock is not editable here: it only changes through sales and
@@ -81,6 +85,8 @@ pub struct ProductUpdate {
     pub name_alt: Option<String>,
     #[serde(default)]
     pub prep: bool,
+    #[serde(default)]
+    pub team_id: Option<i64>,
 }
 
 fn yes() -> bool {
@@ -88,7 +94,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep, p.team_id";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -109,6 +115,7 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         sort_order: r.get(12)?,
         name_alt: r.get(13)?,
         prep: r.get(14)?,
+        team_id: r.get(15)?,
     })
 }
 
@@ -214,10 +221,11 @@ impl Pos {
         let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
         let name_alt = clean_alt(p.name_alt.as_deref(), 120)?;
         self.check_category(p.category_id)?;
+        self.check_team(p.team_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter, name_alt, prep, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+            "INSERT INTO products (sku, barcode, name, price_cents, cost_cents, tax_rate_bp, stock_qty, track_stock, category_id, starter, name_alt, prep, team_id, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                      (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products WHERE category_id IS ?9))",
             params![
                 clean_code(p.sku),
@@ -231,7 +239,8 @@ impl Pos {
                 p.category_id,
                 p.starter,
                 name_alt,
-                p.prep
+                p.prep,
+                p.team_id
             ],
         )
         .map_err(|e| map_unique(e, CODE_TAKEN))?;
@@ -255,11 +264,12 @@ impl Pos {
         let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
         let name_alt = clean_alt(p.name_alt.as_deref(), 120)?;
         self.check_category(p.category_id)?;
+        self.check_team(p.team_id)?;
         let changed = self
             .conn
             .execute(
                 "UPDATE products SET sku = ?2, barcode = ?3, name = ?4, price_cents = ?5, cost_cents = ?6,
-                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, starter = ?11, name_alt = ?12, prep = ?13, updated_at = unixepoch()
+                     tax_rate_bp = ?7, track_stock = ?8, active = ?9, category_id = ?10, starter = ?11, name_alt = ?12, prep = ?13, team_id = ?14, updated_at = unixepoch()
                  WHERE id = ?1",
                 params![
                     id,
@@ -274,7 +284,8 @@ impl Pos {
                     p.category_id,
                     p.starter,
                     name_alt,
-                    p.prep
+                    p.prep,
+                    p.team_id
                 ],
             )
             .map_err(|e| map_unique(e, CODE_TAKEN))?;

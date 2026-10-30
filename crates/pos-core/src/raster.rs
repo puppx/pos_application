@@ -238,6 +238,44 @@ pub(crate) fn line_images(text: &str, size: Size, center: bool, dots: usize) -> 
     wrap_dots(text, room, scale).iter().map(|l| draw(l, scale, dots, indent, center)).collect()
 }
 
+/// A big header: white text on a solid black bar `dots` wide. `text` is the
+/// name, then "\n" and a smaller second name. Kept short (about 100 dots for
+/// one line) because large black areas print slowly on cheap thermal heads.
+pub(crate) fn banner(text: &str, dots: usize) -> Bitmap {
+    let em = face().units_per_em() as f32;
+    let mut parts: Vec<Bitmap> = Vec::new();
+    let mut lines = text.split('\n');
+    for (t, px) in [(lines.next(), 56.0), (lines.next(), 38.0)] {
+        let Some(t) = t.map(str::trim).filter(|t| !t.is_empty()) else { continue };
+        let scale = px / em;
+        for piece in wrap_dots(t, dots.saturating_sub(24) as f32, scale) {
+            parts.push(draw(&piece, scale, dots, 0, true));
+        }
+    }
+    let pad = 8;
+    let rb = dots.div_ceil(8);
+    let height = parts.iter().map(|p| p.height).sum::<usize>() + 2 * pad;
+    // All black, then each line of text laid in as white ink.
+    let mut out = Bitmap { width: dots, height, bits: vec![0xFF; rb * height] };
+    let mut y = pad;
+    for p in &parts {
+        for row in 0..p.height {
+            for b in 0..rb {
+                out.bits[(y + row) * rb + b] = !p.bits[row * rb + b];
+            }
+        }
+        y += p.height;
+    }
+    out
+}
+
+/// ESC/POS bytes printing a header bar (see [`banner`]).
+pub(crate) fn escpos_banner(text: &str, dots: usize) -> Vec<u8> {
+    let mut b = vec![0x1B, b'a', 0];
+    b.extend(banner(text, dots).escpos());
+    b
+}
+
 /// ESC/POS bytes printing `text` as images (see [`line_images`]).
 pub(crate) fn escpos_line(text: &str, size: Size, center: bool, dots: usize) -> Vec<u8> {
     let mut b = vec![0x1B, b'a', 0];
@@ -286,6 +324,21 @@ mod tests {
             assert!(!('\u{0E31}'..='\u{0E3A}').contains(&first) && !('\u{0E47}'..='\u{0E4E}').contains(&first), "{p}");
         }
         assert_eq!(wrap_dots("Pad Thai with prawns", 120.0, scale).concat().replace(' ', ""), "PadThaiwithprawns");
+    }
+
+    #[test]
+    fn banner_is_a_black_bar_with_white_text() {
+        let bar = banner("CURRY\nแกง", 504);
+        assert_eq!(bar.width, 504);
+        assert!(bar.height > 100 && bar.height < 220, "{}", bar.height);
+        let black = (0..bar.height).flat_map(|y| (0..504).map(move |x| (x, y))).filter(|&(x, y)| bar.get(x, y)).count();
+        let total = 504 * bar.height;
+        assert!(black * 100 / total > 70, "mostly black: {black}/{total}");
+        assert!(black < total, "has white text in it");
+        // Top and bottom rows are solid black; some middle row has white in it.
+        assert!((0..504).all(|x| bar.get(x, 0) && bar.get(x, bar.height - 1)));
+        assert!((0..bar.height).any(|y| (0..504).any(|x| !bar.get(x, y))));
+        assert_eq!(&escpos_banner("MAIN", 384)[..7], &[0x1B, b'a', 0, 0x1D, b'v', b'0', 0]);
     }
 
     #[test]

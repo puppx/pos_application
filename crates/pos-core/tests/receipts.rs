@@ -29,7 +29,7 @@ fn setup() -> (Pos, Session, Menu) {
     let mut item = |name: &str, price, cat: Option<i64>| {
         pos.create_product(&admin, NewProduct {
             category_id: cat, sku: None, barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false,
+            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap()
     };

@@ -97,7 +97,7 @@ fn default_tax_fills_items_left_at_zero() {
     let m = items.iter_mut().find(|p| p.id == wine_id).unwrap();
     pos.update_product(&s, m.id, ProductUpdate {
         category_id: m.category_id, sku: None, barcode: None, name: m.name.clone(), price_cents: 2000, cost_cents: 0,
-        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: None, prep: false,
+        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap();
     // A sale before the change keeps its tax.

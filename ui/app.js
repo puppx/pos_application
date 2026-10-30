@@ -1409,13 +1409,20 @@ function popupHost() {
 }
 
 async function renderMenuAdmin() {
-  const [cats, groups, feed, allVariants, defaultTaxRaw] = await Promise.all([
+  const [cats, groups, feed, allVariants, defaultTaxRaw, teams] = await Promise.all([
     call('list_categories', { includeInactive: true }),
     call('list_option_groups', { includeInactive: true }),
     call('menu_options'),
     call('list_variants', { productId: null }),
     call('get_setting', { key: 'default_tax_bp' }),
+    call('list_teams'),
   ]);
+  const teamById = Object.fromEntries(teams.map((t) => [t.id, t]));
+  const teamSelect = (value, none) => {
+    const sel = h('select', {}, h('option', { value: '' }, none), teams.map((t) => h('option', { value: t.id }, t.name)));
+    sel.value = value ?? '';
+    return sel;
+  };
   const defaultTax = Math.max(0, parseInt(defaultTaxRaw ?? '0', 10) || 0);
   const taxIncluded = (await call('get_setting', { key: 'prices_include_tax' })) !== '0';
   const variantsOf = {};
@@ -1423,7 +1430,7 @@ async function renderMenuAdmin() {
   const activeGroups = groups.filter((g) => g.active);
   const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
   // What a new item in category `id` starts with.
-  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep });
+  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep, team: catById[id]?.team_id ?? null });
   const form = popupHost();
   const list = h('div');
   const search = h('input', { type: 'search', placeholder: 'Search items' });
@@ -1458,7 +1465,7 @@ async function renderMenuAdmin() {
     // Dragging sets the order inside one category, so it needs a category tab.
     const canDrag = !q && tabCat() != null;
     const table = h('table', { class: 'menu-list' },
-      h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
+      h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), teams.length > 0 && h('th', { title: 'The kitchen team whose ticket this item prints on' }, 'Team'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
         h('th', { title: 'Prepare ahead: a PREPARE NOW ticket prints while the mains wait' }, 'Prep'),
         h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
       products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
@@ -1467,6 +1474,7 @@ async function renderMenuAdmin() {
         h('td', {}, p.name, p.name_alt && h('div', { class: 'alt', lang: 'th' }, p.name_alt),
           variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
         h('td', {}, catById[p.category_id]?.name ?? '—'),
+        teams.length > 0 && h('td', {}, teamById[p.team_id]?.name ?? '—'),
         h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
           type: 'checkbox', checked: p.starter, title: 'Starter: sent to the kitchen first',
           onchange: act(async (e) => {
@@ -1501,6 +1509,8 @@ async function renderMenuAdmin() {
     const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (main default)`, inputmode: 'decimal', style: 'width:150px', 'data-f': 'ctax' });
     const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
     const prep = h('input', { type: 'checkbox', checked: c ? c.prep : false });
+    const team = teamSelect(c?.team_id, 'No team');
+    const moveItems = h('input', { type: 'checkbox', checked: true });
     const save = act(async () => {
       fieldErr(name); fieldErr(tax);
       if (!name.value.trim()) return fieldErr(name, 'Type a name');
@@ -1515,6 +1525,10 @@ async function renderMenuAdmin() {
         ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.checked })
         : await call('create_category', { ...args, sortOrder: cats.length + 1 });
       await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked, prep: prep.checked, nameAlt: alt.value.trim() || null });
+      const teamId = team.value ? Number(team.value) : null;
+      if (teamId !== (c?.team_id ?? null) || (teamId != null && moveItems.checked)) {
+        await call('set_category_team', { id: saved.id, teamId, moveItems: moveItems.checked });
+      }
       toast('Saved');
       if (!c) state.menuTab = saved.id;
       await changed();
@@ -1527,6 +1541,9 @@ async function renderMenuAdmin() {
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
         h('label', { class: 'check' }, starter, ' Items here are starters'),
         h('label', { class: 'check' }, prep, ' Items here are prepared ahead')),
+      teams.length > 0 && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Kitchen team', team),
+        h('label', { class: 'check' }, moveItems, ' Also move the items already here to this team'),
+        h('span', { class: 'muted small' }, 'Each team gets its own ticket with its name as a big header.')),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: save }, 'Save'),
         h('button', { onclick: () => setKids(form) }, 'Cancel'),
@@ -1600,10 +1617,12 @@ async function renderMenuAdmin() {
       active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
       starter: h('input', { type: 'checkbox', checked: p ? p.starter : d0.starter }),
       prep: h('input', { type: 'checkbox', checked: p ? p.prep : d0.prep }),
+      team: teamSelect(p ? p.team_id : d0.team, 'No team'),
     };
     f.cat.value = startCat ?? '';
     // A new item follows its category's defaults until the user changes them.
-    let taxTouched = !!p, starterTouched = !!p, prepTouched = !!p;
+    let taxTouched = !!p, starterTouched = !!p, prepTouched = !!p, teamTouched = !!p;
+    f.team.addEventListener('change', () => (teamTouched = true));
     f.tax.addEventListener('input', () => (taxTouched = true));
     f.starter.addEventListener('change', () => (starterTouched = true));
     f.prep.addEventListener('change', () => (prepTouched = true));
@@ -1612,6 +1631,7 @@ async function renderMenuAdmin() {
       if (!taxTouched) f.tax.value = pct(d.tax);
       if (!starterTouched) f.starter.checked = d.starter;
       if (!prepTouched) f.prep.checked = d.prep;
+      if (!teamTouched) f.team.value = d.team ?? '';
       preview();
     });
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
@@ -1711,6 +1731,7 @@ async function renderMenuAdmin() {
           name: f.name.value, name_alt: f.alt.value.trim() || null, category_id: f.cat.value ? Number(f.cat.value) : null,
           barcode: f.barcode.value || null, sku: f.sku.value || null, price_cents: price, cost_cents: cost,
           tax_rate_bp: Math.round(tax * 100), track_stock: f.track.checked, starter: f.starter.checked, prep: f.prep.checked,
+          team_id: f.team.value ? Number(f.team.value) : null,
         },
         variants,
       };
@@ -1762,7 +1783,7 @@ async function renderMenuAdmin() {
     more.open = !!p && (choices.length > 0 || linked.size > 0 || !!p.sku || !!p.barcode || p.track_stock || !p.active);
     setKids(form, h('div', { class: 'card stack' },
       h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, p ? `Edit ${p.name}` : 'New menu item'), tile),
-      h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, f.name), f.cat),
+      h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, f.name), f.cat, teams.length > 0 && h('label', { class: 'field', title: 'The kitchen team whose ticket this prints on' }, 'Team', f.team)),
       h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, f.alt, h('div', { class: 'muted small' }, 'Printed under the name on kitchen tickets')),
       h('div', { class: 'row' }, h('label', { class: 'field' }, taxIncluded ? 'Price (tax included)' : 'Price (before tax)', h('span', { class: 'field-col' }, f.price)),
         taxIncluded && h('span', { class: 'muted small' }, 'What the customer pays; the tax is worked out from it.')),
@@ -2364,6 +2385,38 @@ function menuDefaultsCard() {
     h('label', { class: 'check' }, fill, ' Also apply it to existing items that are at 0% ', untaxed));
 }
 
+/// Settings card: kitchen teams (a separate ticket with a big header for each).
+function teamsCard() {
+  let rows = [];
+  const list = h('div', { class: 'stack' });
+  const draw = () => setKids(list, rows.map((r, i) => h('div', { class: 'row team-row', 'data-team': i },
+    h('input', { value: r.name, placeholder: 'Team name, e.g. Curry', style: 'width:180px', oninput: (e) => (r.name = e.target.value) }),
+    h('input', { value: r.name_alt ?? '', placeholder: 'Thai, e.g. แกง', lang: 'th', class: 'alt-input', oninput: (e) => (r.name_alt = e.target.value) }),
+    r.items != null && h('span', { class: 'muted small' }, `${r.items} item${r.items === 1 ? '' : 's'}`),
+    h('button', { title: 'Move up', disabled: i === 0, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '↑'),
+    h('button', { title: 'Move down', disabled: i === rows.length - 1, onclick: () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); } }, '↓'),
+    h('button', { class: 'danger', title: 'Remove this team', onclick: () => { rows.splice(i, 1); draw(); } }, '×'))),
+    !rows.length && h('div', { class: 'muted' }, 'No teams: the kitchen gets one ticket.'));
+  const load = () => invoke('list_teams').then((t) => { rows = t.map((x) => ({ ...x })); draw(); }).catch((e) => toast(String(e?.message ?? e), true));
+  load();
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Kitchen teams'),
+    h('div', { class: 'muted' }, 'Each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes. ' +
+      'Choose a team for each category (Menu → tap the category) or for single items. Items without a team print on a plain ticket last. ' +
+      'A team is where a ticket prints; "Starter" on an item is when it is sent.'),
+    list,
+    h('div', { class: 'row' },
+      h('button', { onclick: () => { rows.push({ id: null, name: '', name_alt: '', items: null }); draw(); list.querySelector('.team-row:last-child input')?.focus(); } }, '+ Team'),
+      h('button', { class: 'primary', onclick: act(async () => {
+        if (rows.some((r) => !r.name.trim())) return toast('Give every team a name', true);
+        await call('save_teams', { teams: rows.map((r) => ({ id: r.id, name: r.name.trim(), name_alt: (r.name_alt ?? '').trim() || null })) });
+        state.menu = null;
+        await load();
+        toast('Teams saved');
+      }) }, 'Save teams'),
+      h('button', { onclick: act(async () => { printResult(await call('test_teams_print'), 'Sample tickets printed'); }) }, 'Print sample tickets')));
+}
+
 /// Settings card: the quick notes staff tap onto an order line.
 function quickNotesCard() {
   const text = h('textarea', { rows: 6, style: 'width:100%', placeholder: 'One note per line, e.g.\nNo onions\nExtra spicy\nNo ice' });
@@ -2513,6 +2566,7 @@ async function renderSettings() {
       }) }, 'Save'))),
     serviceCard(),
     menuDefaultsCard(),
+    teamsCard(),
     quickNotesCard(),
     autoLogoutCard(),
     state.remote ? '' : displayCard(),

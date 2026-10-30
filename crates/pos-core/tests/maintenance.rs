@@ -19,7 +19,7 @@ fn setup() -> Fixture {
     let mut item = |name: &str, price, cat: i64, sku: Option<&str>| {
         pos.create_product(&admin, NewProduct {
             category_id: Some(cat), sku: sku.map(str::to_string), barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 100, tax_rate_bp: 1000, stock_qty: 5, track_stock: true, starter: false, name_alt: None, prep: false,
+            cost_cents: 100, tax_rate_bp: 1000, stock_qty: 5, track_stock: true, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap()
     };
@@ -134,7 +134,7 @@ fn reset_keeps_what_was_not_chosen() {
     f.pos.create_category(&f.admin, "Mains", None, 0).unwrap();
     f.pos.create_product(&f.admin, NewProduct {
         category_id: None, sku: Some("B1".into()), barcode: None, name: "Burger".into(), price_cents: 900,
-        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false,
+        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap();
 }

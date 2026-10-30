@@ -281,6 +281,9 @@ pub struct KitchenTicket {
     pub brief: bool,
     /// Dishes in double-size text (see `PrinterConfig::large_text`).
     pub large: bool,
+    /// The team's name as a big white-on-black header, at the very top
+    /// (name, then "\n" and the Thai name when shown).
+    pub banner: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -297,11 +300,18 @@ pub(crate) struct Line {
     pub bold: bool,
     pub center: bool,
     pub text: String,
+    /// A big header: white text on a solid black bar, printed as an image.
+    /// `text` is the name, then "\n" and a second name when there is one.
+    pub inverse: bool,
 }
 
 impl Line {
     pub fn new(size: Size, bold: bool, center: bool, text: impl Into<String>) -> Line {
-        Line { size, bold, center, text: text.into() }
+        Line { size, bold, center, text: text.into(), inverse: false }
+    }
+
+    pub fn banner(text: impl Into<String>) -> Line {
+        Line { size: Size::Big, bold: true, center: true, text: text.into(), inverse: true }
     }
 }
 
@@ -314,6 +324,16 @@ pub(crate) fn category_heading(name: Option<&str>) -> String {
 pub(crate) fn render_text(lines: &[Line], width: usize) -> String {
     let mut s = String::new();
     for l in lines {
+        if l.inverse {
+            // Plain-text stand-in for the black bar.
+            for part in l.text.split('\n') {
+                let text = format!("[ {part} ]");
+                s.push_str(&" ".repeat(width.saturating_sub(cols(&text)) / 2));
+                s.push_str(&text);
+                s.push('\n');
+            }
+            continue;
+        }
         let w = if l.size == Size::Big { width / 2 } else { width };
         let pad = if l.center { w.saturating_sub(cols(&l.text)) / 2 } else { 0 };
         s.push_str(&" ".repeat(pad));
@@ -332,6 +352,10 @@ pub(crate) fn render_escpos(lines: &[Line], width: usize, bold: bool) -> Vec<u8>
     // set print "#" as "£", which turned "#12" into "£12".
     let mut b = vec![0x1B, b'@', 0x1B, b't', 0, 0x1B, b'R', 0];
     for l in lines {
+        if l.inverse {
+            b.extend(crate::raster::escpos_banner(&l.text, width * crate::raster::DOTS_PER_CHAR));
+            continue;
+        }
         if crate::raster::needs_raster(&l.text) {
             b.extend(crate::raster::escpos_line(l.text.trim_end(), l.size, l.center, width * crate::raster::DOTS_PER_CHAR));
             continue;
@@ -409,10 +433,18 @@ pub(crate) fn cols(text: &str) -> usize {
     text.chars().filter(|c| !is_mark(*c)).count()
 }
 
+/// The ESC/POS bytes of several tickets one after another (each ends with a cut).
+fn escpos_all(tickets: &[KitchenTicket], cfg: &PrinterConfig) -> Vec<u8> {
+    tickets.iter().flat_map(|t| t.to_escpos(cfg.width, cfg.bold)).collect()
+}
+
 impl KitchenTicket {
     fn lines(&self, width: usize) -> Vec<Line> {
         let mut v = Vec::new();
-        let mut push = |size, bold, center, text: String| v.push(Line { size, bold, center, text });
+        if let Some(b) = &self.banner {
+            v.push(Line::banner(b.clone()));
+        }
+        let mut push = |size, bold, center, text: String| v.push(Line::new(size, bold, center, text));
         let big = width / 2;
         // Dishes, options and notes: double size (large) or double height.
         let (size, w) = if self.large { (Size::Big, big) } else { (Size::Tall, width) };
@@ -599,25 +631,94 @@ impl Pos {
             order_id,
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: s.name.clone(),
-            items: self
-                .by_category(items, names)?
-                .into_iter()
-                .map(|(category, i)| {
-                    let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-                    TicketItem {
-                        category,
-                        qty: i.qty,
-                        name: name.to_string(),
-                        name_alt: name_alt.map(str::to_string),
-                        options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
-                        note: i.note.clone(),
-                    }
-                })
-                .collect(),
+            items: self.ticket_items(items, names)?,
             footer: (!reprint && waiting > 0).then(|| format!("MAINS TO FOLLOW: {waiting}")),
             brief: false,
             large: self.kitchen_printer()?.large_text,
+            banner: None,
         })
+    }
+
+    /// The dishes of a ticket, grouped by menu category.
+    fn ticket_items(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<TicketItem>> {
+        Ok(self
+            .by_category(items, names)?
+            .into_iter()
+            .map(|(category, i)| {
+                let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
+                TicketItem {
+                    category,
+                    qty: i.qty,
+                    name: name.to_string(),
+                    name_alt: name_alt.map(str::to_string),
+                    options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
+                    note: i.note.clone(),
+                }
+            })
+            .collect())
+    }
+
+    /// `items` split by the team that cooks them, in team order; items with
+    /// no team come last. Each group is (the team's header, its items).
+    /// The team is looked up now, so a menu change applies to orders already open.
+    fn team_groups(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<(Option<String>, Vec<OrderItem>)>> {
+        let teams = crate::teams::load_teams(&self.conn)?;
+        let mut stmt = self.conn.prepare_cached("SELECT team_id FROM products WHERE id = ?1")?;
+        let mut groups: Vec<(Option<String>, Vec<OrderItem>)> = teams
+            .iter()
+            .map(|t| {
+                let (main, sub) = names.pick(&t.name, t.name_alt.as_deref());
+                let main = main.to_uppercase();
+                (Some(sub.map_or(main.clone(), |s| format!("{main}\n{s}"))), Vec::new())
+            })
+            .collect();
+        groups.push((None, Vec::new()));
+        let general = groups.len() - 1;
+        for it in items {
+            let team: Option<i64> = stmt.query_row([it.product_id], |r| r.get(0)).optional()?.flatten();
+            let slot = team.and_then(|id| teams.iter().position(|t| t.id == id)).unwrap_or(general);
+            groups[slot].1.push(it.clone());
+        }
+        groups.retain(|g| !g.1.is_empty());
+        Ok(groups)
+    }
+
+    /// One kitchen ticket per team that has something in `items`, each headed
+    /// by the team's name; items with no team get a plain ticket. The title
+    /// (NEW ORDER, ADDITIONAL...) is worked out from the whole send, so every
+    /// team's ticket says the same. With no teams in use this is the single
+    /// plain ticket of `kitchen_ticket`.
+    pub fn kitchen_tickets(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<Vec<KitchenTicket>> {
+        let base = self.kitchen_ticket(s, order_id, items, reprint)?;
+        let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
+        self.split_by_team(base, items, names)
+    }
+
+    fn split_by_team(&self, base: KitchenTicket, items: &[OrderItem], names: PrintNames) -> Result<Vec<KitchenTicket>> {
+        let groups = self.team_groups(items, names)?;
+        if groups.len() <= 1 && groups.iter().all(|g| g.0.is_none()) {
+            return Ok(vec![base]);
+        }
+        groups
+            .into_iter()
+            .map(|(banner, group)| {
+                let mut t = base.clone();
+                t.items = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names)? };
+                t.banner = banner;
+                Ok(t)
+            })
+            .collect()
+    }
+
+    /// Dishes for the short "main course" ticket: no options or notes.
+    fn brief_items(&self, items: &[OrderItem], names: PrintNames) -> Vec<TicketItem> {
+        items
+            .iter()
+            .map(|i| {
+                let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
+                TicketItem { category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None }
+            })
+            .collect()
     }
 
     /// Print job for `items`, or None when no kitchen printer is set up.
@@ -626,18 +727,20 @@ impl Pos {
         if cfg.target == PrinterTarget::None || items.is_empty() {
             return Ok(None);
         }
-        let ticket = self.kitchen_ticket(s, order_id, items, reprint)?;
+        // One ticket per team, printed one after another as a single job.
+        let tickets = self.kitchen_tickets(s, order_id, items, reprint)?;
+        let (title, has_footer) = (tickets[0].title.as_str(), tickets[0].footer.is_some());
         let copies = if reprint {
             1
-        } else if ticket.title == "MAINS AWAY" {
+        } else if title == "MAINS AWAY" {
             cfg.mains_copies.unwrap_or(cfg.copies)
-        } else if ticket.footer.is_some() && items.iter().all(|i| i.starter) {
+        } else if has_footer && items.iter().all(|i| i.starter) {
             // Starters going ahead of the mains.
             cfg.starter_copies.unwrap_or(cfg.copies)
         } else {
             cfg.copies
         };
-        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width, cfg.bold), copies, cfg.copy_delay_secs)))
+        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs)))
     }
 
     /// PREPARE NOW ticket for prepare-ahead dishes that wait for the mains
@@ -647,9 +750,11 @@ impl Pos {
         if cfg.target == PrinterTarget::None || items.is_empty() {
             return Ok(None);
         }
-        let ticket = self.prep_ticket(s, order_id, items)?;
+        let base = self.prep_ticket(s, order_id, items)?;
+        let names = cfg.names.unwrap_or(PrintNames::Both);
+        let tickets = self.split_by_team(base, items, names)?;
         let copies = cfg.prep_copies.unwrap_or(cfg.copies);
-        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width, cfg.bold), copies, cfg.copy_delay_secs)))
+        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs)))
     }
 
     /// The PREPARE NOW ticket: like a kitchen ticket, saying the dishes are
@@ -677,9 +782,11 @@ impl Pos {
         if cfg.target == PrinterTarget::None {
             return Ok(None);
         }
-        let ticket = self.main_course_ticket(&o, &mains)?;
+        let names = cfg.names.unwrap_or(PrintNames::Both);
+        let base = self.main_course_ticket(&o, &mains)?;
+        let tickets = self.split_by_team(base, &mains, names)?;
         let copies = cfg.mains_copies.unwrap_or(cfg.copies);
-        Ok(Some(PrintJob::copies(cfg.target, &[], ticket.to_escpos(cfg.width, cfg.bold), copies, cfg.copy_delay_secs)))
+        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs)))
     }
 
     fn main_course_ticket(&self, o: &Order, mains: &[OrderItem]) -> Result<KitchenTicket> {
@@ -696,23 +803,11 @@ impl Pos {
             order_id: o.id,
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: String::new(),
-            items: mains
-                .iter()
-                .map(|i| {
-                    let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-                    TicketItem {
-                        category: None,
-                        qty: i.qty,
-                        name: name.to_string(),
-                        name_alt: name_alt.map(str::to_string),
-                        options: vec![],
-                        note: None,
-                    }
-                })
-                .collect(),
+            items: self.brief_items(mains, names),
             footer: None,
             brief: true,
             large: self.kitchen_printer()?.large_text,
+            banner: None,
         })
     }
 
@@ -724,6 +819,51 @@ impl Pos {
             return invalid("nothing has been sent to the kitchen yet");
         }
         self.kitchen_job(s, order_id, &sent, true)
+    }
+
+    /// A sample ticket for every team, to see the headers on the kitchen
+    /// printer. None when no kitchen printer is set up.
+    pub fn test_teams_job(&self, s: &Session) -> Result<Option<PrintJob>> {
+        s.require(Permission::ManageSettings)?;
+        let teams = crate::teams::load_teams(&self.conn)?;
+        if teams.is_empty() {
+            return invalid("add a team first");
+        }
+        let cfg = self.kitchen_printer()?;
+        if cfg.target == PrinterTarget::None {
+            return Ok(None);
+        }
+        let names = cfg.names.unwrap_or(PrintNames::Both);
+        let time = chrono::Local::now().format("%H:%M").to_string();
+        let tickets: Vec<KitchenTicket> = teams
+            .iter()
+            .map(|t| {
+                let (main, sub) = names.pick(&t.name, t.name_alt.as_deref());
+                let main = main.to_uppercase();
+                let (dish, dish_alt) = names.pick("Sample dish", Some("เมนูตัวอย่าง"));
+                KitchenTicket {
+                    title: "TEST PRINT".into(),
+                    heading: "DINE-IN T1".into(),
+                    details: vec![],
+                    order_id: 0,
+                    time: time.clone(),
+                    staff: s.name.clone(),
+                    items: vec![TicketItem {
+                        category: None,
+                        qty: 1,
+                        name: dish.to_string(),
+                        name_alt: dish_alt.map(str::to_string),
+                        options: vec![],
+                        note: None,
+                    }],
+                    footer: None,
+                    brief: false,
+                    large: cfg.large_text,
+                    banner: Some(sub.map_or(main.clone(), |x| format!("{main}\n{x}"))),
+                }
+            })
+            .collect();
+        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs)))
     }
 
     /// A sample ticket to check a printer configuration before saving it.
@@ -764,6 +904,7 @@ impl Pos {
             footer: None,
             brief: false,
             large: cfg.large_text,
+            banner: None,
         };
         Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos(cfg.width, cfg.bold), cfg.copies, cfg.copy_delay_secs))
     }
@@ -882,6 +1023,7 @@ mod tests {
             footer: None,
             brief: false,
             large: false,
+            banner: None,
         }
     }
 

@@ -22,6 +22,7 @@ mod products;
 mod reports;
 mod roles;
 mod service;
+mod teams;
 mod users;
 mod variants;
 
@@ -37,7 +38,7 @@ pub use customers::{normalize_postcode, phone_digits, Customer, CustomerInput};
 pub use error::{PosError, Result};
 pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_HEIGHT, PLAN_WIDTH};
 pub use lan::ServerSettings;
-pub use maintenance::{MenuBackup, MenuCategory, MenuCounts, MenuItem, MenuOptionGroup, MenuPrice, ResetOptions, ResetReport, SalesReset};
+pub use maintenance::{MenuBackup, MenuCategory, MenuCounts, MenuItem, MenuOptionGroup, MenuPrice, MenuTeam, ResetOptions, ResetReport, SalesReset};
 pub use menu::Category;
 pub use menu_tools::{ImportReport, ImportRow};
 pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
@@ -49,6 +50,7 @@ pub use orders::{
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
+pub use teams::{Team, TeamInput};
 pub use roles::{Permission, Role, Session};
 pub use users::User;
 pub use variants::{Variant, VariantInput};
@@ -71,6 +73,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0009_order_tax.sql"),
     include_str!("migrations/0010_prep_ahead.sql"),
     include_str!("migrations/0011_tax_included.sql"),
+    include_str!("migrations/0012_teams.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

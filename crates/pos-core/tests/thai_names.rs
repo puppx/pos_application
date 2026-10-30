@@ -16,7 +16,7 @@ fn setup() -> (Pos, Session, Menu, i64) {
     let item = |pos: &mut Pos, name: &str, alt: Option<&str>| {
         pos.create_product(&s, NewProduct {
             category_id: Some(mains.id), sku: None, barcode: None, name: name.into(), price_cents: 1000,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: alt.map(str::to_string), prep: false,
+            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: alt.map(str::to_string), prep: false, team_id: None,
         })
         .unwrap()
     };
@@ -55,7 +55,7 @@ fn order_lines_keep_the_thai_name() {
     let p = &m.pad_thai;
     pos.update_product(&s, p.id, ProductUpdate {
         category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0,
-        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: Some("ผัดไท".into()), prep: false,
+        tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: Some("ผัดไท".into()), prep: false, team_id: None,
     })
     .unwrap();
     let o = pos.get_order(&s, order).unwrap();

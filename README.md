@@ -136,6 +136,12 @@ the Thai name is shown small under the item on the order screen.
 Printing happens after the order is saved and never blocks the till. A printer
 that is off or unreachable gives up after 4 seconds and shows an error.
 
+### Staff copy and the bill's name and address
+
+Settings → Receipt printer lets you set the **name at the top of the bill**, the **address, phone and VAT number** under it, and the message at the bottom.
+When an order is paid a second, **staff copy** prints after the customer's receipt: the items and the tax by class (rate, net, VAT, gross), marked "not for customer", to keep for the books.
+Switch it off in the same card; "Print staff copy" on a paid order in History reprints it.
+
 ### Receipt printer and cash drawer
 
 **Settings → Receipt printer & cash drawer** works the same way (it can be the same

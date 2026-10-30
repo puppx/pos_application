@@ -35,6 +35,9 @@ pub struct ReceiptSettings {
     /// Open the cash drawer when an order is paid in cash.
     #[serde(default = "yes")]
     pub drawer_on_cash: bool,
+    /// Name printed at the top; empty means the restaurant name from Settings.
+    #[serde(default)]
+    pub shop_name: Option<String>,
     /// Lines under the restaurant name: address, phone, VAT number...
     #[serde(default)]
     pub header: Option<String>,
@@ -43,6 +46,10 @@ pub struct ReceiptSettings {
     pub footer: Option<String>,
     #[serde(default = "pound")]
     pub currency: String,
+    /// Print a second, staff-only copy when an order is paid, with the
+    /// tax broken down by class (net, VAT, gross).
+    #[serde(default = "yes")]
+    pub staff_copy: bool,
 }
 
 impl Default for ReceiptSettings {
@@ -51,9 +58,11 @@ impl Default for ReceiptSettings {
             printer: PrinterConfig::default(),
             auto_print: true,
             drawer_on_cash: true,
+            shop_name: None,
             header: None,
             footer: Some("Thank you!".into()),
             currency: pound(),
+            staff_copy: true,
         }
     }
 }
@@ -61,6 +70,9 @@ impl Default for ReceiptSettings {
 impl ReceiptSettings {
     fn validate(&self) -> Result<()> {
         self.printer.validate()?;
+        if self.shop_name.as_deref().is_some_and(|n| n.chars().count() > 60) {
+            return invalid("the name on the receipt is too long");
+        }
         if self.header.as_deref().is_some_and(|h| h.chars().count() > 400) {
             return invalid("the receipt header is too long");
         }
@@ -86,6 +98,15 @@ pub struct ReceiptLine {
     pub discount_cents: i64,
 }
 
+/// One tax rate on an order: what was sold at it, and the tax in that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaxClass {
+    pub rate_bp: i64,
+    pub net_cents: i64,
+    pub vat_cents: i64,
+    pub gross_cents: i64,
+}
+
 /// A bill (before payment) or receipt (after), laid out for a thermal printer.
 pub struct Receipt {
     pub store_name: String,
@@ -105,6 +126,8 @@ pub struct Receipt {
     pub tax_cents: i64,
     /// The prices already include `tax_cents` (it is not added to the total).
     pub tax_incl: bool,
+    /// Net / VAT / gross per tax rate, lowest rate first (the staff copy).
+    pub tax_classes: Vec<TaxClass>,
     /// ("Service charge 12.5%", 3.13), when the order has one.
     pub service: Option<(String, i64)>,
     pub total_cents: i64,
@@ -220,6 +243,59 @@ impl Receipt {
         v
     }
 
+    /// The staff copy: who and when, what was sold, and the tax by class.
+    fn staff_layout(&self, width: usize) -> Vec<Line> {
+        let mut v = Vec::new();
+        for t in wrap(&self.store_name, width / 2, "", "") {
+            v.push(Line::new(Size::Big, true, true, t));
+        }
+        v.push(Line::new(Size::Normal, true, true, "STAFF COPY - NOT FOR CUSTOMER"));
+        v.push(Line::new(Size::Normal, false, false, ""));
+        two_col(&mut v, Size::Normal, true, &format!("{} #{}", self.title, self.order_id), &self.time, width, "");
+        v.push(Line::new(Size::Normal, true, false, self.heading.clone()));
+        v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
+        for (label, amount) in self.payment.iter().take(1) {
+            two_col(&mut v, Size::Normal, false, label, &self.money(*amount), width, "");
+        }
+        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        for l in &self.lines {
+            two_col(&mut v, Size::Normal, false, &format!("{} x {}", l.qty, l.name), &self.money(l.amount_cents - l.discount_cents), width, "    ");
+        }
+        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+
+        // CLASS | NET | VAT | GROSS, the three amounts sharing what is left.
+        let label_w = 8;
+        let col = width.saturating_sub(label_w) / 3;
+        let row = |a: &str, b: &str, c: &str, d: &str| format!("{a:<label_w$}{b:>col$}{c:>col$}{d:>col$}");
+        v.push(Line::new(Size::Normal, true, false, row("TAX", "NET", "VAT", "GROSS")));
+        let mut totals = (0, 0, 0);
+        for (i, c) in self.tax_classes.iter().enumerate() {
+            let letter = char::from(b'A' + u8::try_from(i.min(25)).unwrap_or(0));
+            v.push(Line::new(Size::Normal, false, false, row(
+                &format!("{letter} {}%", percent(c.rate_bp)), &self.money(c.net_cents), &self.money(c.vat_cents), &self.money(c.gross_cents))));
+            totals = (totals.0 + c.net_cents, totals.1 + c.vat_cents, totals.2 + c.gross_cents);
+        }
+        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        v.push(Line::new(Size::Normal, true, false, row("Total", &self.money(totals.0), &self.money(totals.1), &self.money(totals.2))));
+        if self.discount_cents != 0 {
+            v.push(Line::new(Size::Normal, false, false, "(after discounts)"));
+        }
+        if let Some((label, cents)) = &self.service {
+            two_col(&mut v, Size::Normal, false, &format!("{label} (no tax)"), &self.money(*cents), width, "");
+        }
+        two_col(&mut v, Size::Big, true, "TOTAL", &self.money(self.total_cents), width / 2, "");
+        v.push(Line::new(Size::Normal, false, false, if self.tax_incl { "Prices include tax" } else { "Tax added on top of prices" }));
+        v
+    }
+
+    pub fn staff_to_text(&self, width: usize) -> String {
+        render_text(&self.staff_layout(width), width)
+    }
+
+    pub fn staff_to_escpos(&self, width: usize, bold: bool) -> Vec<u8> {
+        render_escpos(&self.staff_layout(width), width, bold)
+    }
+
     pub fn to_text(&self, width: usize) -> String {
         render_text(&self.layout(width), width)
     }
@@ -263,6 +339,15 @@ impl Pos {
             [SETTING_KEY, &json],
         )?;
         self.audit(Some(s.user_id), "printer.receipt", &json)
+    }
+
+    /// The name at the top of bills: the receipt's own, else the restaurant's.
+    fn receipt_name(&self, cfg: &ReceiptSettings) -> Result<String> {
+        let own = cfg.shop_name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        Ok(match own {
+            Some(n) => n.to_string(),
+            None => self.setting("store_name")?.unwrap_or_else(|| "POS".into()),
+        })
     }
 
     /// The bill (open order) or receipt (paid order), grouped by category.
@@ -321,11 +406,28 @@ impl Pos {
                 discount_cents: i.discount_cents,
             })
             .collect();
+        let mut tax_classes: Vec<TaxClass> = Vec::new();
+        for i in &o.items {
+            let gross = i.line_total_cents + if o.tax_incl { 0 } else { i.tax_cents };
+            let at = match tax_classes.iter().position(|c| c.rate_bp == i.tax_rate_bp) {
+                Some(at) => at,
+                None => {
+                    tax_classes.push(TaxClass { rate_bp: i.tax_rate_bp, net_cents: 0, vat_cents: 0, gross_cents: 0 });
+                    tax_classes.len() - 1
+                }
+            };
+            let c = &mut tax_classes[at];
+            c.gross_cents += gross;
+            c.vat_cents += i.tax_cents;
+            c.net_cents += gross - i.tax_cents;
+        }
+        tax_classes.sort_by_key(|c| c.rate_bp);
         Ok(Receipt {
-            store_name: self.setting("store_name")?.unwrap_or_else(|| "POS".into()),
+            store_name: self.receipt_name(cfg)?,
             header: lines_of(&cfg.header),
             footer: lines_of(&cfg.footer),
             currency: cfg.currency.clone(),
+            tax_classes,
             title: match o.status.as_str() {
                 "paid" => "RECEIPT",
                 "voided" => "VOID",
@@ -359,6 +461,16 @@ impl Pos {
         Ok(PrintJob::new(cfg.printer.target.clone(), r.to_escpos(cfg.printer.width, cfg.printer.bold)))
     }
 
+    /// Reprint the staff copy of a paid order.
+    pub fn staff_copy_job(&self, s: &Session, order_id: i64) -> Result<PrintJob> {
+        let cfg = self.receipt_settings()?;
+        if cfg.printer.target == PrinterTarget::None {
+            return invalid("no receipt printer is set up (Settings → Receipt printer)");
+        }
+        let r = self.receipt(s, order_id)?;
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.staff_to_escpos(cfg.printer.width, cfg.printer.bold)))
+    }
+
     /// What to print right after a payment: the receipt (if automatic,
     /// with the configured number of copies) and the drawer pulse for cash.
     pub fn payment_print_job(&self, s: &Session, order: &Order) -> Result<Option<PrintJob>> {
@@ -368,13 +480,20 @@ impl Pos {
         }
         let drawer = cfg.drawer_on_cash && order.payment_method.as_deref() == Some("cash");
         let lead: &[u8] = if drawer { &DRAWER_KICK } else { &[] };
-        let job = if cfg.auto_print {
-            let r = self.build_receipt(order, &cfg)?;
-            let p = &cfg.printer;
-            Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs))
-        } else {
-            drawer.then(|| PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()))
+        let p = &cfg.printer;
+        let r = (cfg.auto_print || cfg.staff_copy).then(|| self.build_receipt(order, &cfg)).transpose()?;
+        let mut job = match &r {
+            Some(r) if cfg.auto_print => Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs)),
+            _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec())),
         };
+        // The staff copy follows the customer's, as one more part of the job.
+        if let (Some(r), true) = (&r, cfg.staff_copy) {
+            let staff = r.staff_to_escpos(p.width, p.bold);
+            match &mut job {
+                Some(j) => j.parts.push(staff),
+                None => job = Some(PrintJob { target: p.target.clone(), parts: vec![staff], gap: std::time::Duration::ZERO }),
+            }
+        }
         if drawer {
             self.audit(Some(s.user_id), "drawer.open", &format!("cash payment, order {}", order.id))?;
         }
@@ -403,7 +522,7 @@ impl Pos {
         let thai = matches!(cfg.printer.names, Some(PrintNames::Both | PrintNames::Thai));
         let alt = |t: &str| thai.then(|| t.to_string());
         let r = Receipt {
-            store_name: self.setting("store_name")?.unwrap_or_else(|| "POS".into()),
+            store_name: self.receipt_name(cfg)?,
             header: lines_of(&cfg.header),
             footer: lines_of(&cfg.footer),
             currency: cfg.currency.clone(),
@@ -421,6 +540,7 @@ impl Pos {
             discount_cents: 0,
             tax_cents: 285,
             tax_incl: false,
+            tax_classes: vec![TaxClass { rate_bp: 1000, net_cents: 2850, vat_cents: 285, gross_cents: 3135 }],
             service: None,
             total_cents: 3135,
             payment: vec![("Cash".into(), 4000), ("Change".into(), 865)],

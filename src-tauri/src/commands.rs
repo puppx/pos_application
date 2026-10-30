@@ -523,6 +523,11 @@ commands! {
         Ok(print(Some(job)))
     }
 
+    fn print_staff_copy(app, t, order_id: i64) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| pos.staff_copy_job(s, order_id))?;
+        Ok(print(Some(job)))
+    }
+
     fn open_drawer(app, t) -> PrintOutcome {
         let job = app.with_session(t, |pos, s| pos.drawer_job(s))?;
         Ok(print(Some(job)))

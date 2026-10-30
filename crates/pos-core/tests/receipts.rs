@@ -124,7 +124,8 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("receipt.bin");
     let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None };
-    let mut settings = ReceiptSettings { printer: printer.clone(), ..Default::default() };
+    // The staff copy has its own test below.
+    let mut settings = ReceiptSettings { printer: printer.clone(), staff_copy: false, ..Default::default() };
 
     // No receipt printer: nothing to print, drawer button explains why.
     let o = order_everything(&mut pos, &admin, &m);
@@ -208,4 +209,38 @@ fn kitchen_copies_and_old_settings_still_load() {
     assert_eq!(rs.printer.target, PrinterTarget::Network { host: "192.168.1.60".into(), port: 9100 });
     assert_eq!((rs.printer.width, rs.printer.copies, rs.auto_print, rs.drawer_on_cash), (32, 2, false, true));
     assert_eq!(rs.currency, "£");
+}
+
+#[test]
+fn staff_copy_breaks_the_tax_down_by_class() {
+    let (mut pos, s, m) = setup();
+    // Bread at 0%, the rest at 10%, prices on top of tax.
+    pos.update_product(&s, m.bread.id, ProductUpdate {
+        category_id: None, sku: None, barcode: None, name: "Bread".into(), price_cents: 200, cost_cents: 0, tax_rate_bp: 0,
+        track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
+    })
+    .unwrap();
+    let o = order_everything(&mut pos, &s, &m);
+    let r = pos.receipt(&s, o.id).unwrap();
+    let t = r.staff_to_text(42);
+    assert!(t.contains("STAFF COPY") && t.contains("TAX") && t.contains("NET") && t.contains("VAT") && t.contains("GROSS"), "{t}");
+    assert_eq!(r.tax_classes.len(), 2);
+    assert_eq!(r.tax_classes[0].rate_bp, 0);
+    assert_eq!(r.tax_classes[0].vat_cents, 0);
+    let (net, vat, gross): (i64, i64, i64) = r.tax_classes.iter().fold((0, 0, 0), |a, c| (a.0 + c.net_cents, a.1 + c.vat_cents, a.2 + c.gross_cents));
+    assert_eq!((net, vat), (gross - r.tax_cents, r.tax_cents));
+    assert_eq!(gross, r.total_cents);
+
+    // A shop name of its own and one staff copy follow the customer's on payment.
+    let mut cfg = pos.receipt_settings().unwrap();
+    cfg.printer.target = PrinterTarget::File { path: "unused".into() };
+    cfg.shop_name = Some("Siam Kitchen".into());
+    pos.set_receipt_settings(&s, &cfg).unwrap();
+    assert!(pos.receipt(&s, o.id).unwrap().to_text(42).contains("Siam Kitchen"));
+    let paid = pos.pay_order(&s, o.id, PaymentMethod::Card, 0).unwrap();
+    let job = pos.payment_print_job(&s, &paid).unwrap().unwrap();
+    assert_eq!(job.parts.len(), 2, "customer copy + staff copy");
+    cfg.staff_copy = false;
+    pos.set_receipt_settings(&s, &cfg).unwrap();
+    assert_eq!(pos.payment_print_job(&s, &paid).unwrap().unwrap().parts.len(), 1);
 }

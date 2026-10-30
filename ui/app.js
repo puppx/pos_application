@@ -1263,7 +1263,8 @@ function orderDetail(o, onChange) {
     o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
     o.status !== 'cancelled' && h('div', {}, h('button', { onclick: act(async () => {
       printResult(await call('print_receipt', { orderId: o.id }), o.status === 'paid' ? 'Receipt printed' : 'Printed');
-    }) }, o.status === 'paid' ? 'Reprint receipt' : 'Print')),
+    }) }, o.status === 'paid' ? 'Reprint receipt' : 'Print'),
+      o.status === 'paid' && h('button', { onclick: act(async () => printResult(await call('print_staff_copy', { orderId: o.id }), 'Staff copy printed')) }, 'Print staff copy')),
     o.status === 'paid' && h('div', {}, h('button', { onclick: act(async () => {
       const p = await call('reprint_kitchen', { orderId: o.id });
       if (p.error) toast(`Did not print: ${p.error}`, true);
@@ -2547,12 +2548,15 @@ async function renderSettings() {
     [['english', 'English only'], ['both', 'English with Thai under it']]);
   const autoPrint = h('input', { type: 'checkbox', checked: receiptCfg.auto_print });
   const drawer = h('input', { type: 'checkbox', checked: receiptCfg.drawer_on_cash });
+  const shopName = h('input', { value: receiptCfg.shop_name ?? '', placeholder: `${state.storeName || 'Restaurant name'} (the restaurant name above)`, style: 'flex:1' });
+  const staffCopy = h('input', { type: 'checkbox', checked: receiptCfg.staff_copy !== false });
   const header = h('textarea', { rows: 3, style: 'width:100%', placeholder: 'Address, phone, VAT number… (one per line)' });
   header.value = receiptCfg.header ?? '';
   const footer = h('input', { value: receiptCfg.footer ?? '', placeholder: 'e.g. Thank you for your visit!', style: 'flex:1' });
   const currency = h('input', { value: receiptCfg.currency ?? '£', style: 'width:60px' });
   const receiptSettings = () => ({
-    ...receipt.config(), auto_print: autoPrint.checked, drawer_on_cash: drawer.checked,
+    ...receipt.config(), auto_print: autoPrint.checked, drawer_on_cash: drawer.checked, staff_copy: staffCopy.checked,
+    shop_name: shopName.value.trim() || null,
     header: header.value.trim() || null, footer: footer.value.trim() || null, currency: currency.value,
   });
 
@@ -2591,9 +2595,11 @@ async function renderSettings() {
       receipt.el,
       h('label', {}, autoPrint, ' Print a receipt automatically after payment'),
       h('label', {}, drawer, ' Open the cash drawer for cash payments'),
+      h('label', {}, staffCopy, ' Also print a staff copy after payment, with the tax by class (net, VAT, gross)'),
       h('div', { class: 'row' }, 'Currency symbol', currency),
-      header,
-      h('div', { class: 'row' }, footer),
+      h('label', { class: 'field' }, 'Name at the top of the bill', h('div', { class: 'row' }, shopName)),
+      h('label', { class: 'field' }, 'Address, phone, VAT number (under the name, one per line)', header),
+      h('label', { class: 'field' }, 'Message at the bottom', h('div', { class: 'row' }, footer)),
       h('div', { class: 'row' },
         h('button', { onclick: act(async () => {
           if (receipt.none()) return toast('Choose a printer first', true);

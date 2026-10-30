@@ -252,10 +252,10 @@ fn sent_items_need_admin_to_remove() {
     let o = pos.update_item(&admin, line, &reduce).unwrap();
     assert_eq!(o.items[0].qty, 1);
 
-    // Cancelling an order with sent items: admin + reason only.
+    // Cancelling an order with sent items: admin only.
     assert!(matches!(pos.cancel_order(&s, o.id, "walked out"), Err(PosError::Forbidden)));
-    assert!(pos.cancel_order(&admin, o.id, "").is_err());
-    pos.cancel_order(&admin, o.id, "walked out").unwrap();
+    // No reason needed, even once the kitchen has it.
+    pos.cancel_order(&admin, o.id, "").unwrap();
     assert_eq!(pos.sales_summary(&admin, 0, i64::MAX).unwrap().cancelled_count, 1);
 
     // An order with nothing sent can be cancelled by staff without a reason.

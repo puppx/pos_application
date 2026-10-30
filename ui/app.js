@@ -945,15 +945,11 @@ async function renderOrder() {
         h('button', { onclick: () => setKids(extra) }, 'Close')),
       h('div', { class: 'muted small' }, '"Menu rates" uses each item\'s own tax. A rate here applies to every item on this order, including ones added later.')));
   };
-  const showCancel = () => {
-    const reason = h('input', { placeholder: 'Reason', style: 'flex:1' });
-    setKids(extra, h('div', { class: 'row card' }, reason,
-      h('button', { class: 'danger', onclick: act(async () => {
-        await call('cancel_order', { orderId, reason: reason.value });
-        toast('Order cancelled'); closeOrder();
-      }) }, 'Cancel order'),
-      h('button', { onclick: () => setKids(extra) }, 'Keep order')));
-  };
+  // Two taps, no reason: the first asks "Tap again", the second cancels.
+  const cancelBtn = () => confirmBtn('Cancel', 'Tap again to cancel the order', async () => {
+    await call('cancel_order', { orderId, reason: '' });
+    toast('Order cancelled'); closeOrder();
+  });
 
   const head = h('div', { class: 'ticket-head' });
   function header() {
@@ -987,7 +983,7 @@ async function renderOrder() {
           h('button', { onclick: act(async () => reportPrint(await call('reprint_kitchen', { orderId }), 'Kitchen ticket reprinted', true)) }, 'Reprint'),
           h('button', { onclick: act(async () => printResult(await call('print_receipt', { orderId }), 'Bill printed')) }, 'Bill'),
           h('button', { onclick: act(async () => printResult(await call('open_drawer'), 'Drawer opened')) }, 'Drawer'),
-          h('button', { class: 'danger', onclick: showCancel }, 'Cancel')))),
+          cancelBtn()))),
     phoneBar);
   screen(layout);
   draw();

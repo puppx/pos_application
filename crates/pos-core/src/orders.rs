@@ -934,9 +934,6 @@ impl Pos {
         )?;
         if sent {
             s.require(Permission::VoidOrder)?;
-            if reason.is_empty() {
-                return invalid("a reason is required to cancel an order already sent to the kitchen");
-            }
         }
         tx.execute(
             "UPDATE orders SET status = 'cancelled', closed_by = ?2, closed_at = unixepoch(), close_reason = ?3

@@ -45,7 +45,7 @@ fn dine_in(table_id: i64) -> NewOrder {
 fn printer(copies: u8, starter: Option<u8>, mains: Option<u8>) -> PrinterConfig {
     PrinterConfig {
         target: PrinterTarget::File { path: std::env::temp_dir().join("pos-unused.bin").display().to_string() },
-        copies, starter_copies: starter, mains_copies: mains, copy_delay_secs: 0, ..Default::default()
+        copies, starter_copies: starter, mains_copies: mains, copy_delay_secs: 0, call_table_only: false, ..Default::default()
     }
 }
 
@@ -219,4 +219,25 @@ fn prepare_ahead_follows_category_and_backups() {
     // Older backups (no "prep") still load.
     let old: MenuItem = serde_json::from_str(r#"{"name":"Tea","price_cents":200}"#).unwrap();
     assert!(!old.prep);
+}
+
+#[test]
+fn calling_mains_again_can_print_only_the_table() {
+    let (mut pos, s, m, table) = setup();
+    // The default: just the table on a big bar, no dishes.
+    pos.set_kitchen_printer(&s, &PrinterConfig { call_table_only: true, ..printer(1, None, None) }).unwrap();
+    assert!(pos.kitchen_printer().unwrap().call_table_only);
+    let o = pos.open_order(&s, &dine_in(table)).unwrap();
+    pos.add_item(&s, o.id, m.soup.id, 1, None, None, &[]).unwrap();
+    pos.add_item(&s, o.id, m.burger.id, 2, None, None, &[]).unwrap();
+    pos.call_mains(&s, o.id).unwrap();
+    let job = pos.main_course_job(&s, o.id).unwrap().unwrap();
+    let b = job.bytes();
+    assert_eq!(job.parts.len(), 1);
+    assert_eq!(b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count(), 1, "the table as one big bar");
+    assert!(String::from_utf8_lossy(&b).contains("MAIN COURSE") && !String::from_utf8_lossy(&b).contains("Burger"));
+    // Switched off: the dishes come with it.
+    pos.set_kitchen_printer(&s, &printer(1, None, None)).unwrap();
+    let b = pos.main_course_job(&s, o.id).unwrap().unwrap().bytes();
+    assert!(String::from_utf8_lossy(&b).contains("2 x Burger"));
 }

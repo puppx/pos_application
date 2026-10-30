@@ -67,6 +67,10 @@ pub struct PrinterConfig {
     /// Kitchen only: copies of PREPARE NOW tickets. None = `copies`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prep_copies: Option<u8>,
+    /// Kitchen only: "Call mains again" prints just the table in huge
+    /// letters, without the dishes (on by default).
+    #[serde(default = "yes")]
+    pub call_table_only: bool,
 }
 
 fn yes() -> bool {
@@ -129,6 +133,7 @@ impl Default for PrinterConfig {
             starter_copies: None,
             mains_copies: None,
             prep_copies: None,
+            call_table_only: true,
         }
     }
 }
@@ -327,7 +332,7 @@ pub(crate) fn render_text(lines: &[Line], width: usize) -> String {
         if l.inverse {
             // Plain-text stand-in for the black bar.
             for part in l.text.split('\n') {
-                let text = format!("[ {part} ]");
+                let text = format!("[ {} ]", part.trim_start_matches('\u{1}'));
                 s.push_str(&" ".repeat(width.saturating_sub(cols(&text)) / 2));
                 s.push_str(&text);
                 s.push('\n');
@@ -451,6 +456,15 @@ impl KitchenTicket {
         let (cont, opt, opt_cont, note, note_cont) =
             if self.large { ("  ", "  + ", "    ", "  ** ", "     ") } else { ("    ", "   + ", "     ", "   ** ", "      ") };
         let small = if self.large { Size::Tall } else { Size::Normal };
+        // The "call mains" ticket without dishes: the table on a big bar, and
+        // the title under it.
+        if self.brief && self.items.is_empty() {
+            for t in wrap(&self.title, big, "", "") {
+                push(Size::Big, true, true, t);
+            }
+            push(Size::Tall, true, true, self.time.clone());
+            return v;
+        }
         for t in wrap(&self.title, big, "", "") {
             push(Size::Big, true, true, t);
         }
@@ -784,7 +798,12 @@ impl Pos {
         }
         let names = cfg.names.unwrap_or(PrintNames::Both);
         let base = self.main_course_ticket(&o, &mains)?;
-        let tickets = self.split_by_team(base, &mains, names)?;
+        let tickets = if cfg.call_table_only {
+            // Just the table, as a big white-on-black bar; nothing to split by team.
+            vec![KitchenTicket { items: vec![], banner: Some(format!("\u{1}{}", base.heading)), ..base }]
+        } else {
+            self.split_by_team(base, &mains, names)?
+        };
         let copies = cfg.mains_copies.unwrap_or(cfg.copies);
         Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs)))
     }

@@ -112,6 +112,9 @@ Items without a team print on a plain ticket last, and with no teams at all the 
 All the tickets go to the kitchen printer in one job; "Print sample tickets" in Settings tests the look.
 A team is *where* a ticket prints; the Starter / Prep ticks on an item are still *when* it is sent.
 
+**Call mains again** prints just the table in huge white-on-black letters and "MAIN COURSE" under it, without the dishes (the mains are already in the kitchen).
+Settings → Kitchen printer → "Call mains again prints only the table" turns the dishes back on.
+
 ### Thai and English names
 
 Give a menu item a **Thai name** (in the item editor or the 4th

@@ -123,7 +123,7 @@ fn payment_prints_receipt_copies_and_opens_drawer_for_cash() {
     let (mut pos, admin, m) = setup();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("receipt.bin");
-    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None };
+    let printer = PrinterConfig { target: PrinterTarget::File { path: path.display().to_string() }, width: 42, copies: 2, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None, call_table_only: true };
     // The staff copy has its own test below.
     let mut settings = ReceiptSettings { printer: printer.clone(), staff_copy: false, ..Default::default() };
 
@@ -198,8 +198,8 @@ fn kitchen_copies_and_old_settings_still_load() {
     let reprint = pos.kitchen_reprint_job(&admin, o.id).unwrap().unwrap();
     assert_eq!(count(&reprint.bytes(), &CUT), 1);
 
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None }).is_err());
-    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 0, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None, call_table_only: true }).is_err());
+    assert!(pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::None, width: 42, copies: 10, copy_delay_secs: 0, names: None, bold: true, large_text: true, starter_copies: None, mains_copies: None, prep_copies: None, call_table_only: true }).is_err());
 
     // Receipt settings JSON shape (as the UI sends it).
     let rs: ReceiptSettings = serde_json::from_str(

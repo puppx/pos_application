@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "pos-app"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "pos-core",
  "serde",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "pos-core"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "ab_glyph_rasterizer",
  "argon2",

@@ -2311,6 +2311,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
   const delay = h('input', { type: 'number', min: 0, max: 30, value: cfg.copy_delay_secs ?? 2, style: 'width:70px', title: 'Seconds to wait between copies' });
   const bold = h('input', { type: 'checkbox', checked: cfg.bold ?? true });
   const large = h('input', { type: 'checkbox', checked: cfg.large_text ?? true });
+  const tableOnly = h('input', { type: 'checkbox', checked: cfg.call_table_only ?? true });
   const courseCopies = (v) => h('input', { type: 'number', min: 1, max: 9, value: v ?? '', placeholder: 'same', style: 'width:80px' });
   const starterCopies = courseCopies(cfg.starter_copies), mainsCopies = courseCopies(cfg.mains_copies), prepCopies = courseCopies(cfg.prep_copies);
   const copiesOf = (el) => (el.value.trim() ? Math.min(9, Math.max(1, parseInt(el.value, 10) || 1)) : null);
@@ -2334,6 +2335,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
         h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
       h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)'),
+      courses && h('label', { class: 'check' }, tableOnly, ' "Call mains again" prints only the table, in huge letters (no dishes)'),
       courses && h('label', { class: 'check' }, large, ' Large text for dishes, options and notes (fewer letters per line)')),
     none: () => kind.value === 'none',
     config: () => ({
@@ -2341,7 +2343,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
       copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
       names: lang.value,
       bold: bold.checked,
-      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), large_text: large.checked }),
+      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), large_text: large.checked, call_table_only: tableOnly.checked }),
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
       ...(kind.value === 'file' && { path: path.value.trim() }),

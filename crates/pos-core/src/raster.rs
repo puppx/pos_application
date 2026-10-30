@@ -244,8 +244,13 @@ pub(crate) fn line_images(text: &str, size: Size, center: bool, dots: usize) -> 
 pub(crate) fn banner(text: &str, dots: usize) -> Bitmap {
     let em = face().units_per_em() as f32;
     let mut parts: Vec<Bitmap> = Vec::new();
+    // A leading \u{1} asks for the huge size (the table on a "call mains" ticket).
+    let (huge, text) = match text.strip_prefix('\u{1}') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
     let mut lines = text.split('\n');
-    for (t, px) in [(lines.next(), 56.0), (lines.next(), 38.0)] {
+    for (t, px) in [(lines.next(), if huge { 104.0 } else { 56.0 }), (lines.next(), 38.0)] {
         let Some(t) = t.map(str::trim).filter(|t| !t.is_empty()) else { continue };
         let scale = px / em;
         for piece in wrap_dots(t, dots.saturating_sub(24) as f32, scale) {

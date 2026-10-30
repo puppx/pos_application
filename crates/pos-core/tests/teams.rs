@@ -41,7 +41,7 @@ fn setup() -> Kit {
         .unwrap();
     pos.set_kitchen_printer(&s, &PrinterConfig {
         target: PrinterTarget::File { path: std::env::temp_dir().join("pos-teams-unused.bin").display().to_string() },
-        copy_delay_secs: 0, ..Default::default()
+        copy_delay_secs: 0, call_table_only: false, ..Default::default()
     })
     .unwrap();
     Kit { pos, s, soup, wings, steak, green, jasmine, cola, table: t[0].id, teams }

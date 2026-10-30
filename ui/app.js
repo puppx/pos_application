@@ -2390,6 +2390,12 @@ function menuDefaultsCard() {
 
 /// Settings card: kitchen teams (a separate ticket with a big header for each).
 function teamsCard() {
+  const split = h('input', { type: 'checkbox', checked: true });
+  invoke('get_setting', { key: 'teams_split' }).then((v) => (split.checked = v !== '0')).catch(() => {});
+  split.onchange = act(async () => {
+    await call('set_setting', { key: 'teams_split', value: split.checked ? '1' : '0' });
+    toast(split.checked ? 'Each team gets its own ticket' : 'One ticket for the whole kitchen');
+  });
   let rows = [];
   const list = h('div', { class: 'stack' });
   const draw = () => setKids(list, rows.map((r, i) => h('div', { class: 'row team-row', 'data-team': i },
@@ -2404,7 +2410,8 @@ function teamsCard() {
   load();
   return h('div', { class: 'card stack' },
     h('h3', {}, 'Kitchen teams'),
-    h('div', { class: 'muted' }, 'Each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes. ' +
+    h('label', { class: 'switch' }, split, h('span', {}, ''), 'Print a separate ticket for each team'),
+    h('div', { class: 'muted' }, 'When on, each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes; off = one ticket for everything, as before. ' +
       'Choose a team for each category (Menu → tap the category) or for single items. Items without a team print on a plain ticket last. ' +
       'A team is where a ticket prints; "Starter" on an item is when it is sent.'),
     list,

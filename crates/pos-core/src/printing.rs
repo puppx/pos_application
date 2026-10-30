@@ -732,6 +732,10 @@ impl Pos {
     }
 
     fn split_by_team(&self, base: KitchenTicket, items: &[OrderItem], names: PrintNames) -> Result<Vec<KitchenTicket>> {
+        // Settings → Kitchen teams can switch the separate tickets off.
+        if self.setting("teams_split")?.as_deref() == Some("0") {
+            return Ok(vec![base]);
+        }
         let groups = self.team_groups(items, names)?;
         if groups.len() <= 1 && groups.iter().all(|g| g.0.is_none()) {
             return Ok(vec![base]);

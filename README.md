@@ -109,6 +109,7 @@ Settings → **Kitchen teams** starts with Starter, Main, Curry and Rice; rename
 Give each category a team (Menu → tap the category, "also move the items already here" updates existing items) or set a team on a single item.
 When you send an order, every team gets its own ticket with its name as a big white-on-black header, listing only its dishes.
 Items without a team print on a plain ticket last, and with no teams at all the kitchen gets one ticket as before.
+The switch "Print a separate ticket for each team" in the same card turns the split off (one ticket for everything).
 All the tickets go to the kitchen printer in one job; "Print sample tickets" in Settings tests the look.
 A team is *where* a ticket prints; the Starter / Prep ticks on an item are still *when* it is sent.
 

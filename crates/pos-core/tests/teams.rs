@@ -223,3 +223,19 @@ fn sample_tickets_show_every_header() {
     let job = k.pos.test_teams_job(&k.s).unwrap().unwrap();
     assert_eq!(job.bytes().windows(4).filter(|w| *w == [0x1D, b'V', 66, 0]).count(), 4);
 }
+
+#[test]
+fn separate_team_tickets_can_be_switched_off() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.soup.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    let sent = k.pos.call_mains(&k.s, o.id).unwrap();
+    assert!(k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap().len() > 1);
+    k.pos.set_setting(&k.s, "teams_split", "0").unwrap();
+    let t = k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap();
+    assert_eq!(t.len(), 1);
+    assert!(t[0].banner.is_none() && t[0].items.len() == 2);
+    k.pos.set_setting(&k.s, "teams_split", "1").unwrap();
+    assert!(k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap().len() > 1);
+}

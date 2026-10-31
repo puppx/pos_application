@@ -185,7 +185,7 @@ body.locked main { padding: 0; }
 }
 .lock-side .brand-mark { width: 112px; height: 112px; margin: 0 0 18px -8px; }
 .lock-store { font-size: 28px; font-weight: 700; }
-.lock-clock { font-size: 88px; font-weight: 400; letter-spacing: -.02em; line-height: 1; margin-top: 30px; font-variant-numeric: tabular-nums; }
+.lock-clock { white-space: nowrap; font-size: clamp(52px, 6.8vw, 88px); font-weight: 400; letter-spacing: -.02em; line-height: 1; margin-top: 30px; font-variant-numeric: tabular-nums; }
 .lock-date { font-size: 18px; color: var(--rail-ink); }
 .lock-foot { margin-top: auto; color: #857f6d; font-size: 14px; padding-top: 40px; }
 .lock-main { display: grid; place-items: center; padding: 24px; background: var(--bg); }
@@ -350,6 +350,105 @@ button.pay strong { font-size: 26px; font-variant-numeric: tabular-nums; }
 pre.report { background: #fff; border: 1px dashed var(--line-2); border-radius: var(--radius-sm); padding: 14px; font: 13px/1.35 Consolas, "Cascadia Mono", monospace; max-height: 420px; overflow: auto; margin: 0; }
 .server-urls { display: flex; flex-direction: column; gap: 6px; background: var(--go-soft); border-radius: var(--radius-sm); padding: 12px 14px; }
 .server-urls code { font-size: 18px; font-weight: 700; color: var(--go-2); user-select: text; }
+
+/* ---------- laptops: 13" and smaller (short screens, 1024-1440 wide) ----------
+   The app window on a 13" laptop is about 1280 x 650 once Windows scaling, the
+   title bar and the taskbar are taken off. Everything is tightened so the order
+   ticket shows several lines and nothing needs scrolling on the main screens. */
+@media (max-height: 820px) and (min-width: 901px) {
+  :root { --tap: 42px; }
+  input, select, textarea { min-height: 40px; }
+  #rail { width: 82px; padding: 8px 6px; gap: 4px; }
+  .brand-mark { width: 44px; height: 44px; }
+  #nav { gap: 2px; margin-top: 4px; }
+  #nav button, #logout { min-height: 50px; padding: 4px 2px; gap: 2px; font-size: 11.5px; }
+  #nav button.on { width: calc(100% + 6px); margin-right: -6px; }
+  #logout { min-height: 42px; }
+  #bar { min-height: 52px; padding: 6px 16px; }
+  .title { font-size: 17px; }
+  .clock { font-size: 16px; }
+  .avatar { width: 32px; height: 32px; }
+  main { padding: 14px 16px; }
+  main.fill { padding: 10px; }
+  .page { gap: 12px; }
+  .card { padding: 14px 16px; }
+
+  /* order screen */
+  .order { grid-template-columns: 160px minmax(0, 1fr) 360px; gap: 10px; }
+  .cats { gap: 5px; }
+  .cats button { min-height: 46px; font-size: 15px; }
+  .items { grid-auto-rows: 90px; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)); }
+  .tile { padding: 9px 10px 8px 17px; }
+  .tile::before { width: 7px; }
+  .tile .name { font-size: 15px; }
+  .tile .price { font-size: 17px; }
+  .menu { gap: 8px; }
+  .ticket-head { padding: 8px 12px; }
+  .big-id { font-size: 19px; }
+  .ticket-lines td { padding: 5px 8px; }
+  .ticket-lines td:first-child { padding-left: 12px; }
+  .ticket-lines td.num { padding-top: 11px; }
+  .stepper button { min-height: 32px; min-width: 32px; }
+  .ticket-lines td .icon-btn { min-height: 34px; min-width: 34px; }
+  .ticket-foot { padding: 8px 12px 10px; gap: 6px; }
+  .totals td { font-size: 14px; padding: 0; }
+  .totals .grand td { font-size: 22px; padding-top: 2px; }
+  .ticket-foot .send, .ticket-foot .mains { min-height: 42px; }
+  button.pay { min-height: 50px; font-size: 18px; padding: 0 16px; }
+  button.pay strong { font-size: 22px; }
+  .tools button { min-height: 34px; }
+
+  /* other screens */
+  .stats { gap: 10px; }
+  .stat { padding: 7px 14px; }
+  .stat strong { font-size: 22px; }
+  .new-tile { min-height: 72px; font-size: 16px; }
+  .order-card { min-height: 118px; padding: 12px 14px; }
+  .order-card .amt { font-size: 20px; }
+  td { padding: 8px 10px; }
+  th { padding: 8px 10px; }
+  .paybig { min-height: 88px; font-size: 22px; }
+  .keypad button { min-height: 50px; font-size: 22px; }
+  .huge { font-size: 52px; }
+  .popup { padding: 3vh 16px; }
+  .popup > .card { padding: 18px; }
+  .pinpad { grid-template-columns: repeat(3, 74px); gap: 12px; }
+  .pinpad button { height: 74px; font-size: 26px; }
+  .lock-card { padding: 24px; gap: 14px; }
+  .lock-side { padding: 36px 40px; }
+  .lock-side .brand-mark { width: 88px; height: 88px; margin-bottom: 10px; }
+  .osk-key { min-height: 44px; font-size: 19px; }
+  .osk-keys { gap: 5px; }
+  .osk-row { gap: 5px; }
+  .osk-num { grid-auto-rows: 46px; }
+}
+/* Very short (1024 x 600 netbooks, or a laptop with a big taskbar). */
+@media (max-height: 660px) and (min-width: 901px) {
+  #rail .brand-mark { display: none; }
+  #nav button, #logout { min-height: 46px; }
+  #nav button .icon svg { width: 20px; height: 20px; }
+  .items { grid-auto-rows: 82px; }
+  .ticket-foot .send, .ticket-foot .mains { min-height: 38px; }
+  button.pay { min-height: 44px; }
+  .tools button { min-height: 32px; font-size: 12px; }
+  .totals .grand td { font-size: 20px; }
+  .pinpad { grid-template-columns: repeat(3, 64px); gap: 10px; }
+  .pinpad button { height: 64px; font-size: 24px; }
+  .osk-key { min-height: 38px; font-size: 17px; }
+  .osk-num { grid-auto-rows: 40px; }
+}
+/* Narrow laptops and small windows: slimmer columns so the menu keeps 3 tiles a row. */
+@media (max-width: 1180px) and (min-width: 901px) {
+  .order { grid-template-columns: 128px minmax(0, 1fr) 316px; }
+  .items { grid-template-columns: repeat(auto-fill, minmax(126px, 1fr)); }
+  .cats button { padding: 0 10px; font-size: 14.5px; }
+  .stat small { font-size: 11.5px; }
+}
+/* Settings: two columns of cards when there is room, instead of one long narrow list. */
+@media (min-width: 1180px) {
+  .page.settings { display: block; max-width: none; columns: 2 480px; column-gap: 14px; }
+  .page.settings > * { break-inside: avoid; margin-bottom: 14px; }
+}
 
 /* ---------- smaller screens (tablets in portrait, phones) ---------- */
 @media (max-width: 1180px) {

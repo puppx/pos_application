@@ -2407,7 +2407,7 @@ function teamsCard() {
   return h('div', { class: 'card stack' },
     h('h3', {}, 'Kitchen teams'),
     h('label', { class: 'switch' }, split, h('span', {}, ''), 'Print a separate ticket for each team'),
-    h('div', { class: 'muted' }, 'When on, each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes; off = one ticket for everything, as before. ' +
+    h('div', { class: 'muted' }, 'When on, each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes; off = one ticket for everything, still with each team\'s header over its dishes. ' +
       'Choose a team for each category (Menu → tap the category) or for single items. Items without a team print on a plain ticket last. ' +
       'A team is where a ticket prints; "Starter" on an item is when it is sent.'),
     list,

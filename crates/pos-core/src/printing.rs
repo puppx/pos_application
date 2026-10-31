@@ -258,6 +258,9 @@ pub fn system_printers() -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketItem {
+    /// The team header to print above this dish when every team shares one
+    /// ticket (separate team tickets switched off).
+    pub team: Option<String>,
     /// Menu category, used to group the ticket ("STARTERS", "MAINS"...).
     pub category: Option<String>,
     pub qty: i64,
@@ -449,7 +452,7 @@ impl KitchenTicket {
         if let Some(b) = &self.banner {
             v.push(Line::banner(b.clone()));
         }
-        let mut push = |size, bold, center, text: String| v.push(Line::new(size, bold, center, text));
+        let mut push = |l: Line| v.push(l);
         let big = width / 2;
         // Dishes, options and notes: double size (large) or double height.
         let (size, w) = if self.large { (Size::Big, big) } else { (Size::Tall, width) };
@@ -460,65 +463,75 @@ impl KitchenTicket {
         // the title under it.
         if self.brief && self.items.is_empty() {
             for t in wrap(&self.title, big, "", "") {
-                push(Size::Big, true, true, t);
+                push(Line::new(Size::Big, true, true, t));
             }
-            push(Size::Tall, true, true, self.time.clone());
+            push(Line::new(Size::Tall, true, true, self.time.clone()));
             return v;
         }
         for t in wrap(&self.title, big, "", "") {
-            push(Size::Big, true, true, t);
+            push(Line::new(Size::Big, true, true, t));
         }
         for t in wrap(&self.heading, big, "", "") {
-            push(Size::Big, true, self.brief, t);
+            push(Line::new(Size::Big, true, self.brief, t));
         }
         if !self.brief {
             for d in &self.details {
                 for t in wrap(d, width, "", "  ") {
-                    push(small, false, false, t);
+                    push(Line::new(small, false, false, t));
                 }
             }
-            push(small, false, false, format!("#{}  {}  {}", self.order_id, self.time, self.staff));
+            push(Line::new(small, false, false, format!("#{}  {}  {}", self.order_id, self.time, self.staff)));
         }
-        push(Size::Normal, false, false, "-".repeat(width));
+        push(Line::new(Size::Normal, false, false, "-".repeat(width)));
         let grouped = !self.brief && self.items.iter().any(|i| i.category.is_some());
         let mut current: Option<Option<&str>> = None;
+        let mut team: Option<&str> = None;
         for it in &self.items {
+            if it.team.as_deref() != team {
+                match &it.team {
+                    Some(b) => push(Line::banner(b.clone())),
+                    // Dishes without a team, after the teams' ones.
+                    None => push(Line::new(Size::Normal, false, false, "-".repeat(width))),
+                }
+                team = it.team.as_deref();
+                current = None;
+            }
             let cat = it.category.as_deref();
             if grouped && current != Some(cat) {
                 if current.is_some() {
-                    push(Size::Normal, false, false, String::new());
+                    push(Line::new(Size::Normal, false, false, String::new()));
                 }
-                push(small, true, true, category_heading(cat));
+                push(Line::new(small, true, true, category_heading(cat)));
                 current = Some(cat);
             }
             for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), w, "", cont).into_iter().enumerate() {
-                push(size, i == 0, false, t);
+                push(Line::new(size, i == 0, false, t));
             }
             if let Some(alt) = &it.name_alt {
                 for t in wrap(alt, w, cont, cont) {
-                    push(size, false, false, t);
+                    push(Line::new(size, false, false, t));
                 }
             }
             for o in &it.options {
                 for t in wrap(o, w, opt, opt_cont) {
-                    push(size, false, false, t);
+                    push(Line::new(size, false, false, t));
                 }
             }
             if let Some(n) = &it.note {
                 for t in wrap(n, w, note, note_cont) {
-                    push(size, true, false, t);
+                    push(Line::new(size, true, false, t));
                 }
             }
         }
-        push(Size::Normal, false, false, "-".repeat(width));
+        push(Line::new(Size::Normal, false, false, "-".repeat(width)));
         if let Some(f) = &self.footer {
             for t in wrap(f, big, "", "") {
-                push(Size::Big, true, true, t);
+                push(Line::new(Size::Big, true, true, t));
             }
         }
         // The table again at the bottom, where the ticket is read on the pass.
         for t in wrap(&self.heading, big, "", "") {
-            push(Size::Big, true, true, t);
+            push(Line::new(Size::Big, true, true, t));
         }
         v
     }
@@ -684,6 +697,7 @@ impl Pos {
             .map(|(category, i)| {
                 let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
                 TicketItem {
+                    team: None,
                     category,
                     qty: i.qty,
                     name: name.to_string(),
@@ -733,12 +747,22 @@ impl Pos {
 
     fn split_by_team(&self, base: KitchenTicket, items: &[OrderItem], names: PrintNames) -> Result<Vec<KitchenTicket>> {
         // Settings → Kitchen teams can switch the separate tickets off.
-        if self.setting("teams_split")?.as_deref() == Some("0") {
-            return Ok(vec![base]);
-        }
         let groups = self.team_groups(items, names)?;
         if groups.len() <= 1 && groups.iter().all(|g| g.0.is_none()) {
             return Ok(vec![base]);
+        }
+        // Switched off: one ticket, with each team's header over its dishes.
+        if self.setting("teams_split")?.as_deref() == Some("0") {
+            let mut t = base.clone();
+            t.items = Vec::new();
+            for (banner, group) in groups {
+                let mut part = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names)? };
+                for it in &mut part {
+                    it.team = banner.clone();
+                }
+                t.items.extend(part);
+            }
+            return Ok(vec![t]);
         }
         groups
             .into_iter()
@@ -757,7 +781,7 @@ impl Pos {
             .iter()
             .map(|i| {
                 let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-                TicketItem { category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None }
+                TicketItem { team: None, category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None }
             })
             .collect()
     }
@@ -896,6 +920,7 @@ impl Pos {
                     time: time.clone(),
                     staff: s.name.clone(),
                     items: vec![TicketItem {
+                        team: None,
                         category: None,
                         qty: 1,
                         name: dish.to_string(),
@@ -932,6 +957,7 @@ impl Pos {
             staff: s.name.clone(),
             items: vec![
                 TicketItem {
+                    team: None,
                     category: Some(names.inline("Starters", Some("อาหารเรียกน้ำย่อย"))),
                     qty: 1,
                     name: soup,
@@ -940,6 +966,7 @@ impl Pos {
                     note: None,
                 },
                 TicketItem {
+                    team: None,
                     category: Some(names.inline("Mains", Some("อาหารจานหลัก"))),
                     qty: 2,
                     name: burger,
@@ -1064,8 +1091,8 @@ mod tests {
             time: "19:05".into(),
             staff: "Sam".into(),
             items: vec![
-                TicketItem { category: None, qty: 2, name: "Burger".into(), name_alt: None, options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
-                TicketItem { category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None },
+                TicketItem { team: None, category: None, qty: 2, name: "Burger".into(), name_alt: None, options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
+                TicketItem { team: None, category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None },
             ],
             footer: None,
             brief: false,
@@ -1094,7 +1121,7 @@ mod tests {
         let last = lines.last().unwrap();
         assert!(last.text == "DINE-IN T3" && last.size == Size::Big && last.center);
         let long = KitchenTicket {
-            items: vec![TicketItem { category: None, qty: 1, name: "Chicken satay with peanut sauce".into(), name_alt: None, options: vec![], note: None }],
+            items: vec![TicketItem { team: None, category: None, qty: 1, name: "Chicken satay with peanut sauce".into(), name_alt: None, options: vec![], note: None }],
             ..t
         };
         assert!(long.lines(42).iter().filter(|l| l.size == Size::Big).all(|l| l.text.chars().count() <= 21));

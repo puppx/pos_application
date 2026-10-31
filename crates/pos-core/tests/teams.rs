@@ -236,6 +236,12 @@ fn separate_team_tickets_can_be_switched_off() {
     let t = k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap();
     assert_eq!(t.len(), 1);
     assert!(t[0].banner.is_none() && t[0].items.len() == 2);
+    // ...still with each team's header over its dishes.
+    let text = t[0].to_text(42);
+    let (starter, main) = (text.find("[ STARTER ]").expect(&text), text.find("[ MAIN ]").expect(&text));
+    assert!(starter < text.find("Soup").unwrap() && text.find("Soup").unwrap() < main && main < text.find("Steak").unwrap(), "{text}");
+    let job = k.pos.kitchen_job(&k.s, o.id, &sent, false).unwrap().unwrap();
+    assert_eq!(job.bytes().windows(4).filter(|w| *w == [0x1D, b'V', 66, 0]).count(), 1, "one cut");
     k.pos.set_setting(&k.s, "teams_split", "1").unwrap();
     assert!(k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap().len() > 1);
 }

@@ -480,11 +480,23 @@ impl KitchenTicket {
         let small = if self.large { Size::Tall } else { Size::Normal };
         // The "call mains" ticket without dishes: the table on a big bar, and
         // the title under it.
+        // Its team's bar (if any) is already at the top.
         if self.brief && self.items.is_empty() {
+            push(Line::new(Size::Normal, false, false, rule('=', width)));
             for t in wrap(&self.title, big, "", "") {
                 push(Line::new(Size::Big, true, true, t));
             }
-            push(Line::new(Size::Tall, true, true, self.time.clone()));
+            push(Line::new(Size::Normal, false, false, rule('=', width)));
+            push(Line::banner(format!("\u{1}{}", self.heading)));
+            // One shared ticket: which teams it is for.
+            for d in &self.details {
+                for t in wrap(d, width, "", "") {
+                    push(Line::new(Size::Tall, true, true, t));
+                }
+            }
+            push(Line::new(Size::Normal, false, false, rule('-', width)));
+            push(Line::new(Size::Tall, true, true, format!("Called {}", self.time)));
+            push(Line::new(Size::Normal, false, false, rule('=', width)));
             return v;
         }
         // Title between double rules, then where it goes and who sent it.
@@ -882,8 +894,19 @@ impl Pos {
         let names = cfg.names.unwrap_or(PrintNames::Both);
         let base = self.main_course_ticket(&o, &mains)?;
         let tickets = if cfg.call_table_only {
-            // Just the table, as a big white-on-black bar; nothing to split by team.
-            vec![KitchenTicket { items: vec![], banner: Some(format!("\u{1}{}", base.heading)), ..base }]
+            // Just the table, in huge letters: one ticket per team that has a
+            // main waiting (headed with the team), or one listing the teams.
+            let groups = self.team_groups(&mains, names)?;
+            let teams: Vec<String> = groups.iter().filter_map(|g| g.0.as_ref().map(|b| b.lines().next().unwrap_or("").to_string())).collect();
+            let split = self.setting("teams_split")?.as_deref() != Some("0");
+            let bare = KitchenTicket { items: vec![], ..base };
+            if teams.is_empty() {
+                vec![bare]
+            } else if split {
+                groups.into_iter().map(|(banner, _)| KitchenTicket { banner, ..bare.clone() }).collect()
+            } else {
+                vec![KitchenTicket { details: vec![format!("FOR: {}", teams.join(", "))], ..bare }]
+            }
         } else {
             self.split_by_team(base, &mains, names)?
         };

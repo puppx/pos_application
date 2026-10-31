@@ -245,3 +245,39 @@ fn separate_team_tickets_can_be_switched_off() {
     k.pos.set_setting(&k.s, "teams_split", "1").unwrap();
     assert!(k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap().len() > 1);
 }
+
+#[test]
+fn all_courses_together_still_splits_by_team() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.soup.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.green.id, 1, None, None, &[]).unwrap();
+    let sent = k.pos.call_mains(&k.s, o.id).unwrap();
+    let t = k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap();
+    assert_eq!(heads(&t), [Some("STARTER"), Some("MAIN"), Some("CURRY")]);
+}
+
+#[test]
+fn calling_mains_again_with_only_the_table_keeps_the_teams() {
+    let mut k = setup();
+    let mut cfg = k.pos.kitchen_printer().unwrap();
+    cfg.call_table_only = true;
+    k.pos.set_kitchen_printer(&k.s, &cfg).unwrap();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.soup.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.green.id, 1, None, None, &[]).unwrap();
+    k.pos.call_mains(&k.s, o.id).unwrap();
+    let cuts = |b: &[u8]| b.windows(4).filter(|w| *w == [0x1D, b'V', 66, 0]).count();
+    let bars = |b: &[u8]| b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count();
+    // One ticket per team with a main (Main, Curry): its bar and the table's.
+    let b = k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes();
+    assert_eq!((cuts(&b), bars(&b)), (2, 4));
+    assert!(!String::from_utf8_lossy(&b).contains("Steak"));
+    // Shared ticket: one, naming the teams.
+    k.pos.set_setting(&k.s, "teams_split", "0").unwrap();
+    let b = k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes();
+    assert_eq!((cuts(&b), bars(&b)), (1, 1));
+    assert!(String::from_utf8_lossy(&b).contains("FOR: MAIN, CURRY"));
+}

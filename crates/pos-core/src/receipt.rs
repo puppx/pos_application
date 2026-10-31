@@ -9,7 +9,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::printing::{render_escpos, render_text, wrap, Line, Size};
+use crate::printing::{rule, render_escpos, render_text, wrap, Line, Size};
 use crate::{Order, OrderType, Permission, Pos, PosError, PrintJob, PrintNames, PrinterConfig, PrinterTarget, Result, Session};
 
 const SETTING_KEY: &str = "_receipt_printer";
@@ -178,8 +178,11 @@ impl Receipt {
                 v.push(Line::new(Size::Normal, false, true, t));
             }
         }
-        v.push(Line::new(Size::Normal, false, false, ""));
+        let line = |v: &mut Vec<Line>, ch| v.push(Line::new(Size::Normal, false, false, rule(ch, width)));
+        // BILL / RECEIPT, number and time between double rules.
+        line(&mut v, '=');
         two_col(&mut v, Size::Normal, true, &format!("{} #{}", self.title, self.order_id), &self.time, width, "");
+        line(&mut v, '=');
         v.push(Line::new(Size::Normal, true, false, self.heading.clone()));
         for d in &self.details {
             for t in wrap(d, width, "", "  ") {
@@ -187,7 +190,9 @@ impl Receipt {
             }
         }
         v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
-        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        line(&mut v, '-');
+        two_col(&mut v, Size::Normal, true, "ITEM", "AMOUNT", width, "");
+        line(&mut v, '-');
 
         for l in &self.lines {
             two_col(&mut v, Size::Normal, false, &format!("{} x {}", l.qty, l.name), &self.money(l.amount_cents), width, "    ");
@@ -205,7 +210,7 @@ impl Receipt {
                 two_col(&mut v, Size::Normal, false, "   discount", &self.money(-l.discount_cents), width, "");
             }
         }
-        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        line(&mut v, '-');
         two_col(&mut v, Size::Normal, false, "Subtotal", &self.money(self.subtotal_cents), width, "");
         if self.discount_cents != 0 {
             two_col(&mut v, Size::Normal, false, "Discount", &self.money(-self.discount_cents), width, "");
@@ -214,12 +219,14 @@ impl Receipt {
         if let Some((label, cents)) = &self.service {
             two_col(&mut v, Size::Normal, false, label, &self.money(*cents), width, "");
         }
+        line(&mut v, '=');
         two_col(&mut v, Size::Big, true, "TOTAL", &self.money(self.total_cents), big, "");
+        line(&mut v, '=');
         if !self.payment.is_empty() {
-            v.push(Line::new(Size::Normal, false, false, ""));
             for (label, amount) in &self.payment {
                 two_col(&mut v, Size::Normal, false, label, &self.money(*amount), width, "");
             }
+            line(&mut v, '-');
         }
         if !self.footer.is_empty() {
             v.push(Line::new(Size::Normal, false, false, ""));
@@ -235,28 +242,34 @@ impl Receipt {
     /// The staff copy: who and when, what was sold, and the tax by class.
     fn staff_layout(&self, width: usize) -> Vec<Line> {
         let mut v = Vec::new();
+        let line = |v: &mut Vec<Line>, ch| v.push(Line::new(Size::Normal, false, false, rule(ch, width)));
         for t in wrap(&self.store_name, width / 2, "", "") {
             v.push(Line::new(Size::Big, true, true, t));
         }
-        v.push(Line::new(Size::Normal, true, true, "STAFF COPY - NOT FOR CUSTOMER"));
-        v.push(Line::new(Size::Normal, false, false, ""));
+        line(&mut v, '=');
+        v.push(Line::new(Size::Tall, true, true, "STAFF COPY"));
+        v.push(Line::new(Size::Normal, false, true, "not for the customer"));
+        line(&mut v, '=');
         two_col(&mut v, Size::Normal, true, &format!("{} #{}", self.title, self.order_id), &self.time, width, "");
         v.push(Line::new(Size::Normal, true, false, self.heading.clone()));
         v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
         for (label, amount) in self.payment.iter().take(1) {
-            two_col(&mut v, Size::Normal, false, label, &self.money(*amount), width, "");
+            two_col(&mut v, Size::Normal, false, &format!("Paid: {label}"), &self.money(*amount), width, "");
         }
-        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        line(&mut v, '-');
+        two_col(&mut v, Size::Normal, true, "ITEM", "AMOUNT", width, "");
+        line(&mut v, '-');
         for l in &self.lines {
             two_col(&mut v, Size::Normal, false, &format!("{} x {}", l.qty, l.name), &self.money(l.amount_cents - l.discount_cents), width, "    ");
         }
-        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        line(&mut v, '=');
 
         // CLASS | NET | VAT | GROSS, the three amounts sharing what is left.
         let label_w = 8;
         let col = width.saturating_sub(label_w) / 3;
         let row = |a: &str, b: &str, c: &str, d: &str| format!("{a:<label_w$}{b:>col$}{c:>col$}{d:>col$}");
         v.push(Line::new(Size::Normal, true, false, row("TAX", "NET", "VAT", "GROSS")));
+        line(&mut v, '-');
         let mut totals = (0, 0, 0);
         for (i, c) in self.tax_classes.iter().enumerate() {
             let letter = char::from(b'A' + u8::try_from(i.min(25)).unwrap_or(0));
@@ -264,7 +277,7 @@ impl Receipt {
                 &format!("{letter} {}%", percent(c.rate_bp)), &self.money(c.net_cents), &self.money(c.vat_cents), &self.money(c.gross_cents))));
             totals = (totals.0 + c.net_cents, totals.1 + c.vat_cents, totals.2 + c.gross_cents);
         }
-        v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        line(&mut v, '-');
         v.push(Line::new(Size::Normal, true, false, row("Total", &self.money(totals.0), &self.money(totals.1), &self.money(totals.2))));
         if self.discount_cents != 0 {
             v.push(Line::new(Size::Normal, false, false, "(after discounts)"));
@@ -272,8 +285,10 @@ impl Receipt {
         if let Some((label, cents)) = &self.service {
             two_col(&mut v, Size::Normal, false, &format!("{label} (no tax)"), &self.money(*cents), width, "");
         }
+        line(&mut v, '=');
         two_col(&mut v, Size::Big, true, "TOTAL", &self.money(self.total_cents), width / 2, "");
-        v.push(Line::new(Size::Normal, false, false, if self.tax_incl { "Prices include tax" } else { "Tax added on top of prices" }));
+        line(&mut v, '=');
+        v.push(Line::new(Size::Normal, false, true, if self.tax_incl { "Prices include tax" } else { "Tax added on top of prices" }));
         v
     }
 

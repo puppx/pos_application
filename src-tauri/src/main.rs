@@ -108,6 +108,13 @@ fn toggle_fullscreen(window: tauri::WebviewWindow) -> Result<bool> {
     Ok(on)
 }
 
+/// "Close POS" on the lock screen: quit the app (the exit handler stops the
+/// local server and tidies the database).
+#[tauri::command(async)]
+fn quit_app(handle: AppHandle) {
+    handle.exit(0);
+}
+
 // ---- automatic updates (desktop only) ----
 
 #[derive(Serialize)]
@@ -201,6 +208,7 @@ fn main() {
             server_status,
             set_server,
             toggle_fullscreen,
+            quit_app,
             check_update,
             install_update,
         ])

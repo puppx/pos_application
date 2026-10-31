@@ -65,7 +65,7 @@ fn order_lines_keep_the_thai_name() {
     let t = pos.kitchen_ticket(&s, order, &o.items, false).unwrap().to_text(42);
     assert!(t.contains("-- MAINS / อาหารจานหลัก --"), "{t}");
     assert!(t.contains("1 x Pad Thai\n  (Chicken)\n  ผัดไทย (ไก่)\n  + Fried egg / ไข่ดาว\n"), "{t}");
-    assert!(t.contains("2 x Cola\n-"), "{t}");
+    assert!(t.contains("2 x Cola\n="), "{t}");
 
     // Thai only.
     let mut cfg = pos.kitchen_printer().unwrap();

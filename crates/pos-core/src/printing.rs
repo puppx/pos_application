@@ -323,9 +323,28 @@ impl Line {
     }
 }
 
-/// Category heading such as "-- STARTERS --".
-pub(crate) fn category_heading(name: Option<&str>) -> String {
-    format!("-- {} --", name.unwrap_or("Other").to_uppercase())
+/// A line of `ch` across the paper: "=====..." between blocks, "-----..."
+/// between sections.
+pub(crate) fn rule(ch: char, width: usize) -> String {
+    ch.to_string().repeat(width)
+}
+
+/// A light "- - - -" line between dishes.
+pub(crate) fn dashed(width: usize) -> String {
+    "- ".repeat(width / 2).trim_end().to_string()
+}
+
+/// `text` in the middle of a rule: "--------- STARTERS ---------".
+pub(crate) fn titled_rule(text: &str, ch: char, width: usize) -> String {
+    let inner = format!(" {text} ");
+    let n = cols(&inner);
+    // Thai prints as an image whose letters are wider than the printer's own,
+    // so it gets a short rule each side rather than one filled to the edge.
+    if n + 4 > width || crate::raster::needs_raster(text) {
+        return format!("{ch}{ch}{inner}{ch}{ch}");
+    }
+    let left = (width - n) / 2;
+    format!("{}{inner}{}", rule(ch, left), rule(ch, width - n - left))
 }
 
 /// Plain-text rendering of laid-out lines (previews and tests).
@@ -468,9 +487,12 @@ impl KitchenTicket {
             push(Line::new(Size::Tall, true, true, self.time.clone()));
             return v;
         }
+        // Title between double rules, then where it goes and who sent it.
+        push(Line::new(Size::Normal, false, false, rule('=', width)));
         for t in wrap(&self.title, big, "", "") {
             push(Line::new(Size::Big, true, true, t));
         }
+        push(Line::new(Size::Normal, false, false, rule('=', width)));
         for t in wrap(&self.heading, big, "", "") {
             push(Line::new(Size::Big, true, self.brief, t));
         }
@@ -480,30 +502,39 @@ impl KitchenTicket {
                     push(Line::new(small, false, false, t));
                 }
             }
+            push(Line::new(Size::Normal, false, false, rule('-', width)));
             push(Line::new(small, false, false, format!("#{}  {}  {}", self.order_id, self.time, self.staff)));
         }
-        push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        push(Line::new(Size::Normal, false, false, rule('=', width)));
         let grouped = !self.brief && self.items.iter().any(|i| i.category.is_some());
         let mut current: Option<Option<&str>> = None;
         let mut team: Option<&str> = None;
+        let mut first = true;
         for it in &self.items {
             if it.team.as_deref() != team {
                 match &it.team {
                     Some(b) => push(Line::banner(b.clone())),
                     // Dishes without a team, after the teams' ones.
-                    None => push(Line::new(Size::Normal, false, false, "-".repeat(width))),
+                    None => push(Line::new(Size::Normal, false, false, rule('=', width))),
                 }
                 team = it.team.as_deref();
                 current = None;
+                first = true;
             }
             let cat = it.category.as_deref();
             if grouped && current != Some(cat) {
                 if current.is_some() {
                     push(Line::new(Size::Normal, false, false, String::new()));
                 }
-                push(Line::new(small, true, true, category_heading(cat)));
+                push(Line::new(small, true, true, titled_rule(&cat.unwrap_or("Other").to_uppercase(), '-', width)));
                 current = Some(cat);
+                first = true;
             }
+            // A light dashed line between dishes, so each one stands apart.
+            if !first {
+                push(Line::new(Size::Normal, false, false, dashed(width)));
+            }
+            first = false;
             for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), w, "", cont).into_iter().enumerate() {
                 push(Line::new(size, i == 0, false, t));
             }
@@ -523,11 +554,12 @@ impl KitchenTicket {
                 }
             }
         }
-        push(Line::new(Size::Normal, false, false, "-".repeat(width)));
+        push(Line::new(Size::Normal, false, false, rule('=', width)));
         if let Some(f) = &self.footer {
             for t in wrap(f, big, "", "") {
                 push(Line::new(Size::Big, true, true, t));
             }
+            push(Line::new(Size::Normal, false, false, rule('-', width)));
         }
         // The table again at the bottom, where the ticket is read on the pass.
         for t in wrap(&self.heading, big, "", "") {
@@ -1104,8 +1136,12 @@ mod tests {
     #[test]
     fn text_layout() {
         let t = ticket().to_text(32);
-        let expected = "   NEW ORDER\nDINE-IN T3\nGround\n#12  19:05  Sam\n--------------------------------\n\
-                        2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n1 x Crème brûlée\n--------------------------------\n   DINE-IN T3\n";
+        let eq = "=".repeat(32);
+        let expected = format!(
+            "{eq}\n   NEW ORDER\n{eq}\nDINE-IN T3\nGround\n{}\n#12  19:05  Sam\n{eq}\n\
+             2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n- - - - - - - - - - - - - - - -\n1 x Crème brûlée\n{eq}\n   DINE-IN T3\n",
+            "-".repeat(32)
+        );
         assert_eq!(t, expected);
     }
 

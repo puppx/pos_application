@@ -254,7 +254,9 @@ function lockScreen(...kids) {
       h('div', { class: 'brand-mark' }, logoImg()),
       h('div', { class: 'lock-store' }, state.storeName || 'POS'),
       clock, date,
-      h('div', { class: 'lock-foot' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`)),
+      h('div', { class: 'lock-foot' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`),
+      // Desktop app only: browsers on other devices just close their tab.
+      TAURI && !state.remote && confirmBtn('⏻  Close POS', 'Tap again to close', async () => { await TAURI.invoke('quit_app'); }, 'quit')),
     h('div', { class: 'lock-main' }, ...kids)));
 }
 

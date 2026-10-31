@@ -87,8 +87,8 @@ impl Pos {
             return Err(PosError::Forbidden);
         }
         tx.execute(
-            "INSERT INTO users (name, role, pin_hash, last_login_at) VALUES (?1, 'admin', ?2, unixepoch())",
-            params![name, hash],
+            "INSERT INTO users (name, role, pin_hash, last_login_at, pin_len) VALUES (?1, 'admin', ?2, unixepoch(), ?3)",
+            params![name, hash, pin.len()],
         )?;
         let user_id = tx.last_insert_rowid();
         tx.execute(
@@ -128,11 +128,27 @@ impl Pos {
         };
         throttle.record_success();
         self.conn
-            .prepare_cached("UPDATE users SET last_login_at = unixepoch() WHERE id = ?1")?
-            .execute([user_id])?;
+            .prepare_cached("UPDATE users SET last_login_at = unixepoch(), pin_len = ?2 WHERE id = ?1")?
+            .execute(params![user_id, pin.len()])?;
         self.audit(Some(user_id), "login", "")?;
         let role = Role::parse(&role).ok_or_else(|| PosError::Internal("bad role".into()))?;
         Ok(Session { user_id, name, role })
+    }
+
+    /// How many digits make a PIN, for logging in without pressing OK: the
+    /// longest active PIN, once every active user's length is known (shorter
+    /// PINs still press OK). None when switched off (setting `pin_auto_login`
+    /// = "0") or not known yet.
+    pub fn auto_login_length(&self) -> Result<Option<usize>> {
+        if self.setting("pin_auto_login")?.as_deref() == Some("0") {
+            return Ok(None);
+        }
+        let (unknown, longest): (i64, Option<i64>) = self.conn.query_row(
+            "SELECT COUNT(*) - COUNT(pin_len), MAX(pin_len) FROM users WHERE active = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(if unknown > 0 { None } else { longest.and_then(|n| usize::try_from(n).ok()) })
     }
 
     pub fn logout(&self, s: &Session) -> Result<()> {

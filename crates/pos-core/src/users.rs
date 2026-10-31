@@ -64,8 +64,8 @@ impl Pos {
         let hash = self.hash_pin(pin)?;
         self.conn
             .execute(
-                "INSERT INTO users (name, role, pin_hash) VALUES (?1, ?2, ?3)",
-                params![name, role.as_str(), hash],
+                "INSERT INTO users (name, role, pin_hash, pin_len) VALUES (?1, ?2, ?3, ?4)",
+                params![name, role.as_str(), hash, pin.len()],
             )
             .map_err(|e| map_unique(e, PIN_TAKEN))?;
         let id = self.conn.last_insert_rowid();
@@ -114,7 +114,7 @@ impl Pos {
         let hash = self.hash_pin(new_pin)?;
         let changed = self
             .conn
-            .execute("UPDATE users SET pin_hash = ?2 WHERE id = ?1", params![id, hash])
+            .execute("UPDATE users SET pin_hash = ?2, pin_len = ?3 WHERE id = ?1", params![id, hash, new_pin.len()])
             .map_err(|e| map_unique(e, PIN_TAKEN))?;
         if changed == 0 {
             return Err(PosError::NotFound);

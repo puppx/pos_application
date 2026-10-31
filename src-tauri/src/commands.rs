@@ -107,6 +107,8 @@ pub struct AppStatus {
     plan_height: i64,
     /// True in a browser (no updates, server controls or local backups UI).
     remote: bool,
+    /// Log in as soon as this many digits are typed (no OK needed).
+    auto_pin: Option<usize>,
 }
 
 /// Result of a print attempt. Printing problems never undo the action
@@ -275,6 +277,7 @@ commands! {
             plan_width: PLAN_WIDTH,
             plan_height: PLAN_HEIGHT,
             remote: t != LOCAL,
+            auto_pin: g.pos.auto_login_length()?,
         })
     }
 

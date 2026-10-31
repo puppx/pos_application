@@ -296,11 +296,15 @@ function renderLogin() {
     document.removeEventListener('keydown', onKey);
     renderShell();
   });
+  // Log in as soon as a full PIN is typed, when Settings allow it.
+  let autoLen = null;
+  invoke('app_status').then((st) => (autoLen = st.auto_pin)).catch(() => {});
   const press = (k) => {
     if (k === 'C') pin = '';
     else if (k === 'OK') return submit();
     else if (pin.length < 8) pin += k;
     show();
+    if (autoLen && pin.length === autoLen) submit();
   };
   const onKey = (e) => {
     if (/^\d$/.test(e.key)) press(e.key);
@@ -2512,10 +2516,25 @@ function autoLogoutCard() {
     toast(state.autoLogout ? `Auto logout after ${sel.selectedOptions[0].textContent} without activity` : 'Auto logout switched off');
   });
   return h('div', { class: 'card stack' },
-    h('h3', {}, 'Auto logout'),
+    h('h3', {}, 'Login and auto logout'),
     h('div', { class: 'muted' }, 'Log out by itself when nobody touches the screen or presses a key for this long, so the next person must enter their own PIN. ' +
       'A warning shows 30 seconds before. Open orders are kept. Applies to this till and every device using the local server.'),
-    h('label', { class: 'field' }, 'Log out after', sel));
+    h('label', { class: 'field' }, 'Log out after', sel),
+    pinAutoLogin());
+}
+
+/// Log in without OK once the PIN is complete (setting pin_auto_login).
+function pinAutoLogin() {
+  const box = h('input', { type: 'checkbox', checked: true });
+  invoke('get_setting', { key: 'pin_auto_login' }).then((v) => (box.checked = v !== '0')).catch(() => {});
+  box.onchange = act(async () => {
+    await call('set_setting', { key: 'pin_auto_login', value: box.checked ? '1' : '0' });
+    toast(box.checked ? 'Login as soon as the PIN is typed' : 'Press OK to log in');
+  });
+  return h('div', { class: 'stack' },
+    h('label', { class: 'switch' }, box, h('span', {}, ''), 'Log in as soon as the PIN is typed (no OK)'),
+    h('div', { class: 'muted small' }, 'Works once every staff member has logged in once after this update (the till learns how long each PIN is, never the PIN). ' +
+      'If PINs have different lengths, the shorter ones still press OK.'));
 }
 
 /// Settings card for the service charge.

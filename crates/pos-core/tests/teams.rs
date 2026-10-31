@@ -281,3 +281,54 @@ fn calling_mains_again_with_only_the_table_keeps_the_teams() {
     assert_eq!((cuts(&b), bars(&b)), (1, 1));
     assert!(String::from_utf8_lossy(&b).contains("FOR: MAIN, CURRY"));
 }
+
+#[test]
+fn drinks_go_straight_away_on_their_own_ticket() {
+    let mut k = setup();
+    let drinks = k.pos.list_categories(&k.s, false).unwrap().into_iter().find(|c| c.name == "Drinks").unwrap();
+    assert!(!drinks.drink && !k.cola.drink);
+    assert_eq!(k.pos.set_category_drink(&k.s, drinks.id, true, true).unwrap(), 1);
+    assert!(k.pos.get_product(&k.s, k.cola.id).unwrap().drink);
+    // New items in the category are drinks too.
+    let tea = k.pos.create_product(&k.s, NewProduct {
+        category_id: Some(drinks.id), sku: None, barcode: None, name: "Tea".into(), price_cents: 200, cost_cents: 0, tax_rate_bp: 0,
+        stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+    }).unwrap();
+    assert!(tea.drink);
+
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.soup.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.cola.id, 2, None, None, &[]).unwrap();
+    // Starters first: the cola goes with them, the steak waits.
+    let sent = k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    let names: Vec<_> = sent.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, ["Soup", "Cola"]);
+    let t = k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap();
+    assert_eq!(heads(&t), [Some("DRINKS"), Some("STARTER")]);
+    assert_eq!(t[0].items.len(), 1);
+    assert!(t[0].footer.is_none() && t[1].footer.is_some());
+    // Calling the mains again does not count the drinks.
+    k.pos.call_mains(&k.s, o.id).unwrap();
+    let mut cfg = k.pos.kitchen_printer().unwrap();
+    cfg.call_table_only = false;
+    k.pos.set_kitchen_printer(&k.s, &cfg).unwrap();
+    let b = k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes();
+    assert!(!String::from_utf8_lossy(&b).contains("Cola"));
+}
+
+#[test]
+fn teams_can_be_switched_off() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.soup.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    let sent = k.pos.call_mains(&k.s, o.id).unwrap();
+    k.pos.set_setting(&k.s, "teams_on", "0").unwrap();
+    let t = k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap();
+    assert_eq!(t.len(), 1);
+    assert!(t[0].banner.is_none() && !t[0].to_text(42).contains("[ "));
+    // The teams are still there for when they are switched back on.
+    k.pos.set_setting(&k.s, "teams_on", "1").unwrap();
+    assert_eq!(k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap().len(), 2);
+}

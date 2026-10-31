@@ -125,6 +125,26 @@ impl Pos {
         Ok(moved)
     }
 
+    /// Mark a category as drinks (or not); `move_items` does the same to the
+    /// items already in it. Returns how many items changed.
+    pub fn set_category_drink(&self, s: &Session, id: i64, drink: bool, move_items: bool) -> Result<usize> {
+        s.require(Permission::ManageMenu)?;
+        let changed = self.conn.execute("UPDATE categories SET drink = ?2 WHERE id = ?1", params![id, drink])?;
+        if changed == 0 {
+            return Err(PosError::NotFound);
+        }
+        let moved = if move_items {
+            self.conn.execute(
+                "UPDATE products SET drink = ?2, updated_at = unixepoch() WHERE category_id = ?1 AND deleted = 0 AND drink <> ?2",
+                params![id, drink],
+            )?
+        } else {
+            0
+        };
+        self.audit(Some(s.user_id), "category.drink", &format!("{id} drink={drink} moved={moved}"))?;
+        Ok(moved)
+    }
+
     pub(crate) fn check_team(&self, id: Option<i64>) -> Result<()> {
         if let Some(id) = id {
             let ok: bool = self

@@ -1429,7 +1429,7 @@ async function renderMenuAdmin() {
   const activeGroups = groups.filter((g) => g.active);
   const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
   // What a new item in category `id` starts with.
-  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep, team: catById[id]?.team_id ?? null });
+  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep, team: catById[id]?.team_id ?? null, drink: !!catById[id]?.drink });
   const form = popupHost();
   const list = h('div');
   const search = h('input', { type: 'search', placeholder: 'Search items' });
@@ -1466,6 +1466,7 @@ async function renderMenuAdmin() {
     const table = h('table', { class: 'menu-list' },
       h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), teams.length > 0 && h('th', { title: 'The kitchen team whose ticket this item prints on' }, 'Team'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
         h('th', { title: 'Prepare ahead: a PREPARE NOW ticket prints while the mains wait' }, 'Prep'),
+        h('th', { title: 'Drink: goes straight away, on its own DRINKS ticket' }, 'Drink'),
         h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
       products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
         onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
@@ -1491,6 +1492,14 @@ async function renderMenuAdmin() {
             toast(`${p.name}: ${p.prep ? 'prepared ahead' : 'not prepared ahead'}`);
           }),
         })),
+        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+          type: 'checkbox', checked: p.drink, title: 'Drink: goes straight away, on its own DRINKS ticket',
+          onchange: act(async (e) => {
+            await call('set_drink', { id: p.id, drink: e.target.checked });
+            p.drink = e.target.checked;
+            toast(`${p.name}: ${p.drink ? 'drink (own ticket)' : 'not a drink'}`);
+          }),
+        })),
         h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
         h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—'))));
     setKids(list, table,
@@ -1508,6 +1517,7 @@ async function renderMenuAdmin() {
     const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (main default)`, inputmode: 'decimal', style: 'width:150px', 'data-f': 'ctax' });
     const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
     const prep = h('input', { type: 'checkbox', checked: c ? c.prep : false });
+    const drink = h('input', { type: 'checkbox', checked: c ? c.drink : /drink|beverage|เครื่องดื่ม/i.test(c?.name ?? '') });
     const team = teamSelect(c?.team_id, 'No team');
     const moveItems = h('input', { type: 'checkbox', checked: true });
     const save = act(async () => {
@@ -1524,6 +1534,8 @@ async function renderMenuAdmin() {
         ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.checked })
         : await call('create_category', { ...args, sortOrder: cats.length + 1 });
       await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked, prep: prep.checked, nameAlt: alt.value.trim() || null });
+      // Drinks: the items already here follow the category.
+      if (drink.checked !== !!c?.drink) await call('set_category_drink', { id: saved.id, drink: drink.checked, moveItems: true });
       const teamId = team.value ? Number(team.value) : null;
       if (teamId !== (c?.team_id ?? null) || (teamId != null && moveItems.checked)) {
         await call('set_category_team', { id: saved.id, teamId, moveItems: moveItems.checked });
@@ -1539,7 +1551,8 @@ async function renderMenuAdmin() {
       h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
         h('label', { class: 'check' }, starter, ' Items here are starters'),
-        h('label', { class: 'check' }, prep, ' Items here are prepared ahead')),
+        h('label', { class: 'check' }, prep, ' Items here are prepared ahead'),
+        h('label', { class: 'check', title: 'Sent straight away and printed on their own DRINKS ticket' }, drink, ' Drinks (own ticket)')),
       teams.length > 0 && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Kitchen team', team),
         h('label', { class: 'check' }, moveItems, ' Also move the items already here to this team'),
         h('span', { class: 'muted small' }, 'Each team gets its own ticket with its name as a big header.')),
@@ -1617,11 +1630,14 @@ async function renderMenuAdmin() {
       starter: h('input', { type: 'checkbox', checked: p ? p.starter : d0.starter }),
       prep: h('input', { type: 'checkbox', checked: p ? p.prep : d0.prep }),
       team: teamSelect(p ? p.team_id : d0.team, 'No team'),
+      drink: h('input', { type: 'checkbox', checked: p ? p.drink : d0.drink }),
     };
     f.cat.value = startCat ?? '';
     // A new item follows its category's defaults until the user changes them.
     let taxTouched = !!p, starterTouched = !!p, prepTouched = !!p, teamTouched = !!p;
     f.team.addEventListener('change', () => (teamTouched = true));
+    let drinkTouched = !!p;
+    f.drink.addEventListener('change', () => (drinkTouched = true));
     f.tax.addEventListener('input', () => (taxTouched = true));
     f.starter.addEventListener('change', () => (starterTouched = true));
     f.prep.addEventListener('change', () => (prepTouched = true));
@@ -1631,6 +1647,7 @@ async function renderMenuAdmin() {
       if (!starterTouched) f.starter.checked = d.starter;
       if (!prepTouched) f.prep.checked = d.prep;
       if (!teamTouched) f.team.value = d.team ?? '';
+      if (!drinkTouched) f.drink.checked = d.drink;
       preview();
     });
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
@@ -1744,6 +1761,7 @@ async function renderMenuAdmin() {
       const groupIds = groupBoxes.filter((x) => x.box.checked).map((x) => x.g.id);
       if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds });
       if (p || v.variants.length) await call('set_variants', { productId: saved.id, variants: v.variants });
+      if (saved.drink !== f.drink.checked) await call('set_drink', { id: saved.id, drink: f.drink.checked });
       state.menu = null;
       if (again) {
         // 1: keep going in the same category.
@@ -1761,11 +1779,12 @@ async function renderMenuAdmin() {
     const reason = h('input', { placeholder: 'Reason (delivery, count…)' });
     // 3: the rarely needed fields wait behind "More options".
     const more = h('details', { class: 'more-options' },
-      h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, choices, extras, stock, codes')),
+      h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, drink, choices, extras, stock, codes')),
       h('div', { class: 'stack' },
         h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', f.tax), h('label', { class: 'field' }, 'Cost', f.cost),
           h('label', { class: 'check' }, f.starter, ' Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)')),
-          h('label', { class: 'check' }, f.prep, ' Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)'))),
+          h('label', { class: 'check' }, f.prep, ' Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)')),
+          h('label', { class: 'check' }, f.drink, ' Drink ', h('span', { class: 'muted' }, '(sent straight away, own DRINKS ticket)'))),
         h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
           h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering.'),
           choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
@@ -2388,6 +2407,13 @@ function menuDefaultsCard() {
 
 /// Settings card: kitchen teams (a separate ticket with a big header for each).
 function teamsCard() {
+  const on = h('input', { type: 'checkbox', checked: true });
+  invoke('get_setting', { key: 'teams_on' }).then((v) => { on.checked = v !== '0'; body.hidden = !on.checked; }).catch(() => {});
+  on.onchange = act(async () => {
+    await call('set_setting', { key: 'teams_on', value: on.checked ? '1' : '0' });
+    body.hidden = !on.checked;
+    toast(on.checked ? 'Kitchen teams on' : 'Kitchen teams off: tickets print without team headers (your teams are kept)');
+  });
   const split = h('input', { type: 'checkbox', checked: true });
   invoke('get_setting', { key: 'teams_split' }).then((v) => (split.checked = v !== '0')).catch(() => {});
   split.onchange = act(async () => {
@@ -2406,8 +2432,13 @@ function teamsCard() {
     !rows.length && h('div', { class: 'muted' }, 'No teams: the kitchen gets one ticket.'));
   const load = () => invoke('list_teams').then((t) => { rows = t.map((x) => ({ ...x })); draw(); }).catch((e) => toast(String(e?.message ?? e), true));
   load();
-  return h('div', { class: 'card stack' },
+  // Everything below the main switch hides while teams are off.
+  const body = h('div', { class: 'stack' });
+  const card = h('div', { class: 'card stack' },
     h('h3', {}, 'Kitchen teams'),
+    h('label', { class: 'switch' }, on, h('span', {}, ''), 'Use kitchen teams'),
+    body);
+  setKids(body,
     h('label', { class: 'switch' }, split, h('span', {}, ''), 'Print a separate ticket for each team'),
     h('div', { class: 'muted' }, 'When on, each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes; off = one ticket for everything, still with each team\'s header over its dishes. ' +
       'Choose a team for each category (Menu → tap the category) or for single items. Items without a team print on a plain ticket last. ' +
@@ -2423,6 +2454,7 @@ function teamsCard() {
         toast('Teams saved');
       }) }, 'Save teams'),
       h('button', { onclick: act(async () => { printResult(await call('test_teams_print'), 'Sample tickets printed'); }) }, 'Print sample tickets')));
+  return card;
 }
 
 /// Settings card: what tickets and bills call each kind of order.

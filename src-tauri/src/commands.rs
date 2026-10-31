@@ -508,6 +508,14 @@ commands! {
         app.with_session(t, |pos, s| pos.save_teams(s, &teams))
     }
 
+    fn set_drink(app, t, id: i64, drink: bool) -> () {
+        app.with_session(t, |pos, s| pos.set_drink(s, id, drink))
+    }
+
+    fn set_category_drink(app, t, id: i64, drink: bool, move_items: bool) -> usize {
+        app.with_session(t, |pos, s| pos.set_category_drink(s, id, drink, move_items))
+    }
+
     fn set_category_team(app, t, id: i64, team_id: Option<i64>, move_items: bool) -> usize {
         app.with_session(t, |pos, s| pos.set_category_team(s, id, team_id, move_items))
     }

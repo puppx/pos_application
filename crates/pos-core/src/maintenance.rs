@@ -69,6 +69,9 @@ pub struct MenuCategory {
     /// Kitchen team, by name (restoring creates any that are missing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    /// Drinks (v0.9.2+): items here get their own DRINKS ticket.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drink: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -212,7 +215,7 @@ impl Pos {
         s.require(Permission::ManageMenu)?;
         let categories = self
             .conn
-            .prepare("SELECT c.id, c.name, c.color, c.sort_order, c.tax_rate_bp, c.starter, c.name_alt, c.prep, t.name FROM categories c LEFT JOIN teams t ON t.id = c.team_id AND t.active = 1 WHERE c.active = 1 ORDER BY c.sort_order, c.name")?
+            .prepare("SELECT c.id, c.name, c.color, c.sort_order, c.tax_rate_bp, c.starter, c.name_alt, c.prep, t.name, c.drink FROM categories c LEFT JOIN teams t ON t.id = c.team_id AND t.active = 1 WHERE c.active = 1 ORDER BY c.sort_order, c.name")?
             .query_map([], |r| {
                 Ok(MenuCategory {
                     key: r.get(0)?,
@@ -224,6 +227,7 @@ impl Pos {
                     name_alt: r.get(6)?,
                     prep: r.get(7)?,
                     team: r.get(8)?,
+                    drink: r.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -343,8 +347,8 @@ impl Pos {
                 return invalid(format!("category \"{name}\" has an invalid tax rate"));
             }
             tx.execute(
-                "INSERT INTO categories (name, color, sort_order, tax_rate_bp, starter, name_alt, prep, team_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![name, color, c.sort_order, c.tax_rate_bp, c.starter, alt(&c.name_alt, 40)?, c.prep, team_of(&c.team)],
+                "INSERT INTO categories (name, color, sort_order, tax_rate_bp, starter, name_alt, prep, team_id, drink) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![name, color, c.sort_order, c.tax_rate_bp, c.starter, alt(&c.name_alt, 40)?, c.prep, team_of(&c.team), c.drink],
             )
             .map_err(|e| crate::error::map_unique(e, &format!("the category \"{name}\" appears twice")))?;
             cats.insert(c.key, tx.last_insert_rowid());

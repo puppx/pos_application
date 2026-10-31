@@ -116,6 +116,14 @@ A team is *where* a ticket prints; the Starter / Prep ticks on an item are still
 **Call mains again** prints just the table in huge white-on-black letters and "MAIN COURSE" under it, without the dishes (the mains are already in the kitchen).
 Settings → Kitchen printer → "Call mains again prints only the table" turns the dishes back on.
 
+### Drinks
+
+Tick **Drink** on an item (Menu list, item editor) or **Drinks (own ticket)** on a category (its items follow; new items in it start as drinks).
+Drinks are never held for the mains: they go with the first send, like starters, and print first on their own **DRINKS** ticket.
+Categories named "Drinks", "Beverages" or "เครื่องดื่ม" start as drinks when upgrading to 0.9.2.
+
+Settings → Kitchen teams → **Use kitchen teams** switches teams off without deleting them (tickets print as before teams).
+
 ### Thai and English names
 
 Give a menu item a **Thai name** (in the item editor or the 4th

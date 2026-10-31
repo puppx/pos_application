@@ -757,6 +757,10 @@ impl Pos {
     /// no team come last. Each group is (the team's header, its items).
     /// The team is looked up now, so a menu change applies to orders already open.
     fn team_groups(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<(Option<String>, Vec<OrderItem>)>> {
+        // Settings → Kitchen teams can switch teams off altogether.
+        if self.setting("teams_on")?.as_deref() == Some("0") {
+            return Ok(vec![(None, items.to_vec())]);
+        }
         let teams = crate::teams::load_teams(&self.conn)?;
         let mut stmt = self.conn.prepare_cached("SELECT team_id FROM products WHERE id = ?1")?;
         let mut groups: Vec<(Option<String>, Vec<OrderItem>)> = teams
@@ -783,10 +787,37 @@ impl Pos {
     /// (NEW ORDER, ADDITIONAL...) is worked out from the whole send, so every
     /// team's ticket says the same. With no teams in use this is the single
     /// plain ticket of `kitchen_ticket`.
+    /// Drinks come first, on their own DRINKS ticket.
     pub fn kitchen_tickets(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<Vec<KitchenTicket>> {
-        let base = self.kitchen_ticket(s, order_id, items, reprint)?;
+        let mut base = self.kitchen_ticket(s, order_id, items, reprint)?;
         let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
-        self.split_by_team(base, items, names)
+        let (drinks, food) = self.drinks_apart(items)?;
+        if drinks.is_empty() {
+            return self.split_by_team(base, items, names);
+        }
+        let (main, sub) = names.pick("DRINKS", Some("เครื่องดื่ม"));
+        let mut out = vec![KitchenTicket {
+            items: self.ticket_items(&drinks, names)?,
+            banner: Some(sub.map_or(main.to_string(), |x| format!("{main}\n{x}"))),
+            footer: None,
+            ..base.clone()
+        }];
+        if !food.is_empty() {
+            base.items = self.ticket_items(&food, names)?;
+            out.extend(self.split_by_team(base, &food, names)?);
+        }
+        Ok(out)
+    }
+
+    /// `items` split into (drinks, everything else), looked up on the menu now.
+    pub(crate) fn drinks_apart(&self, items: &[OrderItem]) -> Result<(Vec<OrderItem>, Vec<OrderItem>)> {
+        let mut stmt = self.conn.prepare_cached("SELECT drink FROM products WHERE id = ?1")?;
+        let (mut drinks, mut food) = (Vec::new(), Vec::new());
+        for it in items {
+            let drink: bool = stmt.query_row([it.product_id], |r| r.get(0)).optional()?.unwrap_or(false);
+            if drink { drinks.push(it.clone()) } else { food.push(it.clone()) }
+        }
+        Ok((drinks, food))
     }
 
     fn split_by_team(&self, base: KitchenTicket, items: &[OrderItem], names: PrintNames) -> Result<Vec<KitchenTicket>> {
@@ -838,12 +869,13 @@ impl Pos {
         }
         // One ticket per team, printed one after another as a single job.
         let tickets = self.kitchen_tickets(s, order_id, items, reprint)?;
-        let (title, has_footer) = (tickets[0].title.as_str(), tickets[0].footer.is_some());
+        let (title, has_footer) = (tickets[0].title.as_str(), tickets.iter().any(|t| t.footer.is_some()));
+        let food = self.drinks_apart(items)?.1;
         let copies = if reprint {
             1
         } else if title == "MAINS AWAY" {
             cfg.mains_copies.unwrap_or(cfg.copies)
-        } else if has_footer && items.iter().all(|i| i.starter) {
+        } else if has_footer && food.iter().all(|i| i.starter) {
             // Starters going ahead of the mains.
             cfg.starter_copies.unwrap_or(cfg.copies)
         } else {
@@ -882,7 +914,8 @@ impl Pos {
     /// Changes nothing on the order. None when no kitchen printer is set up.
     pub fn main_course_job(&self, s: &Session, order_id: i64) -> Result<Option<PrintJob>> {
         let o = self.get_order(s, order_id)?;
-        let mains: Vec<OrderItem> = o.items.iter().filter(|i| i.sent_at.is_some() && !i.starter).cloned().collect();
+        let sent: Vec<OrderItem> = o.items.iter().filter(|i| i.sent_at.is_some() && !i.starter).cloned().collect();
+        let mains = self.drinks_apart(&sent)?.1;
         if mains.is_empty() {
             return invalid("no main courses have been sent to the kitchen yet");
         }

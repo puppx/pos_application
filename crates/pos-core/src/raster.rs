@@ -250,14 +250,14 @@ pub(crate) fn banner(text: &str, dots: usize) -> Bitmap {
         None => (false, text),
     };
     let mut lines = text.split('\n');
-    for (t, px) in [(lines.next(), if huge { 104.0 } else { 56.0 }), (lines.next(), 38.0)] {
+    for (t, px) in [(lines.next(), if huge { 104.0 } else { 42.0 }), (lines.next(), 30.0)] {
         let Some(t) = t.map(str::trim).filter(|t| !t.is_empty()) else { continue };
         let scale = px / em;
         for piece in wrap_dots(t, dots.saturating_sub(24) as f32, scale) {
             parts.push(draw(&piece, scale, dots, 0, true));
         }
     }
-    let pad = 8;
+    let pad = if huge { 8 } else { 5 };
     let rb = dots.div_ceil(8);
     let height = parts.iter().map(|p| p.height).sum::<usize>() + 2 * pad;
     // All black, then each line of text laid in as white ink.

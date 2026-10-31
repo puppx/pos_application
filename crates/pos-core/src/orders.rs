@@ -784,7 +784,9 @@ impl Pos {
         };
         if by_course {
             tx.execute(
-                "UPDATE order_items SET held = 1 WHERE order_id = ?1 AND sent_at IS NULL AND starter = 0",
+                // Drinks go now too, like starters.
+                "UPDATE order_items SET held = 1 WHERE order_id = ?1 AND sent_at IS NULL AND starter = 0
+                   AND product_id NOT IN (SELECT id FROM products WHERE drink = 1)",
                 [order_id],
             )?;
         }

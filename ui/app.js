@@ -69,6 +69,7 @@ const ICONS = {
   users: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>',
   reports: '<path d="M18 20V10M12 20V4M6 20v-6"/>',
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  rail: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
   back: '<path d="M15 18l-6-6 6-6"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -254,9 +255,7 @@ function lockScreen(...kids) {
       h('div', { class: 'brand-mark' }, logoImg()),
       h('div', { class: 'lock-store' }, state.storeName || 'POS'),
       clock, date,
-      h('div', { class: 'lock-foot' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`),
-      // Desktop app only: browsers on other devices just close their tab.
-      TAURI && !state.remote && confirmBtn('⏻  Close POS', 'Tap again to close', async () => { await TAURI.invoke('quit_app'); }, 'quit')),
+      h('div', { class: 'lock-foot' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`)),
     h('div', { class: 'lock-main' }, ...kids)));
 }
 
@@ -314,10 +313,13 @@ function renderLogin() {
   document.addEventListener('keydown', onKey);
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'OK'];
   show();
-  lockScreen(h('div', { class: 'lock-card' },
-    h('h2', {}, 'Enter your PIN'), dots,
-    h('div', { class: 'pinpad' }, keys.map((k) =>
-      h('button', { class: k === 'OK' ? 'go' : k === 'C' ? 'ghost' : '', onclick: () => press(k) }, k)))));
+  lockScreen(h('div', { class: 'lock-stack' },
+    h('div', { class: 'lock-card' },
+      h('h2', {}, 'Enter your PIN'), dots,
+      h('div', { class: 'pinpad' }, keys.map((k) =>
+        h('button', { class: k === 'OK' ? 'go' : k === 'C' ? 'ghost' : '', onclick: () => press(k) }, k)))),
+    // Desktop app only: browsers on other devices just close their tab.
+    TAURI && !state.remote && confirmBtn('Close POS', 'Tap again to close', async () => { await TAURI.invoke('quit_app'); }, 'quit')));
 }
 
 // ---------- shell ----------
@@ -2822,6 +2824,19 @@ document.addEventListener('keydown', (e) => {
   }
 });
 document.getElementById('fullscreen').append(icon('expand', 20));
+// The side menu bar folds away for more room; remembered on this device.
+{
+  const t = document.getElementById('rail-toggle');
+  t.append(icon('rail', 22));
+  const set = (hidden) => {
+    document.body.classList.toggle('rail-hidden', hidden);
+    try { localStorage.setItem('pos.railHidden', hidden ? '1' : '0'); } catch {}
+  };
+  let saved = false;
+  try { saved = localStorage.getItem('pos.railHidden') === '1'; } catch {}
+  set(saved);
+  t.onclick = () => set(!document.body.classList.contains('rail-hidden'));
+}
 // On-screen keyboard: on by default on the main till, off on other devices (they have their own).
 {
   const kb = document.getElementById('keyboard');

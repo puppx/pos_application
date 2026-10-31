@@ -175,6 +175,10 @@ main { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
 .seg button { border: 0; background: transparent; min-height: 40px; border-radius: 6px; color: var(--ink-2); }
 .seg button.on { background: var(--ink); color: #fff; }
 
+/* Side menu bar folded away (hamburger in the top bar). */
+body.rail-hidden #rail { display: none; }
+#rail-toggle.on { background: var(--ink); color: #fff; }
+
 /* ---------- lock screen (setup / login) ---------- */
 body.locked #rail, body.locked #bar { display: none !important; }
 body.locked main { padding: 0; }
@@ -188,8 +192,9 @@ body.locked main { padding: 0; }
 .lock-clock { white-space: nowrap; font-size: clamp(52px, 6.8vw, 88px); font-weight: 400; letter-spacing: -.02em; line-height: 1; margin-top: 30px; font-variant-numeric: tabular-nums; }
 .lock-date { font-size: 18px; color: var(--rail-ink); }
 .lock-foot { margin-top: auto; color: #857f6d; font-size: 14px; padding-top: 40px; }
-.lock-side button.quit { align-self: flex-start; margin-top: 14px; background: transparent; border: 1px solid #4a4536; color: var(--rail-ink); }
-.lock-side button.quit:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+.lock-stack { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+button.quit { min-width: 180px; background: transparent; border: 1px solid var(--line-2); color: var(--muted); }
+button.quit:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 .lock-main { display: grid; place-items: center; padding: 24px; background: var(--bg); }
 .lock-card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 32px; display: flex; flex-direction: column; align-items: center; gap: 18px; width: min(380px, 100%); }
 .lock-card.stack { align-items: stretch; }
@@ -457,6 +462,8 @@ pre.report { background: #fff; border: 1px dashed var(--line-2); border-radius: 
   .order { grid-template-columns: 150px minmax(0, 1fr) 340px; }
 }
 @media (max-width: 900px) {
+  body.rail-hidden #rail { display: flex; }
+  #rail-toggle { display: none; }
   body { flex-direction: column-reverse; }
   #rail { width: 100%; flex-direction: row; padding: 6px; height: auto; }
   #rail .brand-mark { display: none; }

@@ -250,14 +250,14 @@ pub(crate) fn banner(text: &str, dots: usize) -> Bitmap {
         None => (false, text),
     };
     let mut lines = text.split('\n');
-    for (t, px) in [(lines.next(), if huge { 104.0 } else { 42.0 }), (lines.next(), 30.0)] {
+    for (t, px) in [(lines.next(), if huge { 104.0 } else { 32.0 }), (lines.next(), 26.0)] {
         let Some(t) = t.map(str::trim).filter(|t| !t.is_empty()) else { continue };
         let scale = px / em;
         for piece in wrap_dots(t, dots.saturating_sub(24) as f32, scale) {
             parts.push(draw(&piece, scale, dots, 0, true));
         }
     }
-    let pad = if huge { 8 } else { 5 };
+    let pad = if huge { 8 } else { 4 };
     let rb = dots.div_ceil(8);
     let height = parts.iter().map(|p| p.height).sum::<usize>() + 2 * pad;
     // All black, then each line of text laid in as white ink.
@@ -333,9 +333,10 @@ mod tests {
 
     #[test]
     fn banner_is_a_black_bar_with_white_text() {
-        let bar = banner("CURRY\nแกง", 504);
+        let bar = banner("CURRY / แกง", 504);
         assert_eq!(bar.width, 504);
-        assert!(bar.height > 100 && bar.height < 220, "{}", bar.height);
+        // One slim line of text.
+        assert!(bar.height > 30 && bar.height < 80, "{}", bar.height);
         let black = (0..bar.height).flat_map(|y| (0..504).map(move |x| (x, y))).filter(|&(x, y)| bar.get(x, y)).count();
         let total = 504 * bar.height;
         assert!(black * 100 / total > 70, "mostly black: {black}/{total}");

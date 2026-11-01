@@ -2444,8 +2444,16 @@ function teamsCard() {
     h('h3', {}, 'Kitchen teams'),
     h('label', { class: 'switch' }, on, h('span', {}, ''), 'Use kitchen teams'),
     body);
+  // Language of the team's bar on tickets (setting team_names).
+  const lang = h('select', {}, [['both', 'English / Thai'], ['english', 'English only'], ['thai', 'Thai only']].map(([v, t]) => h('option', { value: v }, t)));
+  invoke('get_setting', { key: 'team_names' }).then((v) => (lang.value = v || 'both')).catch(() => {});
+  lang.onchange = act(async () => {
+    await call('set_setting', { key: 'team_names', value: lang.value });
+    toast(`Team names on tickets: ${lang.selectedOptions[0].textContent}`);
+  });
   setKids(body,
     h('label', { class: 'switch' }, split, h('span', {}, ''), 'Print a separate ticket for each team'),
+    h('label', { class: 'field' }, 'Team name on tickets', lang),
     h('div', { class: 'muted' }, 'When on, each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes; off = one ticket for everything, still with each team\'s header over its dishes. ' +
       'Choose a team for each category (Menu → tap the category) or for single items. Items without a team print on a plain ticket last. ' +
       'A team is where a ticket prints; "Starter" on an item is when it is sent.'),

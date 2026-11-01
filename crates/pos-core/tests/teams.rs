@@ -52,7 +52,7 @@ fn dine_in(table: i64) -> NewOrder {
 }
 
 fn heads(tickets: &[KitchenTicket]) -> Vec<Option<&str>> {
-    tickets.iter().map(|t| t.banner.as_deref().map(|b| b.lines().next().unwrap())).collect()
+    tickets.iter().map(|t| t.banner.as_deref().map(|b| b.split(" / ").next().unwrap())).collect()
 }
 
 #[test]
@@ -110,9 +110,9 @@ fn one_ticket_per_team_each_with_its_own_header() {
     assert_eq!(dishes(&tickets[0]), ["Soup"]);
     assert_eq!(dishes(&tickets[2]), ["Green curry"]);
     assert_eq!(dishes(&tickets[4]), ["Cola"]);
-    assert_eq!(tickets[2].banner.as_deref(), Some("CURRY\nแกง"), "the Thai name goes under it");
+    assert_eq!(tickets[2].banner.as_deref(), Some("CURRY / แกง"), "English and Thai on one line");
     let text = tickets[2].to_text(42);
-    assert!(text.starts_with("[ CURRY ]") || text.trim_start().starts_with("[ CURRY ]"), "{text}");
+    assert!(text.trim_start().starts_with("[ CURRY / แกง ]"), "{text}");
     assert!(text.contains("2 x Green curry") && !text.contains("Steak"), "{text}");
 
     // One print job: every ticket back to back, each with its own header image and cut.
@@ -238,7 +238,7 @@ fn separate_team_tickets_can_be_switched_off() {
     assert!(t[0].banner.is_none() && t[0].items.len() == 2);
     // ...still with each team's header over its dishes.
     let text = t[0].to_text(42);
-    let (starter, main) = (text.find("[ STARTER ]").expect(&text), text.find("[ MAIN ]").expect(&text));
+    let (starter, main) = (text.find("[ STARTER /").expect(&text), text.find("[ MAIN /").expect(&text));
     assert!(starter < text.find("Soup").unwrap() && text.find("Soup").unwrap() < main && main < text.find("Steak").unwrap(), "{text}");
     let job = k.pos.kitchen_job(&k.s, o.id, &sent, false).unwrap().unwrap();
     assert_eq!(job.bytes().windows(4).filter(|w| *w == [0x1D, b'V', 66, 0]).count(), 1, "one cut");
@@ -331,4 +331,18 @@ fn teams_can_be_switched_off() {
     // The teams are still there for when they are switched back on.
     k.pos.set_setting(&k.s, "teams_on", "1").unwrap();
     assert_eq!(k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap().len(), 2);
+}
+
+#[test]
+fn team_bar_language_is_a_setting() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.green.id, 1, None, None, &[]).unwrap();
+    let sent = k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    let bar = |k: &Kit| k.pos.kitchen_tickets(&k.s, o.id, &sent, false).unwrap()[0].banner.clone().unwrap();
+    assert_eq!(bar(&k), "CURRY / แกง");
+    k.pos.set_setting(&k.s, "team_names", "english").unwrap();
+    assert_eq!(bar(&k), "CURRY");
+    k.pos.set_setting(&k.s, "team_names", "thai").unwrap();
+    assert_eq!(bar(&k), "แกง");
 }

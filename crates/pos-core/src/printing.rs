@@ -756,19 +756,18 @@ impl Pos {
     /// `items` split by the team that cooks them, in team order; items with
     /// no team come last. Each group is (the team's header, its items).
     /// The team is looked up now, so a menu change applies to orders already open.
-    fn team_groups(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<(Option<String>, Vec<OrderItem>)>> {
+    fn team_groups(&self, items: &[OrderItem]) -> Result<Vec<(Option<String>, Vec<OrderItem>)>> {
         // Settings → Kitchen teams can switch teams off altogether.
         if self.setting("teams_on")?.as_deref() == Some("0") {
             return Ok(vec![(None, items.to_vec())]);
         }
         let teams = crate::teams::load_teams(&self.conn)?;
+        let label = self.team_label()?;
         let mut stmt = self.conn.prepare_cached("SELECT team_id FROM products WHERE id = ?1")?;
         let mut groups: Vec<(Option<String>, Vec<OrderItem>)> = teams
             .iter()
             .map(|t| {
-                let (main, sub) = names.pick(&t.name, t.name_alt.as_deref());
-                let main = main.to_uppercase();
-                (Some(sub.map_or(main.clone(), |s| format!("{main}\n{s}"))), Vec::new())
+                (Some(label(&t.name, t.name_alt.as_deref())), Vec::new())
             })
             .collect();
         groups.push((None, Vec::new()));
@@ -795,10 +794,9 @@ impl Pos {
         if drinks.is_empty() {
             return self.split_by_team(base, items, names);
         }
-        let (main, sub) = names.pick("DRINKS", Some("เครื่องดื่ม"));
         let mut out = vec![KitchenTicket {
             items: self.ticket_items(&drinks, names)?,
-            banner: Some(sub.map_or(main.to_string(), |x| format!("{main}\n{x}"))),
+            banner: Some(self.team_label()?("Drinks", Some("เครื่องดื่ม"))),
             footer: None,
             ..base.clone()
         }];
@@ -807,6 +805,24 @@ impl Pos {
             out.extend(self.split_by_team(base, &food, names)?);
         }
         Ok(out)
+    }
+
+    /// How a team's name shows on its bar, one line: "MAIN", "MAIN / จานหลัก"
+    /// or "จานหลัก" (setting `team_names`: english, both or thai; both by
+    /// default). A team without a Thai name always shows its English one.
+    fn team_label(&self) -> Result<impl Fn(&str, Option<&str>) -> String> {
+        let names = match self.setting("team_names")?.as_deref() {
+            Some("english") => PrintNames::English,
+            Some("thai") => PrintNames::Thai,
+            _ => PrintNames::Both,
+        };
+        Ok(move |name: &str, alt: Option<&str>| {
+            let upper = name.to_uppercase();
+            match names.pick(&upper, alt) {
+                (n, Some(a)) => format!("{n} / {a}"),
+                (n, None) => n.to_string(),
+            }
+        })
     }
 
     /// `items` split into (drinks, everything else), looked up on the menu now.
@@ -822,7 +838,7 @@ impl Pos {
 
     fn split_by_team(&self, base: KitchenTicket, items: &[OrderItem], names: PrintNames) -> Result<Vec<KitchenTicket>> {
         // Settings → Kitchen teams can switch the separate tickets off.
-        let groups = self.team_groups(items, names)?;
+        let groups = self.team_groups(items)?;
         if groups.len() <= 1 && groups.iter().all(|g| g.0.is_none()) {
             return Ok(vec![base]);
         }
@@ -929,8 +945,8 @@ impl Pos {
         let tickets = if cfg.call_table_only {
             // Just the table, in huge letters: one ticket per team that has a
             // main waiting (headed with the team), or one listing the teams.
-            let groups = self.team_groups(&mains, names)?;
-            let teams: Vec<String> = groups.iter().filter_map(|g| g.0.as_ref().map(|b| b.lines().next().unwrap_or("").to_string())).collect();
+            let groups = self.team_groups(&mains)?;
+            let teams: Vec<String> = groups.iter().filter_map(|g| g.0.as_ref().map(|b| b.split(" / ").next().unwrap_or("").to_string())).collect();
             let split = self.setting("teams_split")?.as_deref() != Some("0");
             let bare = KitchenTicket { items: vec![], ..base };
             if teams.is_empty() {
@@ -994,11 +1010,10 @@ impl Pos {
         }
         let names = cfg.names.unwrap_or(PrintNames::Both);
         let time = chrono::Local::now().format("%H:%M").to_string();
+        let label = self.team_label()?;
         let tickets: Vec<KitchenTicket> = teams
             .iter()
             .map(|t| {
-                let (main, sub) = names.pick(&t.name, t.name_alt.as_deref());
-                let main = main.to_uppercase();
                 let (dish, dish_alt) = names.pick("Sample dish", Some("เมนูตัวอย่าง"));
                 KitchenTicket {
                     title: "TEST PRINT".into(),
@@ -1019,7 +1034,7 @@ impl Pos {
                     footer: None,
                     brief: false,
                     large: cfg.large_text,
-                    banner: Some(sub.map_or(main.clone(), |x| format!("{main}\n{x}"))),
+                    banner: Some(label(&t.name, t.name_alt.as_deref())),
                 }
             })
             .collect();

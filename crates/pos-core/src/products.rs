@@ -318,6 +318,12 @@ impl Pos {
         let used: bool =
             tx.query_row("SELECT EXISTS (SELECT 1 FROM order_items WHERE product_id = ?1)", [id], |r| r.get(0))?;
         tx.execute("DELETE FROM product_option_groups WHERE product_id = ?1", [id])?;
+        // A set's own sections go with it, and the item leaves any set it was in.
+        tx.execute(
+            "DELETE FROM set_section_items WHERE product_id = ?1 OR section_id IN (SELECT id FROM set_sections WHERE set_id = ?1)",
+            [id],
+        )?;
+        tx.execute("DELETE FROM set_sections WHERE set_id = ?1", [id])?;
         if used {
             tx.execute(
                 "UPDATE products SET active = 0, deleted = 1, sku = NULL, barcode = NULL, updated_at = unixepoch() WHERE id = ?1",

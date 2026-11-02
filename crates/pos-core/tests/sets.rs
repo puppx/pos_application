@@ -158,3 +158,22 @@ fn set_only_items_stay_off_the_order_screen_and_sets_survive_backups() {
     assert_eq!(secs[0].items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Soup", "Satay"]);
     assert_eq!(secs[2].items[0].product_id, rice.id);
 }
+
+#[test]
+fn sets_and_their_dishes_can_be_deleted() {
+    let mut k = setup();
+    // A dish in a set: deleting it takes it out of the set.
+    assert!(k.pos.delete_product(&k.s, k.satay.id).unwrap());
+    let secs = k.pos.get_set(&k.s, k.set.id).unwrap();
+    assert_eq!(secs[0].items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Soup"]);
+    // A set never ordered: gone for good, sections and all.
+    assert!(k.pos.delete_product(&k.s, k.set.id).unwrap());
+    assert!(k.pos.get_set(&k.s, k.set.id).unwrap().is_empty());
+    // A set already on an order: hidden instead, the order keeps it.
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_set(&k.s, o.id, k.set.id, &picks(&k, k.soup.id), None).unwrap();
+    assert!(!k.pos.delete_product(&k.s, k.set.id).unwrap());
+    assert_eq!(k.pos.get_order(&k.s, o.id).unwrap().items.len(), 4);
+    assert!(!k.pos.menu(&k.s).unwrap().iter().any(|p| p.id == k.set.id));
+}

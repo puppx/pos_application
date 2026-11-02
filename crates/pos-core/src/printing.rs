@@ -258,6 +258,9 @@ pub fn system_printers() -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketItem {
+    /// The set menu this dish belongs to ("SET A"); its dishes print together
+    /// under the set's name, each section under its own rule.
+    pub set: Option<String>,
     /// The team header to print above this dish when every team shares one
     /// ticket (separate team tickets switched off).
     pub team: Option<String>,
@@ -460,6 +463,11 @@ pub(crate) fn cols(text: &str) -> usize {
     text.chars().filter(|c| !is_mark(*c)).count()
 }
 
+/// The lines the kitchen cooks: everything but a set's own (billing) line.
+pub(crate) fn kitchen_only(items: &[OrderItem]) -> Vec<OrderItem> {
+    items.iter().filter(|i| !i.is_set).cloned().collect()
+}
+
 /// The ESC/POS bytes of several tickets one after another (each ends with a cut).
 fn escpos_all(tickets: &[KitchenTicket], cfg: &PrinterConfig) -> Vec<u8> {
     tickets.iter().flat_map(|t| t.to_escpos(cfg.width, cfg.bold)).collect()
@@ -522,6 +530,7 @@ impl KitchenTicket {
         let mut current: Option<Option<&str>> = None;
         let mut team: Option<&str> = None;
         let mut first = true;
+        let mut set: Option<&str> = None;
         for it in &self.items {
             if it.team.as_deref() != team {
                 match &it.team {
@@ -530,6 +539,15 @@ impl KitchenTicket {
                     None => push(Line::new(Size::Normal, false, false, rule('=', width))),
                 }
                 team = it.team.as_deref();
+                current = None;
+                first = true;
+            }
+            // A set's dishes: the set's name between double rules.
+            if it.set.as_deref() != set {
+                if let Some(name) = &it.set {
+                    push(Line::new(small, true, true, titled_rule(&format!("SET: {name}"), '=', width)));
+                }
+                set = it.set.as_deref();
                 current = None;
                 first = true;
             }
@@ -689,8 +707,9 @@ impl Pos {
 
     /// Ticket for the given lines of an order (normally what was just sent).
     pub fn kitchen_ticket(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<KitchenTicket> {
+        let items = &kitchen_only(items);
         let o = self.get_order(s, order_id)?;
-        let first_round = !reprint && o.items.iter().all(|i| i.sent_at.is_none() || items.iter().any(|x| x.id == i.id));
+        let first_round = !reprint && o.items.iter().filter(|i| !i.is_set).all(|i| i.sent_at.is_none() || items.iter().any(|x| x.id == i.id));
         let mut details = Vec::new();
         if let Some(f) = &o.floor_name {
             details.push(f.clone());
@@ -734,23 +753,37 @@ impl Pos {
     }
 
     /// The dishes of a ticket, grouped by menu category.
+    /// Dishes in menu order, then each set's dishes together under the
+    /// set's name, section by section.
     fn ticket_items(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<TicketItem>> {
-        Ok(self
-            .by_category(items, names)?
-            .into_iter()
-            .map(|(category, i)| {
-                let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-                TicketItem {
-                    team: None,
-                    category,
-                    qty: i.qty,
-                    name: name.to_string(),
-                    name_alt: name_alt.map(str::to_string),
-                    options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
-                    note: i.note.clone(),
-                }
-            })
-            .collect())
+        let (dishes, in_sets): (Vec<OrderItem>, Vec<OrderItem>) = kitchen_only(items).into_iter().partition(|i| i.parent_id.is_none());
+        let item = |i: &OrderItem, category: Option<String>, set: Option<String>| {
+            let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
+            TicketItem {
+                team: None,
+                set,
+                category,
+                qty: i.qty,
+                name: name.to_string(),
+                name_alt: name_alt.map(str::to_string),
+                options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
+                note: i.note.clone(),
+            }
+        };
+        let mut out: Vec<TicketItem> = self.by_category(&dishes, names)?.into_iter().map(|(c, i)| item(i, c, None)).collect();
+        let mut parents: Vec<i64> = in_sets.iter().filter_map(|i| i.parent_id).collect();
+        parents.dedup();
+        let mut stmt = self.conn.prepare_cached("SELECT name, name_alt, qty FROM order_items WHERE id = ?1")?;
+        for parent in parents {
+            let (name, alt, qty): (String, Option<String>, i64) = stmt.query_row([parent], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let label = names.inline(&name.to_uppercase(), alt.as_deref());
+            let set = if qty > 1 { format!("{qty} x {label}") } else { label };
+            for i in in_sets.iter().filter(|i| i.parent_id == Some(parent)) {
+                let section = i.section_name.as_deref().map(|n| names.inline(&n.to_uppercase(), i.section_alt.as_deref()));
+                out.push(item(i, section, Some(set.clone())));
+            }
+        }
+        Ok(out)
     }
 
     /// `items` split by the team that cooks them, in team order; items with
@@ -788,6 +821,7 @@ impl Pos {
     /// plain ticket of `kitchen_ticket`.
     /// Drinks come first, on their own DRINKS ticket.
     pub fn kitchen_tickets(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<Vec<KitchenTicket>> {
+        let items = &kitchen_only(items);
         let mut base = self.kitchen_ticket(s, order_id, items, reprint)?;
         let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
         let (drinks, food) = self.drinks_apart(items)?;
@@ -872,13 +906,14 @@ impl Pos {
             .iter()
             .map(|i| {
                 let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-                TicketItem { team: None, category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None }
+                TicketItem { team: None, set: None, category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None }
             })
             .collect()
     }
 
     /// Print job for `items`, or None when no kitchen printer is set up.
     pub fn kitchen_job(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<Option<PrintJob>> {
+        let items = &kitchen_only(items);
         let cfg = self.kitchen_printer()?;
         if cfg.target == PrinterTarget::None || items.is_empty() {
             return Ok(None);
@@ -930,7 +965,7 @@ impl Pos {
     /// Changes nothing on the order. None when no kitchen printer is set up.
     pub fn main_course_job(&self, s: &Session, order_id: i64) -> Result<Option<PrintJob>> {
         let o = self.get_order(s, order_id)?;
-        let sent: Vec<OrderItem> = o.items.iter().filter(|i| i.sent_at.is_some() && !i.starter).cloned().collect();
+        let sent: Vec<OrderItem> = o.items.iter().filter(|i| i.sent_at.is_some() && !i.starter && !i.is_set).cloned().collect();
         let mains = self.drinks_apart(&sent)?.1;
         if mains.is_empty() {
             return invalid("no main courses have been sent to the kitchen yet");
@@ -1023,7 +1058,7 @@ impl Pos {
                     time: time.clone(),
                     staff: s.name.clone(),
                     items: vec![TicketItem {
-                        team: None,
+                        team: None, set: None,
                         category: None,
                         qty: 1,
                         name: dish.to_string(),
@@ -1060,7 +1095,7 @@ impl Pos {
             staff: s.name.clone(),
             items: vec![
                 TicketItem {
-                    team: None,
+                    team: None, set: None,
                     category: Some(names.inline("Starters", Some("อาหารเรียกน้ำย่อย"))),
                     qty: 1,
                     name: soup,
@@ -1069,7 +1104,7 @@ impl Pos {
                     note: None,
                 },
                 TicketItem {
-                    team: None,
+                    team: None, set: None,
                     category: Some(names.inline("Mains", Some("อาหารจานหลัก"))),
                     qty: 2,
                     name: burger,
@@ -1194,8 +1229,8 @@ mod tests {
             time: "19:05".into(),
             staff: "Sam".into(),
             items: vec![
-                TicketItem { team: None, category: None, qty: 2, name: "Burger".into(), name_alt: None, options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
-                TicketItem { team: None, category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None },
+                TicketItem { team: None, set: None, category: None, qty: 2, name: "Burger".into(), name_alt: None, options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
+                TicketItem { team: None, set: None, category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None },
             ],
             footer: None,
             brief: false,
@@ -1228,7 +1263,7 @@ mod tests {
         let last = lines.last().unwrap();
         assert!(last.text == "DINE-IN T3" && last.size == Size::Big && last.center);
         let long = KitchenTicket {
-            items: vec![TicketItem { team: None, category: None, qty: 1, name: "Chicken satay with peanut sauce".into(), name_alt: None, options: vec![], note: None }],
+            items: vec![TicketItem { team: None, set: None, category: None, qty: 1, name: "Chicken satay with peanut sauce".into(), name_alt: None, options: vec![], note: None }],
             ..t
         };
         assert!(long.lines(42).iter().filter(|l| l.size == Size::Big).all(|l| l.text.chars().count() <= 21));

@@ -511,6 +511,24 @@ commands! {
         app.with_session(t, |pos, s| pos.save_teams(s, &teams))
     }
 
+    /// Set menus: the sections, saving them, items only sold in sets, and
+    /// adding a set (with the chosen dishes) to an order.
+    fn get_set(app, t, set_id: i64) -> Vec<SetSection> {
+        app.with_session(t, |pos, s| pos.get_set(s, set_id))
+    }
+
+    fn save_set(app, t, set_id: i64, sections: Vec<SetSectionInput>) -> Vec<SetSection> {
+        app.with_session(t, |pos, s| pos.save_set(s, set_id, &sections))
+    }
+
+    fn set_set_only(app, t, id: i64, set_only: bool) -> () {
+        app.with_session(t, |pos, s| pos.set_set_only(s, id, set_only))
+    }
+
+    fn add_set(app, t, order_id: i64, set_id: i64, picks: Vec<SetPick>, note: Option<String>) -> Order {
+        app.with_session(t, |pos, s| pos.add_set(s, order_id, set_id, &picks, note.as_deref()))
+    }
+
     fn set_drink(app, t, id: i64, drink: bool) -> () {
         app.with_session(t, |pos, s| pos.set_drink(s, id, drink))
     }

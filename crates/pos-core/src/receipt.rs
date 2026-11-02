@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
 use crate::printing::{rule, render_escpos, render_text, wrap, Line, Size};
-use crate::{Order, OrderType, Permission, Pos, PosError, PrintJob, PrintNames, PrinterConfig, PrinterTarget, Result, Session};
+use crate::{Order, OrderItem, OrderType, Permission, Pos, PosError, PrintJob, PrintNames, PrinterConfig, PrinterTarget, Result, Session};
 
 const SETTING_KEY: &str = "_receipt_printer";
 
@@ -397,11 +397,13 @@ impl Pos {
             Some(PrintNames::Both | PrintNames::Thai) => PrintNames::Both,
             _ => PrintNames::English,
         };
+        // A set shows as one line at its price; its dishes are for the kitchen.
+        let billed: Vec<OrderItem> = o.items.iter().filter(|i| i.parent_id.is_none()).cloned().collect();
         let lines = self
-            .by_category(&o.items, names)?
+            .by_category(&billed, names)?
             .into_iter()
             .map(|(_, i)| ReceiptLine {
-                                qty: i.qty,
+                qty: i.qty,
                 name: i.name.clone(),
                 name_alt: names.pick(&i.name, i.name_alt.as_deref()).1.map(str::to_string),
                 options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
@@ -410,7 +412,7 @@ impl Pos {
             })
             .collect();
         let mut tax_classes: Vec<TaxClass> = Vec::new();
-        for i in &o.items {
+        for i in &billed {
             let gross = i.line_total_cents + if o.tax_incl { 0 } else { i.tax_cents };
             let at = match tax_classes.iter().position(|c| c.rate_bp == i.tax_rate_bp) {
                 Some(at) => at,

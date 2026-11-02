@@ -218,7 +218,7 @@ impl Pos {
                                    ELSE ((oi.unit_price_cents * oi.qty - oi.discount_cents) * oi.tax_rate_bp + 5000) / 10000 END) AS total,
                         SUM(oi.unit_price_cents * oi.qty - oi.discount_cents) AS net,
                         SUM(oi.qty) AS items,
-                        SUM(oi.sent_at IS NULL AND oi.held = 0) AS unsent,
+                        SUM(oi.sent_at IS NULL AND oi.held = 0 AND oi.is_set = 0) AS unsent,
                         SUM(oi.sent_at IS NULL AND oi.held = 1) AS held
                  FROM order_items oi JOIN orders oo ON oo.id = oi.order_id
                  WHERE oo.status = 'open'

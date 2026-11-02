@@ -124,6 +124,16 @@ Categories named "Drinks", "Beverages" or "เครื่องดื่ม" st
 
 Settings → Kitchen teams → **Use kitchen teams** switches teams off without deleting them (tickets print as before teams).
 
+### Set menus
+
+Menu → **+ Set menu**: a name, price and tax, and sections (Starter, Main and Side to start with; rename, add, remove or reorder them).
+Each section lists the dishes to choose from: add existing menu items, or make a new dish just for sets (marked "set only", so it has no tile of its own).
+"Choose" says how many dishes the customer picks from the section (set it to the number of dishes to include them all), and "Starter course" sends that section with the starters.
+Dishes with choices or required options cannot go in a set.
+
+On the order screen the set's tile opens a picker; the order shows the set with its dishes under it.
+The bill and receipt show only the set and its price. Kitchen tickets print the dishes under `SET: <name>` between `=` rules, each section under a `-` rule, still split by team, drinks and course like any other dish.
+
 ### Thai and English names
 
 Give a menu item a **Thai name** (in the item editor or the 4th

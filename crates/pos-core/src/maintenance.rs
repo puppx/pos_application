@@ -128,6 +128,23 @@ pub struct MenuItem {
     /// Kitchen team, by name (restoring creates any that are missing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    /// Only sold inside set menus (v0.9.6+).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub set_only: bool,
+    /// A set menu's sections (v0.9.6+); dishes are positions in `items`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub set: Vec<MenuSetSection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MenuSetSection {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_alt: Option<String>,
+    pub pick: i64,
+    #[serde(default)]
+    pub starter: bool,
+    pub items: Vec<usize>,
 }
 
 /// What a menu restore created.
@@ -192,7 +209,9 @@ fn count(tx: &Transaction, sql: &str) -> Result<usize> {
 fn clear_menu(tx: &Transaction) -> Result<usize> {
     let items = count(tx, "SELECT COUNT(*) FROM products WHERE active = 1")?;
     tx.execute_batch(
-        "DELETE FROM product_option_groups;
+        "DELETE FROM set_section_items;
+         DELETE FROM set_sections;
+         DELETE FROM product_option_groups;
          DELETE FROM stock_movements WHERE order_id IS NULL;
          DELETE FROM product_variants WHERE id NOT IN (SELECT variant_id FROM order_items WHERE variant_id IS NOT NULL);
          UPDATE product_variants SET active = 0;
@@ -250,7 +269,7 @@ impl Pos {
         let mut items: Vec<(i64, MenuItem)> = self
             .conn
             .prepare(
-                "SELECT p.id, p.name, p.category_id, p.sku, p.barcode, p.price_cents, p.cost_cents, p.tax_rate_bp, p.track_stock, p.stock_qty, p.starter, p.name_alt, p.prep, t.name
+                "SELECT p.id, p.name, p.category_id, p.sku, p.barcode, p.price_cents, p.cost_cents, p.tax_rate_bp, p.track_stock, p.stock_qty, p.starter, p.name_alt, p.prep, t.name, p.set_only
                  FROM products p LEFT JOIN teams t ON t.id = p.team_id AND t.active = 1
                  WHERE p.active = 1 ORDER BY p.category_id IS NULL, p.category_id, p.sort_order, p.name",
             )?
@@ -273,6 +292,8 @@ impl Pos {
                         name_alt: r.get(11)?,
                         prep: r.get(12)?,
                         team: r.get(13)?,
+                        set_only: r.get(14)?,
+                        set: vec![],
                     },
                 ))
             })?
@@ -292,6 +313,27 @@ impl Pos {
                 .query_map([*id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             it.option_groups = groups.into_iter().filter(|g| active_groups.contains(g)).collect();
+        }
+        // Set menus: their dishes by position in the file.
+        let position: HashMap<i64, usize> = items.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect();
+        for (id, item) in &mut items {
+            let id = *id;
+            let sections: Vec<(i64, MenuSetSection)> = self
+                .conn
+                .prepare_cached("SELECT id, name, name_alt, pick, starter FROM set_sections WHERE set_id = ?1 ORDER BY sort_order, id")?
+                .query_map([id], |r| {
+                    Ok((r.get(0)?, MenuSetSection { name: r.get(1)?, name_alt: r.get(2)?, pick: r.get(3)?, starter: r.get(4)?, items: vec![] }))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            for (sid, mut sec) in sections {
+                let dishes: Vec<i64> = self
+                    .conn
+                    .prepare_cached("SELECT product_id FROM set_section_items WHERE section_id = ?1 ORDER BY sort_order")?
+                    .query_map([sid], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                sec.items = dishes.iter().filter_map(|d| position.get(d).copied()).collect();
+                item.set.push(sec);
+            }
         }
         Ok(MenuBackup {
             format: MENU_FORMAT.into(),
@@ -376,6 +418,7 @@ impl Pos {
             }
             groups.insert(g.key, gid);
         }
+        let mut pids = Vec::with_capacity(backup.items.len());
         for (pos, it) in backup.items.iter().enumerate() {
             let name = crate::products::validate(&it.name, it.price_cents, it.cost_cents, it.tax_rate_bp)?;
             let code = |c: &Option<String>| c.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
@@ -401,6 +444,10 @@ impl Pos {
             )
             .map_err(|e| crate::error::map_unique(e, &format!("a SKU or barcode on \"{name}\" is used twice")))?;
             let pid = tx.last_insert_rowid();
+            pids.push(pid);
+            if it.set_only || !it.set.is_empty() {
+                tx.execute("UPDATE products SET set_only = ?2, is_set = ?3 WHERE id = ?1", params![pid, it.set_only, !it.set.is_empty()])?;
+            }
             if it.stock_qty != 0 {
                 tx.execute(
                     "INSERT INTO stock_movements (product_id, delta, reason, user_id) VALUES (?1, ?2, 'menu restore', ?3)",
@@ -422,6 +469,27 @@ impl Pos {
                         "INSERT OR IGNORE INTO product_option_groups (product_id, group_id, sort_order) VALUES (?1, ?2, ?3)",
                         params![pid, gid, j as i64],
                     )?;
+                }
+            }
+        }
+        // Set menus, now that every dish exists.
+        for (it, &pid) in backup.items.iter().zip(&pids) {
+            for (i, sec) in it.set.iter().enumerate() {
+                if sec.name.trim().is_empty() || !(1..=10).contains(&sec.pick) {
+                    return invalid(format!("a section of the set \"{}\" is not valid", it.name));
+                }
+                tx.execute(
+                    "INSERT INTO set_sections (set_id, name, name_alt, sort_order, pick, starter) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![pid, sec.name.trim(), alt(&sec.name_alt, 40)?, i as i64, sec.pick, sec.starter],
+                )?;
+                let sid = tx.last_insert_rowid();
+                for (j, &d) in sec.items.iter().enumerate() {
+                    if let Some(dish) = pids.get(d) {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO set_section_items (section_id, product_id, sort_order) VALUES (?1, ?2, ?3)",
+                            params![sid, dish, j as i64],
+                        )?;
+                    }
                 }
             }
         }

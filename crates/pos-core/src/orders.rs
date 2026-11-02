@@ -14,7 +14,7 @@ use crate::variants::resolve_variant;
 use crate::{Permission, Pos, PosError, Result, Session};
 
 const MAX_QTY: i64 = 1_000;
-const MAX_ITEMS: i64 = 300;
+pub(crate) const MAX_ITEMS: i64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,6 +128,13 @@ pub struct OrderItem {
     /// unit price x qty - discount, before tax.
     pub line_total_cents: i64,
     pub tax_cents: i64,
+    /// A set menu's line: priced, on the bill, never on kitchen tickets.
+    pub is_set: bool,
+    /// A dish inside a set: the set's line. Free, on kitchen tickets only.
+    pub parent_id: Option<i64>,
+    /// The set section it was chosen from, e.g. "Main" / "จานหลัก".
+    pub section_name: Option<String>,
+    pub section_alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -225,7 +232,7 @@ fn parse_type(s: &str) -> OrderType {
     }
 }
 
-fn opt_text(v: &Option<String>, max: usize, what: &str) -> Result<Option<String>> {
+pub(crate) fn opt_text(v: &Option<String>, max: usize, what: &str) -> Result<Option<String>> {
     let v = v.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if let Some(t) = v {
         if t.chars().count() > max {
@@ -271,7 +278,7 @@ fn status_of(conn: &Connection, id: i64) -> Result<String> {
         .ok_or(PosError::NotFound)
 }
 
-fn require_open(conn: &Connection, id: i64) -> Result<()> {
+pub(crate) fn require_open(conn: &Connection, id: i64) -> Result<()> {
     if status_of(conn, id)? != "open" {
         return invalid("this order is already closed");
     }
@@ -291,7 +298,7 @@ fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
 const TABLE_BUSY: &str = "that table already has an open order";
 
 const ITEM_COLS: &str =
-    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt, prep, prep_sent_at";
+    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt, prep, prep_sent_at, is_set, parent_id, section_name, section_alt";
 
 fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
     let (price, rate, qty, disc): (i64, i64, i64, i64) = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
@@ -315,6 +322,10 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         prep_sent_at: r.get(14)?,
         line_total_cents: net,
         tax_cents: tax_of(net, rate),
+        is_set: r.get(15)?,
+        parent_id: r.get(16)?,
+        section_name: r.get(17)?,
+        section_alt: r.get(18)?,
     })
 }
 
@@ -380,7 +391,7 @@ pub(crate) const SUMMARY_SQL: &str = "
                       + (SUM(i.unit_price_cents * i.qty - i.discount_cents) * o.service_bp + 5000) / 10000
                FROM order_items i WHERE i.order_id = o.id), 0),
            (SELECT COALESCE(SUM(qty), 0) FROM order_items i WHERE i.order_id = o.id),
-           (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 0),
+           (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 0 AND i.is_set = 0),
            (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 1)
     FROM orders o
     JOIN users u ON u.id = o.opened_by
@@ -609,10 +620,10 @@ impl Pos {
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
         let (name, base, rate, starter, alt, prep): (String, i64, i64, bool, Option<String>, bool) = tx
-            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep FROM products WHERE id = ?1 AND active = 1")?
+            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep FROM products WHERE id = ?1 AND active = 1 AND is_set = 0")?
             .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
             .optional()?
-            .ok_or_else(|| PosError::Validation("that item is not available".into()))?;
+            .ok_or_else(|| PosError::Validation("that item is not available (a set menu needs its dishes chosen)".into()))?;
         // A tax rate chosen for the whole order applies to new lines too.
         let order_tax: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
         let rate = order_tax.unwrap_or(rate);
@@ -642,7 +653,7 @@ impl Pos {
                 .prepare_cached(
                     "SELECT id FROM order_items
                      WHERE order_id = ?1 AND product_id = ?2 AND sent_at IS NULL AND note IS NULL
-                       AND discount_cents = 0 AND unit_price_cents = ?3 AND qty + ?4 <= ?5
+                       AND parent_id IS NULL AND is_set = 0 AND discount_cents = 0 AND unit_price_cents = ?3 AND qty + ?4 <= ?5
                        AND variant_id IS ?6
                      ORDER BY id DESC",
                 )?
@@ -687,33 +698,12 @@ impl Pos {
         s.require(Permission::Sell)?;
         let note = opt_text(&upd.note, 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let (order_id, cur): (i64, OrderItem) = tx
-            .prepare_cached(&format!("SELECT order_id, {ITEM_COLS} FROM order_items WHERE id = ?1"))?
-            .query_row([item_id], |r| {
-                let it = OrderItem {
-                    id: r.get(1)?,
-                    product_id: r.get(2)?,
-                    name: r.get(3)?,
-                    unit_price_cents: r.get(4)?,
-                    tax_rate_bp: r.get(5)?,
-                    qty: r.get(6)?,
-                    discount_cents: r.get(7)?,
-                    note: r.get(8)?,
-                    variant_id: r.get(10)?,
-                    options: Vec::new(),
-                    sent_at: r.get(9)?,
-                    starter: r.get(11)?,
-                    held: r.get(12)?,
-                    name_alt: r.get(13)?,
-                    prep: r.get(14)?,
-                    prep_sent_at: r.get(15)?,
-                    line_total_cents: 0,
-                    tax_cents: 0,
-                };
-                Ok((r.get(0)?, it))
-            })
+        let cur: OrderItem = tx
+            .prepare_cached(&format!("SELECT {ITEM_COLS} FROM order_items WHERE id = ?1"))?
+            .query_row([item_id], item_from_row)
             .optional()?
             .ok_or(PosError::NotFound)?;
+        let order_id: i64 = tx.query_row("SELECT order_id FROM order_items WHERE id = ?1", [item_id], |r| r.get(0))?;
         require_open(&tx, order_id)?;
         if !(0..=MAX_QTY).contains(&upd.qty) {
             return invalid(format!("quantity must be between 0 and {MAX_QTY}"));
@@ -727,6 +717,21 @@ impl Pos {
             }
             if note != cur.note {
                 return invalid("the note cannot change after the item was sent to the kitchen");
+            }
+        }
+        // A dish inside a set changes with its set; only its note is its own.
+        if cur.parent_id.is_some() && (upd.qty != cur.qty || upd.discount_cents != cur.discount_cents) {
+            return invalid("change or remove the set itself");
+        }
+        if cur.is_set && upd.qty != cur.qty {
+            if upd.qty == 0 {
+                tx.execute("DELETE FROM order_items WHERE parent_id = ?1", [item_id])?;
+            } else {
+                // Each dish keeps its count per set.
+                tx.execute(
+                    "UPDATE order_items SET qty = qty / ?2 * ?3 WHERE parent_id = ?1",
+                    params![item_id, cur.qty, upd.qty],
+                )?;
             }
         }
         if upd.qty == 0 {
@@ -785,7 +790,7 @@ impl Pos {
         if by_course {
             tx.execute(
                 // Drinks go now too, like starters.
-                "UPDATE order_items SET held = 1 WHERE order_id = ?1 AND sent_at IS NULL AND starter = 0
+                "UPDATE order_items SET held = 1 WHERE order_id = ?1 AND sent_at IS NULL AND starter = 0 AND is_set = 0
                    AND product_id NOT IN (SELECT id FROM products WHERE drink = 1)",
                 [order_id],
             )?;

@@ -144,8 +144,8 @@ impl Pos {
             params![id, sort],
         )?;
         tx.execute(
-            "INSERT INTO products (category_id, name, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order, name_alt, prep, team_id)
-             SELECT category_id, ?2, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order + 1, name_alt, prep, team_id
+            "INSERT INTO products (category_id, name, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order, name_alt, prep, team_id, is_set, set_only)
+             SELECT category_id, ?2, price_cents, cost_cents, tax_rate_bp, track_stock, starter, sort_order + 1, name_alt, prep, team_id, is_set, set_only
              FROM products WHERE id = ?1",
             params![id, copy],
         )?;
@@ -160,6 +160,24 @@ impl Pos {
              SELECT ?2, group_id, sort_order FROM product_option_groups WHERE product_id = ?1",
             params![id, new_id],
         )?;
+        // A set menu's sections and their dishes.
+        let sections: Vec<i64> = tx
+            .prepare("SELECT id FROM set_sections WHERE set_id = ?1 ORDER BY sort_order, id")?
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for sid in sections {
+            tx.execute(
+                "INSERT INTO set_sections (set_id, name, name_alt, sort_order, pick, starter)
+                 SELECT ?2, name, name_alt, sort_order, pick, starter FROM set_sections WHERE id = ?1",
+                params![sid, new_id],
+            )?;
+            let copy_sid = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO set_section_items (section_id, product_id, sort_order)
+                 SELECT ?2, product_id, sort_order FROM set_section_items WHERE section_id = ?1",
+                params![sid, copy_sid],
+            )?;
+        }
         tx.execute(
             "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'product.duplicate', ?2)",
             params![s.user_id, format!("{id} -> {new_id}")],

@@ -30,6 +30,10 @@ pub struct Product {
     pub team_id: Option<i64>,
     /// A drink: never held for the mains, printed on its own DRINKS ticket.
     pub drink: bool,
+    /// A set menu (see `save_set`).
+    pub is_set: bool,
+    /// Only sold inside set menus: no tile of its own on the order screen.
+    pub set_only: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,7 +100,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep, p.team_id, p.drink";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep, p.team_id, p.drink, p.is_set, p.set_only";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -119,6 +123,8 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         prep: r.get(14)?,
         team_id: r.get(15)?,
         drink: r.get(16)?,
+        is_set: r.get(17)?,
+        set_only: r.get(18)?,
     })
 }
 

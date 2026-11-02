@@ -664,8 +664,9 @@ async function renderOrder() {
     }, h('span', { class: 'names' }, h('span', { class: 'name' }, p.name), p.name_alt && h('span', { class: 'alt', lang: 'th' }, p.name_alt)),
       h('span', { class: 'foot' },
         h('span', { class: 'price' }, itemPrice(p, state.itemVariants[p.id])),
+        p.is_set && h('span', { class: 'tag set' }, 'Set'),
         p.starter && h('span', { class: 'tag' }, 'Starter'),
-        (state.itemGroups[p.id] || state.itemVariants[p.id]) && h('span', { class: 'more', title: 'Has choices' }, '•••')))));
+        (p.is_set || state.itemGroups[p.id] || state.itemVariants[p.id]) && h('span', { class: 'more', title: 'Has choices' }, '•••')))));
     if (!list.length) grid.append(h('div', { class: 'muted pad' }, q ? 'No items match your search.' : 'No items in this category yet.'));
     return list;
   };
@@ -705,6 +706,7 @@ async function renderOrder() {
   // Tap on a menu item: add it straight away, or ask for its options first.
   function choose(p) {
     return act(async () => {
+      if (p.is_set) return openSetPicker(p);
       const groups = (state.itemGroups[p.id] || []).filter((g) => g.options.length);
       const variants = state.itemVariants[p.id] || [];
       if (!groups.length && !variants.length) return addItem(p.id);
@@ -765,6 +767,45 @@ async function renderOrder() {
     redraw();
     [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
   }
+  // A set menu: choose the dishes for each section, then add the set.
+  async function openSetPicker(p) {
+    const sections = await call('get_set', { setId: p.id });
+    if (!sections.length) return toast(`${p.name} has no sections yet (Menu → tap the set)`, true);
+    const chosen = new Map(sections.map((s) => [s.id, []]));
+    const body = h('div', { class: 'stack' });
+    const addBtn = h('button', { class: 'primary' }, 'Add to order');
+    const redraw = () => {
+      setKids(body, sections.map((s) => {
+        const mine = chosen.get(s.id);
+        return h('div', { class: 'stack set-section' },
+          h('div', {}, h('strong', {}, s.name), s.name_alt && h('span', { class: 'alt', lang: 'th' }, ' ', s.name_alt), ' ',
+            h('span', { class: mine.length === s.pick ? 'muted' : 'badge warn' }, `choose ${s.pick}${s.pick > 1 ? ` (${mine.length}/${s.pick})` : ''}`),
+            s.starter && h('span', { class: 'badge' }, 'starter'),
+            mine.length > 0 && s.pick > 1 && h('button', { class: 'ghost small-btn', onclick: () => { mine.length = 0; redraw(); } }, 'Clear')),
+          h('div', { class: 'opts' }, s.items.map((c) => {
+            const n = mine.filter((x) => x === c.product_id).length;
+            return h('button', { class: n ? 'on' : '', onclick: () => {
+              if (s.pick === 1) mine.splice(0, 1, c.product_id);
+              else if (mine.length < s.pick) mine.push(c.product_id);
+              else if (n) mine.splice(mine.indexOf(c.product_id), 1);
+              else return toast(`${s.name}: choose ${s.pick}`, true);
+              redraw();
+            } }, c.name, c.name_alt && h('small', { lang: 'th' }, c.name_alt), n > 1 && h('small', {}, `× ${n}`));
+          })));
+      }));
+      addBtn.disabled = sections.some((s) => chosen.get(s.id).length !== s.pick);
+    };
+    addBtn.onclick = act(async () => {
+      const picks = sections.flatMap((s) => chosen.get(s.id).map((productId) => ({ section_id: s.id, product_id: productId })));
+      order = await call('add_set', { orderId, setId: p.id, picks, note: null });
+      closePicker();
+      draw();
+    });
+    setKids(picker, h('div', { class: 'row' }, h('h3', { class: 'grow' }, p.name), h('strong', {}, money(p.price_cents))), body,
+      h('div', { class: 'row' }, addBtn, h('button', { onclick: closePicker }, 'Cancel')));
+    redraw();
+    [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
+  }
   function closePicker() {
     [picker.hidden, grid.hidden, cats.hidden] = [true, false, false];
   }
@@ -811,6 +852,15 @@ async function renderOrder() {
   function draw() {
     setKids(lines, h('table', { class: 'ticket-lines' }, order.items.map((it) => {
       const sent = !!it.sent_at;
+      // A dish inside a set: shown under the set, no price or stepper.
+      if (it.parent_id) {
+        return h('tr', { class: 'set-dish' }, h('td', { colspan: 4 },
+          it.section_name && h('span', { class: 'muted' }, `${it.section_name}: `), it.qty > 1 ? `${it.qty} × ${it.name}` : it.name,
+          sent ? h('span', { class: 'sent' }, ' ✓') : '',
+          it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
+          it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
+          it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt)));
+      }
       const row = h('tr', {},
         h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
@@ -824,7 +874,8 @@ async function renderOrder() {
           h('button', { onclick: act(() => setLine(it, { qty: it.qty - 1 })) }, '−'),
           h('span', {}, it.qty),
           h('button', { onclick: act(() => (sent
-            ? addItem(it.product_id, it.options.map((o) => o.option_id), it.variant_id)
+            ? (it.is_set ? openSetPicker(state.menu.find((p) => p.id === it.product_id) ?? { id: it.product_id, name: it.name, price_cents: it.unit_price_cents })
+              : addItem(it.product_id, it.options.map((o) => o.option_id), it.variant_id))
             : setLine(it, { qty: it.qty + 1 }))) }, '+'))),
         h('td', { class: 'num' }, money(it.line_total_cents)),
         h('td', {}, h('button', { class: `icon-btn ${editing === it.id ? 'on' : ''}`, title: 'Note, discount, remove',
@@ -866,7 +917,8 @@ async function renderOrder() {
         h('td', {}, `${state.service?.label || 'Service charge'} ${order.service_bp ? pct(order.service_bp) + '%' : '(none)'} `, h('span', { class: 'edit-link' }, 'change')),
         h('td', { class: 'num' }, money(order.service_cents))) : '',
       h('tr', { class: 'grand' }, h('td', {}, 'Total'), h('td', { class: 'num' }, money(order.total_cents))));
-    const qty = (f) => order.items.filter(f).reduce((n, i) => n + i.qty, 0);
+    // A set's own line is for the bill; its dishes are what the kitchen gets.
+    const qty = (f) => order.items.filter((i) => !i.is_set).filter(f).reduce((n, i) => n + i.qty, 0);
     const unsent = qty((i) => !i.sent_at && !i.held);
     const waiting = qty((i) => !i.sent_at && i.held);
     const starters = qty((i) => !i.sent_at && !i.held && i.starter);
@@ -880,7 +932,7 @@ async function renderOrder() {
     mainsBtn.title = waiting ? 'Send the mains to the kitchen' : 'Print a short "MAIN COURSE" ticket so the kitchen fires the mains now';
     mainsBtn.hidden = !waiting && !mainsSent;
     setKids(payBtn, h('span', {}, 'Finish & Pay'), h('strong', {}, money(order.total_cents)));
-    const count = order.items.reduce((n, i) => n + i.qty, 0);
+    const count = order.items.filter((i) => !i.parent_id).reduce((n, i) => n + i.qty, 0);
     setKids(phoneBar, layout?.classList.contains('show-ticket') ? '← Back to menu' : `View order · ${count} item(s)`,
       h('strong', {}, money(order.total_cents)));
   }
@@ -1477,7 +1529,8 @@ async function renderMenuAdmin() {
       products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
         onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
         canDrag && h('td', { class: 'grip', title: 'Drag to reorder', onclick: (e) => e.stopPropagation() }, '⠿'),
-        h('td', {}, p.name, p.name_alt && h('div', { class: 'alt', lang: 'th' }, p.name_alt),
+        h('td', {}, p.name, p.is_set && h('span', { class: 'tag set' }, ' SET'), p.set_only && h('span', { class: 'badge', title: 'Only sold inside set menus' }, 'set only'),
+          p.name_alt && h('div', { class: 'alt', lang: 'th' }, p.name_alt),
           variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
         h('td', {}, catById[p.category_id]?.name ?? '—'),
         teams.length > 0 && h('td', {}, teamById[p.team_id]?.name ?? '—'),
@@ -1619,6 +1672,7 @@ async function renderMenuAdmin() {
 
   // ---- 1, 3, 7, 9, 10, 11: the item editor ----
   function editProduct(p, preset = {}) {
+    if (p?.is_set) return editSet(p);
     const startCat = p ? p.category_id : (preset.category_id !== undefined ? preset.category_id : tabCat());
     const d0 = defaultsFor(startCat);
     const f = {
@@ -1637,6 +1691,7 @@ async function renderMenuAdmin() {
       prep: h('input', { type: 'checkbox', checked: p ? p.prep : d0.prep }),
       team: teamSelect(p ? p.team_id : d0.team, 'No team'),
       drink: h('input', { type: 'checkbox', checked: p ? p.drink : d0.drink }),
+      setOnly: h('input', { type: 'checkbox', checked: !!p?.set_only }),
     };
     f.cat.value = startCat ?? '';
     // A new item follows its category's defaults until the user changes them.
@@ -1768,6 +1823,7 @@ async function renderMenuAdmin() {
       if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds });
       if (p || v.variants.length) await call('set_variants', { productId: saved.id, variants: v.variants });
       if (saved.drink !== f.drink.checked) await call('set_drink', { id: saved.id, drink: f.drink.checked });
+      if (!!saved.set_only !== f.setOnly.checked) await call('set_set_only', { id: saved.id, setOnly: f.setOnly.checked });
       state.menu = null;
       if (again) {
         // 1: keep going in the same category.
@@ -1790,7 +1846,8 @@ async function renderMenuAdmin() {
         h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', f.tax), h('label', { class: 'field' }, 'Cost', f.cost),
           h('label', { class: 'check' }, f.starter, ' Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)')),
           h('label', { class: 'check' }, f.prep, ' Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)')),
-          h('label', { class: 'check' }, f.drink, ' Drink ', h('span', { class: 'muted' }, '(sent straight away, own DRINKS ticket)'))),
+          h('label', { class: 'check' }, f.drink, ' Drink ', h('span', { class: 'muted' }, '(sent straight away, own DRINKS ticket)')),
+          h('label', { class: 'check' }, f.setOnly, ' Only in set menus ', h('span', { class: 'muted' }, '(no tile of its own on the order screen)'))),
         h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
           h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering.'),
           choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
@@ -1832,6 +1889,107 @@ async function renderMenuAdmin() {
     (p ? f.name : f.name).focus();
     if (!p) f.name.select();
   }
+  // ---- set menus: price, sections (Starter, Main, Side...) and their dishes ----
+  async function editSet(p) {
+    // Dishes with choices or required options cannot go in a set (nowhere to pick them).
+    const required = new Set(groups.filter((g) => g.active && g.min_select > 0).map((g) => g.id));
+    const needsPick = (x) => !!variantsOf[x.id] || feed.links.some((l) => l.product_id === x.id && required.has(l.group_id));
+    const all = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set && !needsPick(x));
+    const byId = Object.fromEntries(all.map((x) => [x.id, x]));
+    const sections = p
+      ? (await call('get_set', { setId: p.id })).map((s) => ({ name: s.name, alt: s.name_alt ?? '', pick: s.pick, starter: s.starter, items: s.items.map((c) => c.product_id) }))
+      : [['Starter', true], ['Main', false], ['Side', false]].map(([name, starter]) => ({ name, alt: '', pick: 1, starter, items: [] }));
+    const name = h('input', { value: p?.name ?? '', placeholder: 'Set name, e.g. Dinner set for 1', 'data-f': 'sname' });
+    const alt = h('input', { value: p?.name_alt ?? '', placeholder: 'Thai name (optional)', lang: 'th' });
+    const cat = h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name)));
+    cat.value = p?.category_id ?? (tabCat() ?? '');
+    const price = h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', style: 'width:110px', 'data-f': 'sprice' });
+    const tax = h('input', { value: pct(p ? p.tax_rate_bp : defaultsFor(cat.value ? Number(cat.value) : null).tax), inputmode: 'decimal', style: 'width:80px' });
+    const active = h('input', { type: 'checkbox', checked: p ? p.active : true });
+    const list = h('div', { class: 'stack' });
+    const draw = () => setKids(list, sections.map((sec, i) => {
+      const pick = h('input', { type: 'number', min: 1, max: 10, value: sec.pick, style: 'width:64px', oninput: (e) => (sec.pick = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1))) });
+      const adder = h('select', {}, h('option', { value: '' }, '+ Add a dish from the menu…'),
+        all.filter((x) => !sec.items.includes(x.id)).map((x) => h('option', { value: x.id }, x.name + (x.set_only ? ' (set only)' : ''))));
+      adder.onchange = () => { if (adder.value) { sec.items.push(Number(adder.value)); draw(); } };
+      const newName = h('input', { placeholder: 'New dish just for sets' });
+      const newAlt = h('input', { placeholder: 'Thai (optional)', lang: 'th' });
+      return h('div', { class: 'card stack inset set-edit' },
+        h('div', { class: 'sec-head' },
+          h('input', { value: sec.name, placeholder: 'Section, e.g. Main', oninput: (e) => (sec.name = e.target.value) }),
+          h('input', { value: sec.alt, placeholder: 'Thai name', lang: 'th', oninput: (e) => (sec.alt = e.target.value) }),
+          h('label', { class: 'field' }, 'Choose', pick),
+          h('label', { class: 'check', title: 'Goes to the kitchen with the starters; the rest waits for "Call mains"' },
+            h('input', { type: 'checkbox', checked: sec.starter, onchange: (e) => (sec.starter = e.target.checked) }), ' Starter course'),
+          h('span', { class: 'sec-tools' }, h('button', { title: 'Move up', disabled: i === 0, onclick: () => { [sections[i - 1], sections[i]] = [sections[i], sections[i - 1]]; draw(); } }, '↑'),
+          h('button', { title: 'Move down', disabled: i === sections.length - 1, onclick: () => { [sections[i + 1], sections[i]] = [sections[i], sections[i + 1]]; draw(); } }, '↓'),
+          h('button', { class: 'danger', title: 'Remove this section', onclick: () => { sections.splice(i, 1); draw(); } }, '×'))),
+        h('div', { class: 'opts' }, sec.items.length ? sec.items.map((id) => h('button', { class: 'chip-btn', title: 'Remove from this section',
+          onclick: () => { sec.items.splice(sec.items.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×'))
+          : h('span', { class: 'muted' }, 'No dishes yet: add some below.')),
+        h('div', { class: 'sec-add' }, adder,
+          newName, newAlt, h('button', { onclick: act(async () => {
+            if (!newName.value.trim()) return toast('Type the new dish name', true);
+            const made = await call('create_product', { product: {
+              name: newName.value.trim(), name_alt: newAlt.value.trim() || null, category_id: null, price_cents: 0, cost_cents: 0,
+              tax_rate_bp: Math.round(Number(tax.value || 0) * 100), stock_qty: 0, track_stock: false, starter: sec.starter, prep: false, team_id: null,
+            } });
+            await call('set_set_only', { id: made.id, setOnly: true });
+            made.set_only = true;
+            all.push(made); byId[made.id] = made; sec.items.push(made.id);
+            toast(`${made.name} added (only sold in sets; give it a team in the menu list if needed)`);
+            draw();
+          }) }, '+ New dish')));
+    }));
+    draw();
+    const save = act(async () => {
+      fieldErr(name); fieldErr(price);
+      if (!name.value.trim()) return fieldErr(name, 'Type a name');
+      let cents;
+      try { cents = parseMoney(price.value); } catch (e) { return fieldErr(price, e.message); }
+      const t = Number(String(tax.value).replace(',', '.').replace('%', '') || 0);
+      if (!Number.isFinite(t) || t < 0 || t > 100) return toast('Tax: from 0 to 100', true);
+      if (!sections.length) return toast('Add at least one section', true);
+      const bad = sections.find((s) => !s.name.trim() || !s.items.length);
+      if (bad) return toast(`${bad.name || 'A section'}: give it a name and at least one dish`, true);
+      const fields = { name: name.value, name_alt: alt.value.trim() || null, category_id: cat.value ? Number(cat.value) : null,
+        price_cents: cents, cost_cents: 0, tax_rate_bp: Math.round(t * 100), track_stock: false, starter: false, prep: false, team_id: null };
+      const saved = p
+        ? await call('update_product', { id: p.id, product: { ...fields, sku: p.sku, barcode: p.barcode, active: active.checked } })
+        : await call('create_product', { product: { ...fields, stock_qty: 0 } });
+      try {
+        await call('save_set', { setId: saved.id, sections: sections.map((s) => ({
+          name: s.name.trim(), name_alt: s.alt.trim() || null, pick: s.pick, starter: s.starter, product_ids: s.items })) });
+      } catch (e) {
+        // A new set that could not be saved must not stay behind as a plain item.
+        if (!p) await call('delete_product', { id: saved.id }).catch(() => {});
+        throw e;
+      }
+      toast(`${saved.name} saved`);
+      await changed();
+    });
+    setKids(form, h('div', { class: 'card stack' },
+      h('h3', {}, p ? `Edit set menu: ${p.name}` : 'New set menu'),
+      h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, name), cat),
+      h('div', { class: 'row' }, alt,
+        h('label', { class: 'field' }, taxIncluded ? 'Price (tax included)' : 'Price (before tax)', h('span', { class: 'field-col' }, price)),
+        h('label', { class: 'field' }, 'Tax %', tax), p && h('label', { class: 'check' }, active, ' On the menu')),
+      h('div', { class: 'muted small' }, 'The bill shows only the set and its price. Each section\'s dishes go to the kitchen under the set\'s name; '
+        + '"Starter course" sections go first on dine-in orders. Dishes with choices or required options cannot go in a set.'),
+      list,
+      h('div', {}, h('button', { onclick: () => { sections.push({ name: '', alt: '', pick: 1, starter: false, items: [] }); draw(); } }, '+ Section')),
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: save }, 'Save set'),
+        h('button', { onclick: () => setKids(form) }, 'Cancel'),
+        h('span', { style: 'flex:1' }),
+        p && confirmBtn('Delete set', `Tap again to delete "${p.name}"`, async () => {
+          await call('delete_product', { id: p.id });
+          toast(`${p.name} deleted`);
+          await changed();
+        }))));
+    name.focus();
+  }
+
   state.openEditor = editProduct;
 
   // ---- 6: paste a whole menu from a spreadsheet ----
@@ -1918,6 +2076,7 @@ async function renderMenuAdmin() {
       tabs,
       h('div', { class: 'toolbar' },
         h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Menu item'),
+        h('button', { onclick: act(() => editSet(null)) }, icon('plus', 18), 'Set menu'),
         h('button', { onclick: pasteImport }, 'Paste a menu'),
         h('div', { class: 'searchbox grow' }, icon('search', 18), search),
         h('label', { class: 'check' }, showInactive, ' Show removed')),

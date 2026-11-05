@@ -82,7 +82,7 @@ fn starters_go_first_and_mains_wait_for_call() {
     let ticket = pos.kitchen_ticket(&s, o.id, &sent, false).unwrap();
     assert_eq!(ticket.title, "MAINS AWAY");
     assert_eq!(ticket.footer, None);
-    assert!(ticket.to_text(42).contains("-- MAINS --"));
+    assert!(ticket.to_text(42).contains("1 x Burger") && !ticket.to_text(42).contains("MAINS --"));
     assert_eq!(pos.list_open_orders(&s).unwrap()[0].held_count, 0);
 
     // Later rounds (dessert, drinks) are ordinary additions sent at once.

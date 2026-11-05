@@ -476,8 +476,10 @@ fn escpos_all(tickets: &[KitchenTicket], cfg: &PrinterConfig) -> Vec<u8> {
 impl KitchenTicket {
     fn lines(&self, width: usize) -> Vec<Line> {
         let mut v = Vec::new();
+        let gap = || Line::new(Size::Normal, false, false, String::new());
         if let Some(b) = &self.banner {
             v.push(Line::banner(b.clone()));
+            v.push(gap());
         }
         let mut push = |l: Line| v.push(l);
         let big = width / 2;
@@ -526,18 +528,24 @@ impl KitchenTicket {
             push(Line::new(small, false, false, format!("#{}  {}  {}", self.order_id, self.time, self.staff)));
         }
         push(Line::new(Size::Normal, false, false, rule('=', width)));
-        let grouped = !self.brief && self.items.iter().any(|i| i.category.is_some());
+        push(gap());
+        // No menu categories on tickets: only a set's sections get a heading.
         let mut current: Option<Option<&str>> = None;
         let mut team: Option<&str> = None;
         let mut first = true;
         let mut set: Option<&str> = None;
         for it in &self.items {
             if it.team.as_deref() != team {
+                // Plenty of room around each team's bar, so its dishes read as one block.
+                push(gap());
+                push(gap());
                 match &it.team {
                     Some(b) => push(Line::banner(b.clone())),
                     // Dishes without a team, after the teams' ones.
                     None => push(Line::new(Size::Normal, false, false, rule('=', width))),
                 }
+                push(gap());
+                push(gap());
                 team = it.team.as_deref();
                 current = None;
                 first = true;
@@ -545,16 +553,21 @@ impl KitchenTicket {
             // A set's dishes: the set's name between double rules.
             if it.set.as_deref() != set {
                 if let Some(name) = &it.set {
+                    if !first {
+                        push(gap());
+                        push(gap());
+                    }
                     push(Line::new(small, true, true, titled_rule(&format!("SET: {name}"), '=', width)));
+                    push(gap());
                 }
                 set = it.set.as_deref();
                 current = None;
                 first = true;
             }
             let cat = it.category.as_deref();
-            if grouped && current != Some(cat) {
+            if it.set.is_some() && current != Some(cat) {
                 if current.is_some() {
-                    push(Line::new(Size::Normal, false, false, String::new()));
+                    push(gap());
                 }
                 push(Line::new(small, true, true, titled_rule(&cat.unwrap_or("Other").to_uppercase(), '-', width)));
                 current = Some(cat);
@@ -562,7 +575,9 @@ impl KitchenTicket {
             }
             // A light dashed line between dishes, so each one stands apart.
             if !first {
+                push(gap());
                 push(Line::new(Size::Normal, false, false, dashed(width)));
+                push(gap());
             }
             first = false;
             for (i, t) in wrap(&format!("{} x {}", it.qty, it.name), w, "", cont).into_iter().enumerate() {
@@ -584,6 +599,7 @@ impl KitchenTicket {
                 }
             }
         }
+        push(gap());
         push(Line::new(Size::Normal, false, false, rule('=', width)));
         if let Some(f) = &self.footer {
             for t in wrap(f, big, "", "") {
@@ -1244,8 +1260,8 @@ mod tests {
         let t = ticket().to_text(32);
         let eq = "=".repeat(32);
         let expected = format!(
-            "{eq}\n   NEW ORDER\n{eq}\nDINE-IN T3\nGround\n{}\n#12  19:05  Sam\n{eq}\n\
-             2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n- - - - - - - - - - - - - - - -\n1 x Crème brûlée\n{eq}\n   DINE-IN T3\n",
+            "{eq}\n   NEW ORDER\n{eq}\nDINE-IN T3\nGround\n{}\n#12  19:05  Sam\n{eq}\n\n\
+             2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n\n- - - - - - - - - - - - - - - -\n\n1 x Crème brûlée\n\n{eq}\n   DINE-IN T3\n",
             "-".repeat(32)
         );
         assert_eq!(t, expected);

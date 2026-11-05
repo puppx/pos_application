@@ -54,19 +54,18 @@ fn order_everything(pos: &mut Pos, s: &Session, m: &Menu) -> Order {
 }
 
 #[test]
-fn kitchen_ticket_grouped_by_category_in_menu_order() {
+fn kitchen_ticket_in_menu_order_without_category_headings() {
     let (mut pos, admin, m) = setup();
     let o = order_everything(&mut pos, &admin, &m);
     let sent = pos.send_to_kitchen(&admin, o.id).unwrap();
     let text = pos.kitchen_ticket(&admin, o.id, &sent, false).unwrap().to_text(42);
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing in\n{text}"));
-    assert!(at("-- STARTERS --") < at("1 x Soup"));
-    assert!(at("1 x Soup") < at("-- MAINS --"));
-    assert!(at("-- MAINS --") < at("1 x Burger"));
-    assert!(at("1 x Burger\n  + Large\n  ** no onions") < at("-- DRINKS --"));
-    assert!(at("-- DRINKS --") < at("2 x Cola"));
-    assert!(at("2 x Cola") < at("-- OTHER --"));
-    assert!(at("-- OTHER --") < at("1 x Bread"));
+    assert!(at("1 x Soup") < at("1 x Burger"));
+    assert!(at("1 x Burger\n  + Large\n  ** no onions") < at("2 x Cola"));
+    assert!(at("2 x Cola") < at("1 x Bread"));
+    assert!(!text.contains("STARTERS") && !text.contains("DRINKS") && !text.contains("OTHER"), "{text}");
+    // Room around the dashed line between dishes.
+    assert!(text.contains("\n\n- - - "), "{text}");
 }
 
 #[test]

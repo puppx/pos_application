@@ -64,8 +64,8 @@ fn kitchen_ticket_in_menu_order_without_category_headings() {
     assert!(at("1 x Burger\n  + Large\n  ** no onions") < at("2 x Cola"));
     assert!(at("2 x Cola") < at("1 x Bread"));
     assert!(!text.contains("STARTERS") && !text.contains("DRINKS") && !text.contains("OTHER"), "{text}");
-    // Room around the dashed line between dishes.
-    assert!(text.contains("\n\n- - - "), "{text}");
+    // A blank line between dishes, no dashed line.
+    assert!(text.contains("no onions\n\n2 x Cola") && !text.contains("- - -"), "{text}");
 }
 
 #[test]

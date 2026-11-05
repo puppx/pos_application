@@ -332,11 +332,6 @@ pub(crate) fn rule(ch: char, width: usize) -> String {
     ch.to_string().repeat(width)
 }
 
-/// A light "- - - -" line between dishes.
-pub(crate) fn dashed(width: usize) -> String {
-    "- ".repeat(width / 2).trim_end().to_string()
-}
-
 /// `text` in the middle of a rule: "--------- STARTERS ---------".
 pub(crate) fn titled_rule(text: &str, ch: char, width: usize) -> String {
     let inner = format!(" {text} ");
@@ -573,10 +568,8 @@ impl KitchenTicket {
                 current = Some(cat);
                 first = true;
             }
-            // A light dashed line between dishes, so each one stands apart.
+            // A blank line between dishes, so each one stands apart.
             if !first {
-                push(gap());
-                push(Line::new(Size::Normal, false, false, dashed(width)));
                 push(gap());
             }
             first = false;
@@ -1261,7 +1254,7 @@ mod tests {
         let eq = "=".repeat(32);
         let expected = format!(
             "{eq}\n   NEW ORDER\n{eq}\nDINE-IN T3\nGround\n{}\n#12  19:05  Sam\n{eq}\n\n\
-             2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n\n- - - - - - - - - - - - - - - -\n\n1 x Crème brûlée\n\n{eq}\n   DINE-IN T3\n",
+             2 x Burger\n   + Large\n   + Extra cheese\n   ** no onions\n\n1 x Crème brûlée\n\n{eq}\n   DINE-IN T3\n",
             "-".repeat(32)
         );
         assert_eq!(t, expected);

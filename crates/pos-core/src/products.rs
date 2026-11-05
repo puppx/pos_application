@@ -323,6 +323,10 @@ impl Pos {
             "DELETE FROM set_section_items WHERE product_id = ?1 OR section_id IN (SELECT id FROM set_sections WHERE set_id = ?1)",
             [id],
         )?;
+        tx.execute(
+            "DELETE FROM set_section_with WHERE product_id = ?1 OR section_id IN (SELECT id FROM set_sections WHERE set_id = ?1)",
+            [id],
+        )?;
         tx.execute("DELETE FROM set_sections WHERE set_id = ?1", [id])?;
         if used {
             tx.execute(

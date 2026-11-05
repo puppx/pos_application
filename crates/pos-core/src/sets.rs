@@ -31,6 +31,9 @@ pub struct SetSection {
     /// Goes to the kitchen with the starters on dine-in orders.
     pub starter: bool,
     pub items: Vec<SetChoice>,
+    /// What each dish here comes with (one to choose per dish), e.g. rice or
+    /// noodles; empty when the section has nothing to pair.
+    pub with_items: Vec<SetChoice>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,7 +54,13 @@ pub struct SetSectionInput {
     #[serde(default)]
     pub starter: bool,
     pub product_ids: Vec<i64>,
+    /// "Comes with" choices for this section's dishes (may be empty).
+    #[serde(default)]
+    pub with_ids: Vec<i64>,
 }
+
+/// A chosen dish: product, what it comes with, how many.
+type Chosen<'a> = (i64, Option<&'a SetChoice>, i64);
 
 fn one() -> i64 {
     1
@@ -62,6 +71,9 @@ fn one() -> i64 {
 pub struct SetPick {
     pub section_id: i64,
     pub product_id: i64,
+    /// What it comes with, when the section has "comes with" choices.
+    #[serde(default)]
+    pub with_id: Option<i64>,
 }
 
 impl Pos {
@@ -72,17 +84,21 @@ impl Pos {
             .conn
             .prepare_cached("SELECT id, name, name_alt, pick, starter FROM set_sections WHERE set_id = ?1 ORDER BY sort_order, id")?
             .query_map([set_id], |r| {
-                Ok(SetSection { id: r.get(0)?, name: r.get(1)?, name_alt: r.get(2)?, pick: r.get(3)?, starter: r.get(4)?, items: vec![] })
+                Ok(SetSection { id: r.get(0)?, name: r.get(1)?, name_alt: r.get(2)?, pick: r.get(3)?, starter: r.get(4)?, items: vec![], with_items: vec![] })
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.name, p.name_alt FROM set_section_items i JOIN products p ON p.id = i.product_id
              WHERE i.section_id = ?1 AND p.active = 1 AND p.deleted = 0 ORDER BY i.sort_order, p.name",
         )?;
+        let mut with = self.conn.prepare_cached(
+            "SELECT p.id, p.name, p.name_alt FROM set_section_with i JOIN products p ON p.id = i.product_id
+             WHERE i.section_id = ?1 AND p.active = 1 AND p.deleted = 0 ORDER BY i.sort_order, p.name",
+        )?;
+        let choice = |r: &rusqlite::Row| Ok(SetChoice { product_id: r.get(0)?, name: r.get(1)?, name_alt: r.get(2)? });
         for sec in &mut sections {
-            sec.items = stmt
-                .query_map([sec.id], |r| Ok(SetChoice { product_id: r.get(0)?, name: r.get(1)?, name_alt: r.get(2)? }))?
-                .collect::<rusqlite::Result<_>>()?;
+            sec.items = stmt.query_map([sec.id], choice)?.collect::<rusqlite::Result<_>>()?;
+            sec.with_items = with.query_map([sec.id], choice)?.collect::<rusqlite::Result<_>>()?;
         }
         Ok(sections)
     }
@@ -131,10 +147,26 @@ impl Pos {
                     return invalid(format!("{pname} has choices or options to pick, so it cannot go in a set; make a plain item for the set"));
                 }
             }
+            if sec.with_ids.len() > MAX_CHOICES {
+                return invalid(format!("{name}: up to {MAX_CHOICES} things to come with"));
+            }
+            for &p in &sec.with_ids {
+                let is_set: bool = tx
+                    .query_row("SELECT is_set FROM products WHERE id = ?1 AND deleted = 0", [p], |r| r.get(0))
+                    .optional()?
+                    .ok_or_else(|| PosError::Validation(format!("{name}: something it comes with is no longer on the menu")))?;
+                if is_set {
+                    return invalid(format!("{name}: a set menu cannot come with a dish"));
+                }
+            }
             cleaned.push((name.to_string(), clean_alt(sec.name_alt.as_deref(), 40)?));
         }
         tx.execute(
             "DELETE FROM set_section_items WHERE section_id IN (SELECT id FROM set_sections WHERE set_id = ?1)",
+            [set_id],
+        )?;
+        tx.execute(
+            "DELETE FROM set_section_with WHERE section_id IN (SELECT id FROM set_sections WHERE set_id = ?1)",
             [set_id],
         )?;
         tx.execute("DELETE FROM set_sections WHERE set_id = ?1", [set_id])?;
@@ -147,6 +179,12 @@ impl Pos {
             for (j, p) in sec.product_ids.iter().enumerate() {
                 tx.execute(
                     "INSERT OR IGNORE INTO set_section_items (section_id, product_id, sort_order) VALUES (?1, ?2, ?3)",
+                    params![section, p, j],
+                )?;
+            }
+            for (j, p) in sec.with_ids.iter().enumerate() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO set_section_with (section_id, product_id, sort_order) VALUES (?1, ?2, ?3)",
                     params![section, p, j],
                 )?;
             }
@@ -199,20 +237,33 @@ impl Pos {
         let rate = order_tax.unwrap_or(rate);
 
         // Every section gets exactly its number of dishes, from its own list.
-        let mut chosen: Vec<(&SetSection, Vec<(i64, i64)>)> = Vec::new();
+        // (dish, what it comes with, how many)
+        let mut chosen: Vec<(&SetSection, Vec<Chosen>)> = Vec::new();
         for sec in &sections {
-            let mine: Vec<i64> = picks.iter().filter(|p| p.section_id == sec.id).map(|p| p.product_id).collect();
+            let mine: Vec<&SetPick> = picks.iter().filter(|p| p.section_id == sec.id).collect();
             if mine.len() as i64 != sec.pick {
                 return invalid(format!("{}: choose {}", sec.name, sec.pick));
             }
-            let mut counts: Vec<(i64, i64)> = Vec::new();
+            let mut counts: Vec<Chosen> = Vec::new();
             for p in mine {
-                if !sec.items.iter().any(|c| c.product_id == p) {
+                if !sec.items.iter().any(|c| c.product_id == p.product_id) {
                     return invalid(format!("{}: that dish is not in this section", sec.name));
                 }
-                match counts.iter_mut().find(|c| c.0 == p) {
-                    Some(c) => c.1 += 1,
-                    None => counts.push((p, 1)),
+                // A section with "comes with" choices needs one for every dish.
+                let with = match p.with_id {
+                    _ if sec.with_items.is_empty() => None,
+                    None => return invalid(format!("{}: choose what it comes with", sec.name)),
+                    Some(w) => Some(
+                        sec.with_items
+                            .iter()
+                            .find(|c| c.product_id == w)
+                            .ok_or_else(|| PosError::Validation(format!("{}: it cannot come with that", sec.name)))?,
+                    ),
+                };
+                let key = with.map(|c| c.product_id);
+                match counts.iter_mut().find(|c| c.0 == p.product_id && c.1.map(|w| w.product_id) == key) {
+                    Some(c) => c.2 += 1,
+                    None => counts.push((p.product_id, with, 1)),
                 }
             }
             chosen.push((sec, counts));
@@ -234,12 +285,12 @@ impl Pos {
         let mut info = tx.prepare_cached("SELECT name, name_alt, prep FROM products WHERE id = ?1")?;
         let mut ins = tx.prepare_cached(
             "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, added_by, starter, name_alt, prep,
-                                      parent_id, section_name, section_alt)
-             VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                      parent_id, section_name, section_alt, with_name, with_alt)
+             VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         let mut names: HashMap<i64, (String, Option<String>, bool)> = HashMap::new();
         for (sec, counts) in &chosen {
-            for &(p, qty) in counts {
+            for &(p, with, qty) in counts {
                 let (pname, palt, prep) = match names.get(&p) {
                     Some(v) => v.clone(),
                     None => {
@@ -248,7 +299,21 @@ impl Pos {
                         v
                     }
                 };
-                ins.execute(params![order_id, p, pname, qty, s.user_id, sec.starter, palt, prep, parent, sec.name, sec.name_alt])?;
+                ins.execute(params![
+                    order_id,
+                    p,
+                    pname,
+                    qty,
+                    s.user_id,
+                    sec.starter,
+                    palt,
+                    prep,
+                    parent,
+                    sec.name,
+                    sec.name_alt,
+                    with.map(|c| c.name.clone()),
+                    with.and_then(|c| c.name_alt.clone())
+                ])?;
             }
         }
         drop(ins);

@@ -177,6 +177,11 @@ impl Pos {
                  SELECT ?2, product_id, sort_order FROM set_section_items WHERE section_id = ?1",
                 params![sid, copy_sid],
             )?;
+            tx.execute(
+                "INSERT INTO set_section_with (section_id, product_id, sort_order)
+                 SELECT ?2, product_id, sort_order FROM set_section_with WHERE section_id = ?1",
+                params![sid, copy_sid],
+            )?;
         }
         tx.execute(
             "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'product.duplicate', ?2)",

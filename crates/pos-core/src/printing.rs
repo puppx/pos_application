@@ -789,7 +789,12 @@ impl Pos {
             let set = if qty > 1 { format!("{qty} x {label}") } else { label };
             for i in in_sets.iter().filter(|i| i.parent_id == Some(parent)) {
                 let section = i.section_name.as_deref().map(|n| names.inline(&n.to_uppercase(), i.section_alt.as_deref()));
-                out.push(item(i, section, Some(set.clone())));
+                let mut t = item(i, section, Some(set.clone()));
+                // What it comes with, under the dish like an option.
+                if let Some(w) = &i.with_name {
+                    t.options.insert(0, format!("with {}", names.inline(w, i.with_alt.as_deref())));
+                }
+                out.push(t);
             }
         }
         Ok(out)

@@ -31,9 +31,9 @@ fn setup() -> Kit {
     let set = item(&mut pos, "Dinner set", 2500);
     let sections = pos
         .save_set(&s, set.id, &[
-            SetSectionInput { name: "Starter".into(), name_alt: Some("ของเรียกน้ำย่อย".into()), pick: 1, starter: true, product_ids: vec![soup.id, satay.id] },
-            SetSectionInput { name: "Main".into(), name_alt: None, pick: 1, starter: false, product_ids: vec![curry.id] },
-            SetSectionInput { name: "Side".into(), name_alt: None, pick: 1, starter: false, product_ids: vec![rice.id] },
+            SetSectionInput { name: "Starter".into(), name_alt: Some("ของเรียกน้ำย่อย".into()), pick: 1, starter: true, product_ids: vec![soup.id, satay.id], with_ids: vec![] },
+            SetSectionInput { name: "Main".into(), name_alt: None, pick: 1, starter: false, product_ids: vec![curry.id], with_ids: vec![] },
+            SetSectionInput { name: "Side".into(), name_alt: None, pick: 1, starter: false, product_ids: vec![rice.id], with_ids: vec![] },
         ])
         .unwrap();
     let set = pos.get_product(&s, set.id).unwrap();
@@ -55,9 +55,9 @@ fn dine_in(table: i64) -> NewOrder {
 
 fn picks(k: &Kit, starter: i64) -> Vec<SetPick> {
     vec![
-        SetPick { section_id: k.sections[0].id, product_id: starter },
-        SetPick { section_id: k.sections[1].id, product_id: k.curry.id },
-        SetPick { section_id: k.sections[2].id, product_id: k.rice.id },
+        SetPick { section_id: k.sections[0].id, product_id: starter, with_id: None },
+        SetPick { section_id: k.sections[1].id, product_id: k.curry.id, with_id: None },
+        SetPick { section_id: k.sections[2].id, product_id: k.rice.id, with_id: None },
     ]
 }
 
@@ -176,4 +176,45 @@ fn sets_and_their_dishes_can_be_deleted() {
     assert!(!k.pos.delete_product(&k.s, k.set.id).unwrap());
     assert_eq!(k.pos.get_order(&k.s, o.id).unwrap().items.len(), 4);
     assert!(!k.pos.menu(&k.s).unwrap().iter().any(|p| p.id == k.set.id));
+}
+
+#[test]
+fn a_section_can_say_what_its_dishes_come_with() {
+    let mut k = setup();
+    let noodles = k.pos.create_product(&k.s, NewProduct {
+        category_id: None, sku: None, barcode: None, name: "Egg noodles".into(), price_cents: 0, cost_cents: 0, tax_rate_bp: 0,
+        stock_qty: 0, track_stock: false, starter: false, name_alt: Some("บะหมี่".into()), prep: false, team_id: None,
+    }).unwrap();
+    // Main comes with rice or noodles; two mains to choose.
+    let secs = k.pos.save_set(&k.s, k.set.id, &[
+        SetSectionInput { name: "Starter".into(), name_alt: None, pick: 1, starter: true, product_ids: vec![k.soup.id], with_ids: vec![] },
+        SetSectionInput { name: "Main".into(), name_alt: None, pick: 2, starter: false, product_ids: vec![k.curry.id, k.satay.id], with_ids: vec![k.rice.id, noodles.id] },
+    ]).unwrap();
+    assert_eq!(secs[1].with_items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Jasmine rice", "Egg noodles"]);
+    assert!(secs[0].with_items.is_empty());
+    let pick = |section: i64, product_id: i64, with_id: Option<i64>| SetPick { section_id: section, product_id, with_id };
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    // Every main needs what it comes with, from the list.
+    let missing = [pick(secs[0].id, k.soup.id, None), pick(secs[1].id, k.curry.id, Some(k.rice.id)), pick(secs[1].id, k.satay.id, None)];
+    assert!(k.pos.add_set(&k.s, o.id, k.set.id, &missing, None).unwrap_err().to_string().contains("comes with"));
+    let wrong = [pick(secs[0].id, k.soup.id, None), pick(secs[1].id, k.curry.id, Some(k.soup.id)), pick(secs[1].id, k.satay.id, Some(k.rice.id))];
+    assert!(k.pos.add_set(&k.s, o.id, k.set.id, &wrong, None).is_err());
+    // Two curries, one with rice and one with noodles: two lines.
+    let ok = [pick(secs[0].id, k.soup.id, None), pick(secs[1].id, k.curry.id, Some(k.rice.id)), pick(secs[1].id, k.curry.id, Some(noodles.id))];
+    let o = k.pos.add_set(&k.s, o.id, k.set.id, &ok, None).unwrap();
+    let mains: Vec<_> = o.items.iter().filter(|i| i.section_name.as_deref() == Some("Main")).map(|i| (i.qty, i.with_name.clone().unwrap())).collect();
+    assert_eq!(mains, [(1, "Jasmine rice".to_string()), (1, "Egg noodles".to_string())]);
+    // The kitchen sees it under the dish; the bill does not.
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    let sent = k.pos.call_mains(&k.s, o.id).unwrap();
+    let text = k.pos.kitchen_ticket(&k.s, o.id, &sent, false).unwrap().to_text(42);
+    assert!(text.contains("1 x Green curry\n  + with Jasmine rice") || text.contains("1 x Green curry\n   + with Jasmine rice"), "{text}");
+    assert!(text.contains("+ with Egg noodles") && text.contains("บะหมี่"), "{text}");
+    let r = k.pos.receipt(&k.s, o.id).unwrap().to_text(42);
+    assert!(!r.contains("noodles") && !r.contains("Jasmine"), "{r}");
+    // Kept by backups.
+    let backup = k.pos.export_menu(&k.s).unwrap();
+    k.pos.import_menu(&k.s, &backup).unwrap();
+    let set = k.pos.list_products(&k.s, false, 100, 0).unwrap().into_iter().find(|p| p.is_set).unwrap();
+    assert_eq!(k.pos.get_set(&k.s, set.id).unwrap()[1].with_items.len(), 2);
 }

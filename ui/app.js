@@ -783,20 +783,28 @@ async function renderOrder() {
             s.starter && h('span', { class: 'badge' }, 'starter'),
             mine.length > 0 && s.pick > 1 && h('button', { class: 'ghost small-btn', onclick: () => { mine.length = 0; redraw(); } }, 'Clear')),
           h('div', { class: 'opts' }, s.items.map((c) => {
-            const n = mine.filter((x) => x === c.product_id).length;
+            const n = mine.filter((x) => x.product_id === c.product_id).length;
             return h('button', { class: n ? 'on' : '', onclick: () => {
-              if (s.pick === 1) mine.splice(0, 1, c.product_id);
-              else if (mine.length < s.pick) mine.push(c.product_id);
-              else if (n) mine.splice(mine.indexOf(c.product_id), 1);
+              if (s.pick === 1) mine.splice(0, 1, { product_id: c.product_id, with_id: mine[0]?.with_id ?? null });
+              else if (mine.length < s.pick) mine.push({ product_id: c.product_id, with_id: null });
+              else if (n) mine.splice(mine.findIndex((x) => x.product_id === c.product_id), 1);
               else return toast(`${s.name}: choose ${s.pick}`, true);
               redraw();
             } }, c.name, c.name_alt && h('small', { lang: 'th' }, c.name_alt), n > 1 && h('small', {}, `× ${n}`));
-          })));
+          })),
+          // What each chosen dish comes with (rice, noodles...), when the section has it.
+          s.with_items.length > 0 && mine.map((entry) => h('div', { class: 'with-row' },
+            h('span', { class: 'with-label' }, `${s.items.find((c) => c.product_id === entry.product_id)?.name ?? ''} with`),
+            h('div', { class: 'opts' }, s.with_items.map((w) => h('button', {
+              class: entry.with_id === w.product_id ? 'on' : '',
+              onclick: () => { entry.with_id = w.product_id; redraw(); },
+            }, w.name, w.name_alt && h('small', { lang: 'th' }, w.name_alt)))))));
       }));
-      addBtn.disabled = sections.some((s) => chosen.get(s.id).length !== s.pick);
+      addBtn.disabled = sections.some((s) => chosen.get(s.id).length !== s.pick
+        || (s.with_items.length > 0 && chosen.get(s.id).some((x) => x.with_id == null)));
     };
     addBtn.onclick = act(async () => {
-      const picks = sections.flatMap((s) => chosen.get(s.id).map((productId) => ({ section_id: s.id, product_id: productId })));
+      const picks = sections.flatMap((s) => chosen.get(s.id).map((x) => ({ section_id: s.id, product_id: x.product_id, with_id: x.with_id })));
       order = await call('add_set', { orderId, setId: p.id, picks, note: null });
       closePicker();
       draw();
@@ -856,6 +864,7 @@ async function renderOrder() {
       if (it.parent_id) {
         return h('tr', { class: 'set-dish' }, h('td', { colspan: 4 },
           it.section_name && h('span', { class: 'muted' }, `${it.section_name}: `), it.qty > 1 ? `${it.qty} × ${it.name}` : it.name,
+          it.with_name && h('span', { class: 'muted' }, ` with ${it.with_name}`),
           sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
           it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
@@ -1897,8 +1906,12 @@ async function renderMenuAdmin() {
     const all = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set && !needsPick(x));
     const byId = Object.fromEntries(all.map((x) => [x.id, x]));
     const sections = p
-      ? (await call('get_set', { setId: p.id })).map((s) => ({ name: s.name, alt: s.name_alt ?? '', pick: s.pick, starter: s.starter, items: s.items.map((c) => c.product_id) }))
-      : [['Starter', true], ['Main', false], ['Side', false]].map(([name, starter]) => ({ name, alt: '', pick: 1, starter, items: [] }));
+      ? (await call('get_set', { setId: p.id })).map((s) => ({ name: s.name, alt: s.name_alt ?? '', pick: s.pick, starter: s.starter,
+        items: s.items.map((c) => c.product_id), with: s.with_items.map((c) => c.product_id) }))
+      : [['Starter', true], ['Main', false], ['Side', false]].map(([name, starter]) => ({ name, alt: '', pick: 1, starter, items: [], with: [] }));
+    // Anything plain can be what a dish comes with (rice, noodles...).
+    const withable = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set);
+    for (const x of withable) byId[x.id] ??= x;
     const name = h('input', { value: p?.name ?? '', placeholder: 'Set name, e.g. Dinner set for 1', 'data-f': 'sname' });
     const alt = h('input', { value: p?.name_alt ?? '', placeholder: 'Thai name (optional)', lang: 'th' });
     const cat = h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name)));
@@ -1912,6 +1925,9 @@ async function renderMenuAdmin() {
       const adder = h('select', {}, h('option', { value: '' }, '+ Add a dish from the menu…'),
         all.filter((x) => !sec.items.includes(x.id)).map((x) => h('option', { value: x.id }, x.name + (x.set_only ? ' (set only)' : ''))));
       adder.onchange = () => { if (adder.value) { sec.items.push(Number(adder.value)); draw(); } };
+      const withAdder = h('select', {}, h('option', { value: '' }, '+ Comes with… (optional)'),
+        withable.filter((x) => !sec.with.includes(x.id)).map((x) => h('option', { value: x.id }, x.name + (x.set_only ? ' (set only)' : ''))));
+      withAdder.onchange = () => { if (withAdder.value) { sec.with.push(Number(withAdder.value)); draw(); } };
       const newName = h('input', { placeholder: 'New dish just for sets' });
       const newAlt = h('input', { placeholder: 'Thai (optional)', lang: 'th' });
       return h('div', { class: 'card stack inset set-edit' },
@@ -1939,7 +1955,13 @@ async function renderMenuAdmin() {
             all.push(made); byId[made.id] = made; sec.items.push(made.id);
             toast(`${made.name} added (only sold in sets; give it a team in the menu list if needed)`);
             draw();
-          }) }, '+ New dish')));
+          }) }, '+ New dish')),
+        // Optional: each dish here comes with one of these (e.g. rice or noodles).
+        h('div', { class: 'with-edit' },
+          h('span', { class: 'muted small' }, sec.with.length ? 'Each dish comes with one of:' : 'Comes with (e.g. rice or noodles): none'),
+          h('div', { class: 'opts' }, sec.with.map((id) => h('button', { class: 'chip-btn', title: 'Remove',
+            onclick: () => { sec.with.splice(sec.with.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×'))),
+          withAdder));
     }));
     draw();
     const save = act(async () => {
@@ -1959,7 +1981,7 @@ async function renderMenuAdmin() {
         : await call('create_product', { product: { ...fields, stock_qty: 0 } });
       try {
         await call('save_set', { setId: saved.id, sections: sections.map((s) => ({
-          name: s.name.trim(), name_alt: s.alt.trim() || null, pick: s.pick, starter: s.starter, product_ids: s.items })) });
+          name: s.name.trim(), name_alt: s.alt.trim() || null, pick: s.pick, starter: s.starter, product_ids: s.items, with_ids: s.with })) });
       } catch (e) {
         // A new set that could not be saved must not stay behind as a plain item.
         if (!p) await call('delete_product', { id: saved.id }).catch(() => {});
@@ -1977,7 +1999,7 @@ async function renderMenuAdmin() {
       h('div', { class: 'muted small' }, 'The bill shows only the set and its price. Each section\'s dishes go to the kitchen under the set\'s name; '
         + '"Starter course" sections go first on dine-in orders. Dishes with choices or required options cannot go in a set.'),
       list,
-      h('div', {}, h('button', { onclick: () => { sections.push({ name: '', alt: '', pick: 1, starter: false, items: [] }); draw(); } }, '+ Section')),
+      h('div', {}, h('button', { onclick: () => { sections.push({ name: '', alt: '', pick: 1, starter: false, items: [], with: [] }); draw(); } }, '+ Section')),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: save }, 'Save set'),
         h('button', { onclick: () => setKids(form) }, 'Cancel'),

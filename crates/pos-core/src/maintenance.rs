@@ -145,6 +145,9 @@ pub struct MenuSetSection {
     #[serde(default)]
     pub starter: bool,
     pub items: Vec<usize>,
+    /// What its dishes come with (v0.10.0+), positions in `items` of the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<usize>,
 }
 
 /// What a menu restore created.
@@ -210,6 +213,7 @@ fn clear_menu(tx: &Transaction) -> Result<usize> {
     let items = count(tx, "SELECT COUNT(*) FROM products WHERE active = 1")?;
     tx.execute_batch(
         "DELETE FROM set_section_items;
+         DELETE FROM set_section_with;
          DELETE FROM set_sections;
          DELETE FROM product_option_groups;
          DELETE FROM stock_movements WHERE order_id IS NULL;
@@ -322,7 +326,7 @@ impl Pos {
                 .conn
                 .prepare_cached("SELECT id, name, name_alt, pick, starter FROM set_sections WHERE set_id = ?1 ORDER BY sort_order, id")?
                 .query_map([id], |r| {
-                    Ok((r.get(0)?, MenuSetSection { name: r.get(1)?, name_alt: r.get(2)?, pick: r.get(3)?, starter: r.get(4)?, items: vec![] }))
+                    Ok((r.get(0)?, MenuSetSection { name: r.get(1)?, name_alt: r.get(2)?, pick: r.get(3)?, starter: r.get(4)?, items: vec![], with: vec![] }))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             for (sid, mut sec) in sections {
@@ -332,6 +336,12 @@ impl Pos {
                     .query_map([sid], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?;
                 sec.items = dishes.iter().filter_map(|d| position.get(d).copied()).collect();
+                let with: Vec<i64> = self
+                    .conn
+                    .prepare_cached("SELECT product_id FROM set_section_with WHERE section_id = ?1 ORDER BY sort_order")?
+                    .query_map([sid], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                sec.with = with.iter().filter_map(|d| position.get(d).copied()).collect();
                 item.set.push(sec);
             }
         }
@@ -487,6 +497,14 @@ impl Pos {
                     if let Some(dish) = pids.get(d) {
                         tx.execute(
                             "INSERT OR IGNORE INTO set_section_items (section_id, product_id, sort_order) VALUES (?1, ?2, ?3)",
+                            params![sid, dish, j as i64],
+                        )?;
+                    }
+                }
+                for (j, &d) in sec.with.iter().enumerate() {
+                    if let Some(dish) = pids.get(d) {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO set_section_with (section_id, product_id, sort_order) VALUES (?1, ?2, ?3)",
                             params![sid, dish, j as i64],
                         )?;
                     }

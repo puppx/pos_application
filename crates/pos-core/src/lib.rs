@@ -79,6 +79,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0013_drinks.sql"),
     include_str!("migrations/0014_pin_length.sql"),
     include_str!("migrations/0015_set_menus.sql"),
+    include_str!("migrations/0016_set_pairings.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

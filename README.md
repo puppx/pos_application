@@ -131,6 +131,8 @@ Each section lists the dishes to choose from: add existing menu items, or make a
 "Choose" says how many dishes the customer picks from the section (set it to the number of dishes to include them all), and "Starter course" sends that section with the starters.
 Dishes with choices or required options cannot go in a set.
 
+A section can also say what its dishes **come with** (e.g. Main: with rice or noodles): add the choices under "Comes with" in the section, or leave it empty for sets that have none. When ordering, each chosen dish then needs one of them, and the kitchen ticket prints it under the dish (`+ with Jasmine rice`).
+
 On the order screen the set's tile opens a picker; the order shows the set with its dishes under it.
 The bill and receipt show only the set and its price. Kitchen tickets print the dishes under `SET: <name>` between `=` rules, each section under a `-` rule, still split by team, drinks and course like any other dish.
 

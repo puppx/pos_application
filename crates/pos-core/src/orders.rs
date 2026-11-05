@@ -135,6 +135,9 @@ pub struct OrderItem {
     /// The set section it was chosen from, e.g. "Main" / "จานหลัก".
     pub section_name: Option<String>,
     pub section_alt: Option<String>,
+    /// What a set's dish comes with (rice, noodles...), when chosen.
+    pub with_name: Option<String>,
+    pub with_alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,7 +301,7 @@ fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
 const TABLE_BUSY: &str = "that table already has an open order";
 
 const ITEM_COLS: &str =
-    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt, prep, prep_sent_at, is_set, parent_id, section_name, section_alt";
+    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt, prep, prep_sent_at, is_set, parent_id, section_name, section_alt, with_name, with_alt";
 
 fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
     let (price, rate, qty, disc): (i64, i64, i64, i64) = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
@@ -326,6 +329,8 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         parent_id: r.get(16)?,
         section_name: r.get(17)?,
         section_alt: r.get(18)?,
+        with_name: r.get(19)?,
+        with_alt: r.get(20)?,
     })
 }
 

@@ -127,7 +127,7 @@ Settings → Kitchen teams → **Use kitchen teams** switches teams off without 
 ### Set menus
 
 Menu → **+ Set menu**: a name, price and tax, and sections (Starter, Main and Side to start with; rename, add, remove or reorder them).
-Each section lists the dishes to choose from: tap **+ Add dishes** to search (English or Thai) or browse by category and tap dishes in or out. A Starter-course section lists starter dishes; the others leave starters and drinks out (tick "Show all dishes" for an exception). Add existing menu items, or make a new dish just for sets (marked "set only", so it has no tile of its own).
+Each section lists the dishes to choose from: tap **+ Add dishes** to search (English or Thai) or browse by category and tap dishes in or out. Any dish on the menu can go in any section. Add existing menu items, or make a new dish just for sets (marked "set only", so it has no tile of its own).
 "Choose" says how many dishes the customer picks from the section (set it to the number of dishes to include them all), and "Starter course" sends that section with the starters.
 Dishes with choices or required options cannot go in a set.
 

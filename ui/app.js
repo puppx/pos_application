@@ -1955,8 +1955,6 @@ async function renderMenuAdmin() {
           rule && h('label', { class: 'check', title: 'Also list dishes that do not normally belong in this section' }, showAll, ' Show all dishes')),
         tabsEl, grid);
     };
-    // Starter sections offer starters; the others leave starters and drinks out.
-    const suits = (sec) => (x) => (sec.starter ? x.starter : !x.starter && !x.drink);
     const draw = () => setKids(list, sections.map((sec, i) => {
       sec.ui ??= { open: !sec.items.length };
       sec.withUi ??= { open: false };
@@ -1989,14 +1987,14 @@ async function renderMenuAdmin() {
           h('input', { value: sec.name, placeholder: 'Section, e.g. Main', oninput: (e) => (sec.name = e.target.value) }),
           h('input', { value: sec.alt, placeholder: 'Thai name', lang: 'th', oninput: (e) => (sec.alt = e.target.value) }),
           h('label', { class: 'field' }, 'Choose', pick),
-          h('label', { class: 'check', title: 'Goes to the kitchen with the starters, and lists starter dishes; the rest waits for "Call mains"' },
+          h('label', { class: 'check', title: 'Goes to the kitchen with the starters; the rest waits for "Call mains"' },
             h('input', { type: 'checkbox', checked: sec.starter, onchange: (e) => { sec.starter = e.target.checked; draw(); } }), ' Starter course'),
           h('span', { class: 'sec-tools' }, h('button', { title: 'Move up', disabled: i === 0, onclick: () => { [sections[i - 1], sections[i]] = [sections[i], sections[i - 1]]; draw(); } }, '↑'),
           h('button', { title: 'Move down', disabled: i === sections.length - 1, onclick: () => { [sections[i + 1], sections[i]] = [sections[i], sections[i + 1]]; draw(); } }, '↓'),
           h('button', { class: 'danger', title: 'Remove this section', onclick: () => { sections.splice(i, 1); draw(); } }, '×'))),
         h('div', { class: 'row' }, chips, h('span', { style: 'flex:1' }),
           h('button', { class: sec.ui.open ? 'on' : '', onclick: () => { sec.ui.open = !sec.ui.open; draw(); } }, sec.ui.open ? 'Done' : '+ Add dishes')),
-        sec.ui.open && dishPicker(sec.items, all, sec.ui, suits(sec), drawChips),
+        sec.ui.open && dishPicker(sec.items, all, sec.ui, null, drawChips),
         sec.ui.open && addNew,
         // Optional: each dish here comes with one of these (e.g. rice or noodles).
         h('div', { class: 'with-edit' },

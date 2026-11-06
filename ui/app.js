@@ -1920,48 +1920,91 @@ async function renderMenuAdmin() {
     const tax = h('input', { value: pct(p ? p.tax_rate_bp : defaultsFor(cat.value ? Number(cat.value) : null).tax), inputmode: 'decimal', style: 'width:80px' });
     const active = h('input', { type: 'checkbox', checked: p ? p.active : true });
     const list = h('div', { class: 'stack' });
+    // Searchable dish picker: tap a dish to add it, tap again to take it out.
+    // `rule` keeps to the dishes that suit the section, unless "Show all" is ticked.
+    const dishPicker = (chosen, pool, ui, rule, onChange) => {
+      const q = h('input', { type: 'search', placeholder: 'Search dishes (English or Thai)', value: ui.q ?? '' });
+      const tabsEl = h('div', { class: 'cat-tabs' });
+      const grid = h('div', { class: 'pick-grid' });
+      const showAll = h('input', { type: 'checkbox', checked: !!ui.all });
+      const drawList = () => {
+        const term = q.value.trim().toLowerCase();
+        const fits = pool.filter((x) => ui.all || !rule || rule(x));
+        const here = [...new Set(fits.map((x) => x.category_id ?? 0))];
+        if (ui.cat != null && !here.includes(ui.cat)) ui.cat = null;
+        setKids(tabsEl, h('button', { class: ui.cat == null ? 'on' : '', onclick: () => { ui.cat = null; drawList(); } }, 'All'),
+          here.map((c) => h('button', { class: ui.cat === c ? 'on' : '', style: catStyle(catById[c]?.color),
+            onclick: () => { ui.cat = c; drawList(); } }, catById[c]?.name ?? 'No category')));
+        const shown = fits.filter((x) => (ui.cat == null || (x.category_id ?? 0) === ui.cat) && (!term || matches(x, term)));
+        setKids(grid, shown.slice(0, 120).map((x) => h('button', {
+          class: chosen.includes(x.id) ? 'on' : '',
+          onclick: () => {
+            const at = chosen.indexOf(x.id);
+            if (at >= 0) chosen.splice(at, 1); else chosen.push(x.id);
+            onChange();
+            drawList();
+          },
+        }, h('span', {}, x.name), x.name_alt && h('small', { lang: 'th' }, x.name_alt), x.set_only && h('small', {}, 'set only'))),
+        !shown.length && h('span', { class: 'muted' }, term ? 'No dish matches your search.' : 'No dishes here.'));
+      };
+      q.addEventListener('input', () => { ui.q = q.value; drawList(); });
+      showAll.onchange = () => { ui.all = showAll.checked; drawList(); };
+      drawList();
+      return h('div', { class: 'stack dish-picker' },
+        h('div', { class: 'row' }, h('div', { class: 'searchbox grow' }, icon('search', 18), q),
+          rule && h('label', { class: 'check', title: 'Also list dishes that do not normally belong in this section' }, showAll, ' Show all dishes')),
+        tabsEl, grid);
+    };
+    // Starter sections offer starters; the others leave starters and drinks out.
+    const suits = (sec) => (x) => (sec.starter ? x.starter : !x.starter && !x.drink);
     const draw = () => setKids(list, sections.map((sec, i) => {
+      sec.ui ??= { open: !sec.items.length };
+      sec.withUi ??= { open: false };
       const pick = h('input', { type: 'number', min: 1, max: 10, value: sec.pick, style: 'width:64px', oninput: (e) => (sec.pick = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1))) });
-      const adder = h('select', {}, h('option', { value: '' }, '+ Add a dish from the menu…'),
-        all.filter((x) => !sec.items.includes(x.id)).map((x) => h('option', { value: x.id }, x.name + (x.set_only ? ' (set only)' : ''))));
-      adder.onchange = () => { if (adder.value) { sec.items.push(Number(adder.value)); draw(); } };
-      const withAdder = h('select', {}, h('option', { value: '' }, '+ Comes with… (optional)'),
-        withable.filter((x) => !sec.with.includes(x.id)).map((x) => h('option', { value: x.id }, x.name + (x.set_only ? ' (set only)' : ''))));
-      withAdder.onchange = () => { if (withAdder.value) { sec.with.push(Number(withAdder.value)); draw(); } };
+      const chips = h('div', { class: 'opts' });
+      const drawChips = () => setKids(chips, sec.items.length ? sec.items.map((id) => h('button', { class: 'chip-btn', title: 'Remove from this section',
+        onclick: () => { sec.items.splice(sec.items.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×'))
+        : h('span', { class: 'muted' }, 'No dishes yet: tap "Add dishes".'));
+      drawChips();
+      const withChips = h('div', { class: 'opts' });
+      const drawWith = () => setKids(withChips, sec.with.map((id) => h('button', { class: 'chip-btn', title: 'Remove',
+        onclick: () => { sec.with.splice(sec.with.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×')));
+      drawWith();
       const newName = h('input', { placeholder: 'New dish just for sets' });
       const newAlt = h('input', { placeholder: 'Thai (optional)', lang: 'th' });
+      const addNew = h('div', { class: 'sec-add' }, newName, newAlt, h('button', { onclick: act(async () => {
+        if (!newName.value.trim()) return toast('Type the new dish name', true);
+        const made = await call('create_product', { product: {
+          name: newName.value.trim(), name_alt: newAlt.value.trim() || null, category_id: null, price_cents: 0, cost_cents: 0,
+          tax_rate_bp: Math.round(Number(tax.value || 0) * 100), stock_qty: 0, track_stock: false, starter: sec.starter, prep: false, team_id: null,
+        } });
+        await call('set_set_only', { id: made.id, setOnly: true });
+        made.set_only = true;
+        all.push(made); withable.push(made); byId[made.id] = made; sec.items.push(made.id);
+        toast(`${made.name} added (only sold in sets; give it a team in the menu list if needed)`);
+        draw();
+      }) }, '+ New dish'));
       return h('div', { class: 'card stack inset set-edit' },
         h('div', { class: 'sec-head' },
           h('input', { value: sec.name, placeholder: 'Section, e.g. Main', oninput: (e) => (sec.name = e.target.value) }),
           h('input', { value: sec.alt, placeholder: 'Thai name', lang: 'th', oninput: (e) => (sec.alt = e.target.value) }),
           h('label', { class: 'field' }, 'Choose', pick),
-          h('label', { class: 'check', title: 'Goes to the kitchen with the starters; the rest waits for "Call mains"' },
-            h('input', { type: 'checkbox', checked: sec.starter, onchange: (e) => (sec.starter = e.target.checked) }), ' Starter course'),
+          h('label', { class: 'check', title: 'Goes to the kitchen with the starters, and lists starter dishes; the rest waits for "Call mains"' },
+            h('input', { type: 'checkbox', checked: sec.starter, onchange: (e) => { sec.starter = e.target.checked; draw(); } }), ' Starter course'),
           h('span', { class: 'sec-tools' }, h('button', { title: 'Move up', disabled: i === 0, onclick: () => { [sections[i - 1], sections[i]] = [sections[i], sections[i - 1]]; draw(); } }, '↑'),
           h('button', { title: 'Move down', disabled: i === sections.length - 1, onclick: () => { [sections[i + 1], sections[i]] = [sections[i], sections[i + 1]]; draw(); } }, '↓'),
           h('button', { class: 'danger', title: 'Remove this section', onclick: () => { sections.splice(i, 1); draw(); } }, '×'))),
-        h('div', { class: 'opts' }, sec.items.length ? sec.items.map((id) => h('button', { class: 'chip-btn', title: 'Remove from this section',
-          onclick: () => { sec.items.splice(sec.items.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×'))
-          : h('span', { class: 'muted' }, 'No dishes yet: add some below.')),
-        h('div', { class: 'sec-add' }, adder,
-          newName, newAlt, h('button', { onclick: act(async () => {
-            if (!newName.value.trim()) return toast('Type the new dish name', true);
-            const made = await call('create_product', { product: {
-              name: newName.value.trim(), name_alt: newAlt.value.trim() || null, category_id: null, price_cents: 0, cost_cents: 0,
-              tax_rate_bp: Math.round(Number(tax.value || 0) * 100), stock_qty: 0, track_stock: false, starter: sec.starter, prep: false, team_id: null,
-            } });
-            await call('set_set_only', { id: made.id, setOnly: true });
-            made.set_only = true;
-            all.push(made); byId[made.id] = made; sec.items.push(made.id);
-            toast(`${made.name} added (only sold in sets; give it a team in the menu list if needed)`);
-            draw();
-          }) }, '+ New dish')),
+        h('div', { class: 'row' }, chips, h('span', { style: 'flex:1' }),
+          h('button', { class: sec.ui.open ? 'on' : '', onclick: () => { sec.ui.open = !sec.ui.open; draw(); } }, sec.ui.open ? 'Done' : '+ Add dishes')),
+        sec.ui.open && dishPicker(sec.items, all, sec.ui, suits(sec), drawChips),
+        sec.ui.open && addNew,
         // Optional: each dish here comes with one of these (e.g. rice or noodles).
         h('div', { class: 'with-edit' },
           h('span', { class: 'muted small' }, sec.with.length ? 'Each dish comes with one of:' : 'Comes with (e.g. rice or noodles): none'),
-          h('div', { class: 'opts' }, sec.with.map((id) => h('button', { class: 'chip-btn', title: 'Remove',
-            onclick: () => { sec.with.splice(sec.with.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×'))),
-          withAdder));
+          withChips, h('span', { style: 'flex:1' }),
+          h('button', { class: sec.withUi.open ? 'on' : '', onclick: () => { sec.withUi.open = !sec.withUi.open; draw(); } },
+            sec.withUi.open ? 'Done' : 'Choose what it comes with')),
+        sec.withUi.open && dishPicker(sec.with, withable, sec.withUi, null, drawWith));
     }));
     draw();
     const save = act(async () => {

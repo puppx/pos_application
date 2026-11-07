@@ -2559,6 +2559,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
   const tableOnly = h('input', { type: 'checkbox', checked: cfg.call_table_only ?? true });
   const courseCopies = (v) => h('input', { type: 'number', min: 1, max: 9, value: v ?? '', placeholder: 'same', style: 'width:80px' });
   const starterCopies = courseCopies(cfg.starter_copies), mainsCopies = courseCopies(cfg.mains_copies), prepCopies = courseCopies(cfg.prep_copies);
+  const additionalCopies = h('input', { type: 'number', min: 1, max: 9, value: cfg.additional_copies ?? '', placeholder: '1', style: 'width:80px' });
   const copiesOf = (el) => (el.value.trim() ? Math.min(9, Math.max(1, parseInt(el.value, 10) || 1)) : null);
   const lang = h('select', {}, names.map(([v, label]) => h('option', { value: v }, label)));
   lang.value = names.some(([v]) => v === cfg.names) ? cfg.names : names[0][0];
@@ -2576,7 +2577,9 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
       courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Starters ticket copies', starterCopies),
         h('label', { class: 'field' }, 'Mains ticket copies', mainsCopies),
         h('label', { class: 'field' }, 'Prepare ticket copies', prepCopies),
-        h('span', { class: 'muted small' }, 'For dine-in courses; empty = same as Copies.')),
+        h('span', { class: 'muted small' }, 'For dine-in courses; empty = same as Copies. An order of only starters uses the starters copies.')),
+      courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Additional ticket copies', additionalCopies),
+        h('span', { class: 'muted small' }, 'When more is ordered later (ADDITIONAL); empty = 1.')),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
         h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
       h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)'),
@@ -2588,7 +2591,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
       copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
       names: lang.value,
       bold: bold.checked,
-      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), large_text: large.checked, call_table_only: tableOnly.checked }),
+      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), additional_copies: copiesOf(additionalCopies), large_text: large.checked, call_table_only: tableOnly.checked }),
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
       ...(kind.value === 'file' && { path: path.value.trim() }),

@@ -67,6 +67,10 @@ pub struct PrinterConfig {
     /// Kitchen only: copies of PREPARE NOW tickets. None = `copies`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prep_copies: Option<u8>,
+    /// Kitchen only: copies of ADDITIONAL tickets (more ordered later).
+    /// None = 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_copies: Option<u8>,
     /// Kitchen only: "Call mains again" prints just the table in huge
     /// letters, without the dishes (on by default).
     #[serde(default = "yes")]
@@ -133,6 +137,7 @@ impl Default for PrinterConfig {
             starter_copies: None,
             mains_copies: None,
             prep_copies: None,
+            additional_copies: None,
             call_table_only: true,
         }
     }
@@ -143,7 +148,7 @@ impl PrinterConfig {
         if !(24..=64).contains(&self.width) {
             return invalid("paper width must be between 24 and 64 characters");
         }
-        if [Some(self.copies), self.starter_copies, self.mains_copies, self.prep_copies].into_iter().flatten().any(|c| !(1..=9).contains(&c)) {
+        if [Some(self.copies), self.starter_copies, self.mains_copies, self.prep_copies, self.additional_copies].into_iter().flatten().any(|c| !(1..=9).contains(&c)) {
             return invalid("copies must be between 1 and 9");
         }
         if self.copy_delay_secs > 30 {
@@ -934,14 +939,17 @@ impl Pos {
         }
         // One ticket per team, printed one after another as a single job.
         let tickets = self.kitchen_tickets(s, order_id, items, reprint)?;
-        let (title, has_footer) = (tickets[0].title.as_str(), tickets.iter().any(|t| t.footer.is_some()));
+        let title = tickets[0].title.as_str();
         let food = self.drinks_apart(items)?.1;
         let copies = if reprint {
             1
         } else if title == "MAINS AWAY" {
             cfg.mains_copies.unwrap_or(cfg.copies)
-        } else if has_footer && food.iter().all(|i| i.starter) {
-            // Starters going ahead of the mains.
+        } else if title == "ADDITIONAL" {
+            // More ordered later: one copy unless set otherwise.
+            cfg.additional_copies.unwrap_or(1)
+        } else if !food.is_empty() && food.iter().all(|i| i.starter) {
+            // Starters: ahead of the mains, or all the table ordered for now.
             cfg.starter_copies.unwrap_or(cfg.copies)
         } else {
             cfg.copies

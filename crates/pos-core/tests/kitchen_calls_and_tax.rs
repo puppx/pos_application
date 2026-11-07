@@ -241,3 +241,28 @@ fn calling_mains_again_can_print_only_the_table() {
     let b = pos.main_course_job(&s, o.id).unwrap().unwrap().bytes();
     assert!(String::from_utf8_lossy(&b).contains("2 x Burger"));
 }
+
+#[test]
+fn starters_only_and_later_additions_use_their_own_copies() {
+    let (mut pos, s, m, table) = setup();
+    // 4 copies normally, 2 for starters, additions not set (= 1).
+    pos.set_kitchen_printer(&s, &printer(4, Some(2), None)).unwrap();
+    let o = pos.open_order(&s, &dine_in(table)).unwrap();
+    // The table orders only a starter for now: starter copies.
+    pos.add_item(&s, o.id, m.soup.id, 1, None, None, &[]).unwrap();
+    let sent = pos.send_to_kitchen(&s, o.id).unwrap();
+    assert_eq!(pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap().parts.len(), 2);
+    // The mains come later: an ADDITIONAL ticket, one copy.
+    pos.add_item(&s, o.id, m.burger.id, 1, None, None, &[]).unwrap();
+    let sent = pos.send_to_kitchen(&s, o.id).unwrap();
+    assert_eq!(pos.kitchen_ticket(&s, o.id, &sent, false).unwrap().title, "ADDITIONAL");
+    assert_eq!(pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap().parts.len(), 1);
+    // ...or as many as Settings say.
+    pos.set_kitchen_printer(&s, &PrinterConfig { additional_copies: Some(3), ..printer(4, Some(2), None) }).unwrap();
+    assert_eq!(pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap().parts.len(), 3);
+    // A first order with mains still uses the normal copies.
+    let o2 = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    pos.add_item(&s, o2.id, m.burger.id, 1, None, None, &[]).unwrap();
+    let sent = pos.send_to_kitchen(&s, o2.id).unwrap();
+    assert_eq!(pos.kitchen_job(&s, o2.id, &sent, false).unwrap().unwrap().parts.len(), 4);
+}

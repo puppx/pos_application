@@ -12,7 +12,7 @@ run well on low-end desktops and laptops (4 GB RAM).
   - Items, categories and option groups are edited in a **pop-up** over the full-width list (Esc or × closes it)
   - **Save & add another** keeps the category; Enter saves
   - The item editor shows only name, category and price; **More options** holds tax, starter, choices, extras, stock and codes
-  - **Defaults**: a main tax rate (Settings → Menu defaults) and per-category tax and "items here are starters". Saving the main rate can also fill in items still at 0% (a category set to 0% keeps its items tax-free)
+  - **Defaults**: a main tax rate (Manage → Menu defaults) and per-category tax and "items here are starters". Saving the main rate can also fill in items still at 0% (a category set to 0% keeps its items tax-free)
   - Prices can be typed as 12, 12.5, 12,50 or £12.50
   - **Paste a menu** from Excel or Google Sheets (name, price, category), with a preview; missing categories are created
   - **Duplicate** an item with its choices and options
@@ -29,24 +29,24 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Customer receipts and cash drawer**: a receipt prints automatically after payment (your name, address/VAT header and footer), **Print bill** prints the bill before paying, and receipts can be reprinted from History. The cash drawer (plugged into the receipt printer) opens on cash payments and with **Open drawer**, which is logged.
 - **Copies, delay and category grouping**: Settings sets how many copies the kitchen and receipt printers make and how many seconds to wait between copies (default 2, so each can be torn off); the first copy prints straight away. Every ticket and receipt lists items under their menu category (STARTERS, MAINS, DRINKS…) in menu order.
 - **Kitchen ticket printing** on *Send to kitchen*, to any ESC/POS thermal printer (USB through Windows, network/IP, or a serial port). Tickets show only the new round, marked *NEW ORDER* or *ADDITIONAL*, with options and notes. A **Reprint** button covers paper jams.
-- **Service charge**: Settings → Service charge sets a rate (e.g. 12.5%), its name on the bill and which order types get it (dine-in by default). It is a percentage of the food after discounts, not taxed, and shows on the ticket, bill, receipt, reports and end-of-day summary. Staff can change or remove it on any order by tapping it under the totals (logged).
+- **Service charge**: Manage → Service charge sets a rate (e.g. 12.5%), its name on the bill and which order types get it (dine-in by default). It is a percentage of the food after discounts, not taxed, and shows on the ticket, bill, receipt, reports and end-of-day summary. Staff can change or remove it on any order by tapping it under the totals (logged).
 - **Tax per order**: tap **Tax** under the totals to use each item's menu rate (the default), no tax, or one rate for every item on that order (e.g. a tax-free customer). Lines added later follow it; paid orders keep theirs (logged).
-- **Quick notes**: Settings → Quick notes lists common requests (No onions, Extra spicy…); tap ✎ on an order line and tap a note to add it. They print on the kitchen ticket, in Thai too.
-- **Kitchen tickets** print dishes, options and notes in large (double-size) text, with the table name at both the top and the bottom (Settings → Kitchen printer → Large text).
+- **Quick notes**: Manage → Quick notes lists common requests (No onions, Extra spicy…); tap ✎ on an order line and tap a note to add it. They print on the kitchen ticket, in Thai too.
+- **Kitchen tickets** print dishes, options and notes in large (double-size) text, with the table name at both the top and the bottom (Manage → Kitchen printer → Large text).
 - **Look**: "paper and ink". Warm paper work area, near-black side rail and primary buttons, one cobalt accent from the logo, solid status colours (tables: sunflower = occupied, teal = mains waiting, red ring = not sent), flat 1px rules instead of shadows and small corners. The menu tiles carry their category colour as a solid edge, and text on a category colour is black or white, whichever reads better. The bundled Sarabun font (Latin and Thai, SIL Open Font License, `ui/fonts/`) is used everywhere, so Thai looks right on every device and offline.
-- **Prices include tax** (Settings → Menu defaults, on by default): the price on the menu is what the customer pays, and the tax is worked out inside it. 10.00 at 20% is 8.33 of food and 1.67 of tax (10 × 20 ÷ 120), not 8.00 + 2.00, and the bill, receipt and reports show "Tax (included)". Each order remembers the way it was rung up, so switching the setting only affects new orders. Turn it off to add the tax on top of the price instead (10.00 + 2.00 = 12.00).
+- **Prices include tax** (Manage → Menu defaults, on by default): the price on the menu is what the customer pays, and the tax is worked out inside it. 10.00 at 20% is 8.33 of food and 1.67 of tax (10 × 20 ÷ 120), not 8.00 + 2.00, and the bill, receipt and reports show "Tax (included)". Each order remembers the way it was rung up, so switching the setting only affects new orders. Turn it off to add the tax on top of the price instead (10.00 + 2.00 = 12.00).
 - **On-screen keyboard** for touch tills: English, Thai (Kedmanee) and a number pad for prices, quantities and PINs. It opens when you tap a field (not when the app focuses one itself), and the top-bar keyboard button turns it on or off for that device (on by default on the main till, off in browsers, which have their own).
-- **Printouts** are bold throughout (Settings → printer → Bold text) and always print "#" as "#", even on printers set to the UK character set.
+- **Printouts** are bold throughout (Manage → printer → Bold text) and always print "#" as "#", even on printers set to the UK character set.
 - **Finish & Pay**: one button opens the payment screen. Choose **Cash** or **Card** (or *Paid by Uber Eats* for platform orders). For cash, type or tap the amount received (with quick buttons for exact and common notes) and the change is shown as you type, then again in large figures after payment. Unsent items go to the kitchen automatically when paid.
 - **End of day**: **Reports → Close day & print summary** prints the day's sales summary (orders, totals, tax, cash/card, order types, platforms, categories, voids) on the receipt printer and moves to the next business date. A day with no sales, voids or cancellations closes without printing, shown at the top of the screen. A day runs from one close to the next, so service after midnight still counts for the day it started. All orders must be paid or cancelled first. Previous days can be viewed and reprinted.
-- **Use it on other devices (optional local server)**: turn on **Settings → Local server** and open the address it shows (e.g. `http://192.168.1.20:8080`) in a browser on any tablet, laptop or phone on the same Wi-Fi. Each device logs in with its own PIN and shares the same orders, tables, menu and printers. Tick *Start automatically when the POS opens* to have it always on. See [Other devices](#other-devices-local-server).
-- **Full screen**: press **F11** or tap the full-screen button at the top right. Turn on **Settings → Display → Open in full screen when the POS starts** for a kiosk-style till.
+- **Use it on other devices (optional local server)**: turn on **Manage → Local server** and open the address it shows (e.g. `http://192.168.1.20:8080`) in a browser on any tablet, laptop or phone on the same Wi-Fi. Each device logs in with its own PIN and shares the same orders, tables, menu and printers. Tick *Start automatically when the POS opens* to have it always on. See [Other devices](#other-devices-local-server).
+- **Full screen**: press **F11** or tap the full-screen button at the top right. Turn on **Manage → Display → Open in full screen when the POS starts** for a kiosk-style till.
 - **PIN login** with **admin** and **staff** roles
-- **Auto logout**: after 5 minutes without a touch or key press (Settings → Auto logout: never, 1–60 minutes), with a 30-second warning. Applies to the till and every device on the local server; open orders are kept
+- **Auto logout**: after 5 minutes without a touch or key press (Manage → Auto logout: never, 1–60 minutes), with a 30-second warning. Applies to the till and every device on the local server; open orders are kept
 - **Delete mistakes (admin)**: History → an order → **Delete order** removes an order entered by mistake from history and reports for good (stock is put back); use Void for real refunds. In Menu, **Delete item** and **Delete category** remove them for good (items named on past orders are hidden everywhere, and those orders keep their own copy of the name and price)
 - **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items
 - **Backups**: automatic daily copy at startup (last 14 kept), plus "Back up everything now"
-- **Menu backup**: Settings → Menu backup saves just the menu (categories, items, choices, options, prices) to restore later or load on another till (*Restore from a file…*)
+- **Menu backup**: Manage → Menu backup saves just the menu (categories, items, choices, options, prices) to restore later or load on another till (*Restore from a file…*)
 - **Reset data (admin, danger zone)**: tick what to delete (sales history, all or before a date; customers; menu; floor plan; staff; settings) and keep the rest. Needs your PIN and typing RESET, and a full backup is saved automatically first
 - **Audit log** of logins, voids, discounts, removed items, menu, floor and user changes
 
@@ -72,14 +72,14 @@ Rust, so the UI can change without touching them.
 4. At closing time an admin uses **Reports → Close day & print summary**.
 
 **Wrong dish sent?** Tap ✎ on it: **−** or **Remove** prints a **CANCELLED** ticket for the kitchen, a new note prints a **CHANGED** ticket, and **Print again** prints just that dish again. Then add the right dish and send it as usual.
-Staff can do this by default; Settings → Orders → **Staff can take off or reduce dishes already sent** keeps it to admins.
+Staff can do this by default; Manage → Orders → **Staff can take off or reduce dishes already sent** keeps it to admins.
 
 Prices are fixed when an item is added, so menu price changes never alter an open bill.
 Each table can have only one open order at a time.
 
 ## Kitchen printer
 
-**Settings → Kitchen printer** (admin):
+**Manage → Kitchen printer** (admin):
 
 | Printer connection | Choose | Enter |
 | --- | --- | --- |
@@ -108,7 +108,7 @@ Ground
 
 ### Teams (a ticket for each part of the kitchen)
 
-Settings → **Kitchen teams** starts with Starter, Main, Curry and Rice; rename them, add your own, reorder or remove them.
+Manage → **Kitchen teams** starts with Starter, Main, Curry and Rice; rename them, add your own, reorder or remove them.
 Give each category a team (Menu → tap the category, "also move the items already here" updates existing items) or set a team on a single item.
 When you send an order, every team gets its own ticket with its name as a big white-on-black header, listing only its dishes.
 Items without a team print on a plain ticket last, and with no teams at all the kitchen gets one ticket as before.
@@ -117,7 +117,7 @@ All the tickets go to the kitchen printer in one job; "Print sample tickets" in 
 A team is *where* a ticket prints; the Starter / Prep ticks on an item are still *when* it is sent.
 
 **Call mains again** prints just the table in huge white-on-black letters and "MAIN COURSE" under it, without the dishes (the mains are already in the kitchen).
-Settings → Kitchen printer → "Call mains again prints only the table" turns the dishes back on.
+Manage → Kitchen printer → "Call mains again prints only the table" turns the dishes back on.
 
 ### Drinks
 
@@ -129,13 +129,15 @@ Categories named "Drinks", "Beverages" or "เครื่องดื่ม" st
 
 Tick **Dessert** on an item or **Desserts (own ticket)** on a category. Desserts print last, on their own **DESSERTS** ticket.
 Categories named "Desserts", "Sweets" or "ของหวาน" start as desserts when upgrading to 0.10.5.
-Settings → Drinks & desserts switches the own DRINKS and DESSERTS tickets on or off; off = they print on the normal ticket with the rest.
+Manage → Drinks & desserts switches the own DRINKS and DESSERTS tickets on or off; off = they print on the normal ticket with the rest.
 
-### Settings
+### Manage (settings)
 
-Settings opens on big tiles (Restaurant, Bills & receipts, Kitchen printer, Drinks & desserts, Orders, Kitchen teams, Login & staff, Delivery apps, Screen & devices, Backup & data, About & updates). Tap one to see only its settings; **All settings** goes back.
+The side bar has only **Tables**, **Orders** and **Manage**. Manage opens on big tiles: *Daily work* (History, Customers, Reports, and for admins Menu, Floor plan, Staff) and, for admins, *Settings*. Every page opened from Manage has a **← Manage** button.
 
-Settings → Kitchen teams → **Use kitchen teams** switches teams off without deleting them (tickets print as before teams).
+The settings tiles: Restaurant, Bills & receipts, Kitchen printer, Drinks & desserts, Orders, Kitchen teams, Login & staff, Delivery apps, Screen & devices, Backup & data, About & updates. Tap one to see only its settings; **← Manage** goes back.
+
+Manage → Kitchen teams → **Use kitchen teams** switches teams off without deleting them (tickets print as before teams).
 
 ### Set menus
 
@@ -175,16 +177,16 @@ that is off or unreachable gives up after 4 seconds and shows an error.
 
 ### Staff copy and the bill's name and address
 
-Settings → Receipt printer lets you set the **name at the top of the bill**, the **address, phone and VAT number** under it, and the message at the bottom.
+Manage → Receipt printer lets you set the **name at the top of the bill**, the **address, phone and VAT number** under it, and the message at the bottom.
 When an order is paid a second, **staff copy** prints after the customer's receipt: the items and the tax by class (rate, net, VAT, gross), marked "not for customer", to keep for the books.
 Switch it off in the same card; "Print staff copy" on a paid order in History reprints it.
 
 Bills and receipts list the dishes without category headings (still in menu order).
-Settings → **Words on tickets and bills** changes what tickets call each kind of order (DINE-IN, TAKEAWAY, COLLECTION, DELIVERY, and TABLE on the "main course" call); leave dine-in empty to print just the table.
+Manage → **Words on tickets and bills** changes what tickets call each kind of order (DINE-IN, TAKEAWAY, COLLECTION, DELIVERY, and TABLE on the "main course" call); leave dine-in empty to print just the table.
 
 ### Receipt printer and cash drawer
 
-**Settings → Receipt printer & cash drawer** works the same way (it can be the same
+**Manage → Receipt printer & cash drawer** works the same way (it can be the same
 printer as the kitchen one). Also set the number of copies, whether a receipt prints
 automatically after payment, whether the drawer opens for cash, the currency symbol,
 and the header (address, phone, VAT number) and footer lines. Use **Print test receipt**
@@ -253,7 +255,7 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 The main till (the PC with the app installed) can share the POS with other
 devices on the same network, with nothing to install on them.
 
-1. On the main till, open **Settings → Local server**, choose a port (8080 unless something else uses it) and tap **Start server**. Tick **Start automatically when the POS opens** to keep it on.
+1. On the main till, open **Manage → Local server**, choose a port (8080 unless something else uses it) and tap **Start server**. Tick **Start automatically when the POS opens** to keep it on.
 2. The first time, Windows asks whether to allow *POS* on the network: choose **Allow** for private networks.
 3. On the tablet, laptop or phone, open the address shown in the card (for example `http://192.168.1.20:8080`) in Chrome, Edge or Safari and log in with a PIN. Add it to the home screen for one-tap access.
 
@@ -291,7 +293,7 @@ updates do).
 and every 6 hours. When a new version is out, a bar appears at the top:
 *Update x.y.z available*. An admin taps **Install update**: the database is backed up
 (`backups\pos-before-update-*.db`), the app closes, updates and reopens. Orders, menu
-and settings are kept, as they live in `%APPDATA%\com.puppx.pos`. **Settings → About**
+and settings are kept, as they live in `%APPDATA%\com.puppx.pos`. **Manage → About**
 shows the version and has **Check for updates**.
 
 Updates are signed: the app only installs files signed with the project's private key,
@@ -314,7 +316,7 @@ The **Windows build** workflow tests, builds the installers and publishes the
 release, tagged `v` + the app version.
 
 **One-time setup for automatic updates:** add the update-signing private key as a
-repository secret named `TAURI_SIGNING_PRIVATE_KEY` (Settings → Secrets and variables →
+repository secret named `TAURI_SIGNING_PRIVATE_KEY` (Manage → Secrets and variables →
 Actions → New repository secret). The matching public key is in
 `src-tauri/tauri.conf.json`. Releases built without the secret still have installers,
 but no `latest.json`, so installed apps won't see them as updates. **Keep a backup of the

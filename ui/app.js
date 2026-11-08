@@ -224,7 +224,10 @@ const act = (fn) => async (ev) => {
 let refreshTimer;
 function screen(...kids) {
   clearInterval(refreshTimer);
-  setKids(app, ...kids);
+  // Pages opened from Manage get a way back to it.
+  const back = state.session && !state.orderId && inManage(state.view) && h('div', { class: 'manage-back' },
+    h('button', { class: 'back-btn', onclick: () => go('settings') }, icon('back', 22), 'Manage'));
+  setKids(app, back, ...kids);
 }
 // Poll a live view (floor, open orders). Each refresh is well under 1 ms.
 function live(fn, ms = 10000) {
@@ -337,17 +340,38 @@ function renderLogin() {
 
 // ---------- shell ----------
 
+/// [id, label, admin only, on the side bar]. The rest open from Manage.
 const VIEWS = [
-  ['floor', 'Tables', false],
-  ['orders', 'Orders', false],
+  ['floor', 'Tables', false, true],
+  ['orders', 'Orders', false, true],
+  ['settings', 'Manage', false, true],
   ['history', 'History', false],
   ['customers', 'Customers', false],
+  ['reports', 'Reports', false],
   ['menuAdmin', 'Menu', true],
   ['plan', 'Floor plan', true],
   ['users', 'Staff', true],
-  ['reports', 'Reports', false],
-  ['settings', 'Settings', true],
 ];
+/// What each Manage tile under "Daily work" says.
+const MANAGE_SUB = {
+  history: 'Paid orders, reprint, void', customers: 'Saved customers and addresses', reports: 'Sales, close the day',
+  menuAdmin: 'Items, categories, sets, prices', plan: 'Floors and tables', users: 'Staff, PINs, roles',
+};
+/// Settings areas on the Manage page (admin only); the cards are in renderSettings.
+const SETTINGS_GROUPS = [
+  ['shop', 'store', 'Restaurant', 'Name, service charge, tax'],
+  ['bills', 'receipt', 'Bills & receipts', 'Receipt printer, cash drawer, words on bills'],
+  ['kitchen', 'printer', 'Kitchen printer', 'Printer, copies, font'],
+  ['tickets', 'cup', 'Drinks & desserts', 'Own tickets on or off'],
+  ['orders', 'orders', 'Orders', 'Fix dishes already sent, quick notes'],
+  ['teams', 'chef', 'Kitchen teams', 'Starter, Main, Curry, Rice…'],
+  ['login', 'lock', 'Login & staff', 'Auto logout, PIN'],
+  ['delivery', 'bike', 'Delivery apps', 'Grab, LINE MAN, Foodpanda…'],
+  ['screen', 'monitor', 'Screen & devices', 'Full screen, phones and tablets'],
+  ['data', 'database', 'Backup & data', 'Backups, menu copy, reset'],
+  ['about', 'info', 'About & updates', ''],
+];
+const inManage = (view) => !VIEWS.find(([id]) => id === view)?.[3];
 
 function go(view) {
   if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
@@ -416,9 +440,11 @@ function renderShell() {
   document.getElementById('rail').hidden = false;
   setKids(document.getElementById('brand'), logoImg());
   document.getElementById('brand').title = state.storeName || 'POS';
-  document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , adm]) => !adm || isAdmin()).map(([id, label]) =>
-    h('button', { class: !state.orderId && id === state.view ? 'on' : '', onclick: () => go(id), title: label }, icon(id), h('span', {}, label))));
-  const title = state.orderId ? 'Order' : VIEWS.find(([id]) => id === state.view)?.[1];
+  const navOn = inManage(state.view) ? 'settings' : state.view;
+  document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , , rail]) => rail).map(([id, label]) =>
+    h('button', { class: !state.orderId && id === navOn ? 'on' : '', onclick: () => go(id), title: label }, icon(id), h('span', {}, label))));
+  const name = VIEWS.find(([id]) => id === state.view)?.[1];
+  const title = state.orderId ? 'Order' : inManage(state.view) ? `Manage › ${name}` : name;
   document.getElementById('title').replaceChildren(h('span', {}, state.storeName || 'POS'), h('span', { class: 'sep' }, '/'), title);
   document.getElementById('who').replaceChildren(h('span', { class: 'avatar' }, initials(state.session.name)),
     h('span', { class: 'who-text' }, h('strong', {}, state.session.name), h('small', {}, state.session.role === 'admin' ? 'Admin' : 'Staff')));
@@ -830,7 +856,7 @@ async function renderOrder() {
   // Report a kitchen print attempt alongside `msg`.
   function reportPrint(p, msg, needPrinter = false) {
     if (p.error) return toast(`${msg}, but the kitchen ticket did not print (${p.error}). Use Reprint.`, true);
-    if (!p.attempted && needPrinter) return toast('No kitchen printer is set up (Settings → Kitchen printer)', true);
+    if (!p.attempted && needPrinter) return toast('No kitchen printer is set up (Manage → Kitchen printer)', true);
     toast(p.attempted ? `${msg} · ticket printed` : msg);
   }
   async function setLine(it, changes) {
@@ -2892,6 +2918,8 @@ function serverCard() {
 const printResult = (r, ok) => toast(r.error ? `Did not print: ${r.error}` : ok, !!r.error);
 
 async function renderSettings() {
+  const tab = isAdmin() && SETTINGS_GROUPS.find(([id]) => id === state.settingsTab && (id !== 'screen' || !state.remote));
+  if (!tab) return renderManageHome();
   const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
   const [kitchenCfg, receiptCfg, systemPrinters] = await Promise.all([
     call('get_kitchen_printer'), call('get_receipt_settings'), call('list_system_printers'),
@@ -2978,35 +3006,44 @@ async function renderSettings() {
     h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; the last 14 are kept.'),
     h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up everything now')));
 
-  // The settings menu: one big tile per area; tap one to see just its settings.
-  const groups = [
-    { id: 'shop', icon: 'store', title: 'Restaurant', sub: 'Name, service charge, tax', cards: () => [restaurantCard(), serviceCard(), menuDefaultsCard()] },
-    { id: 'bills', icon: 'receipt', title: 'Bills & receipts', sub: 'Receipt printer, cash drawer, words on bills', cards: () => [receiptCard(), ticketLabelsCard()] },
-    { id: 'kitchen', icon: 'printer', title: 'Kitchen printer', sub: 'Printer, copies, font', cards: () => [kitchenPrinterCard()] },
-    { id: 'tickets', icon: 'cup', title: 'Drinks & desserts', sub: 'Own tickets on or off', cards: () => [splitCard()] },
-    { id: 'orders', icon: 'orders', title: 'Orders', sub: 'Fix dishes already sent, quick notes', cards: () => [fixSentCard(), quickNotesCard()] },
-    { id: 'teams', icon: 'chef', title: 'Kitchen teams', sub: 'Starter, Main, Curry, Rice…', cards: () => [teamsCard()] },
-    { id: 'login', icon: 'lock', title: 'Login & staff', sub: 'Auto logout, PIN', cards: () => [autoLogoutCard()] },
-    { id: 'delivery', icon: 'bike', title: 'Delivery apps', sub: 'Grab, LINE MAN, Foodpanda…', cards: () => [platformsCard()] },
-    { id: 'screen', icon: 'monitor', title: 'Screen & devices', sub: 'Full screen, phones and tablets', cards: () => [state.remote ? '' : displayCard(), state.remote ? '' : serverCard()] },
-    { id: 'data', icon: 'database', title: 'Backup & data', sub: 'Backups, menu copy, reset', cards: () => [backupCard(), menuBackupCard(), resetCard()] },
-    { id: 'about', icon: 'info', title: 'About & updates', sub: `Version ${state.version}`, cards: () => [aboutCard()] },
-  ].filter((g) => g.id !== 'screen' || !state.remote);
-  const group = groups.find((g) => g.id === state.settingsTab);
-  if (!group) {
-    state.settingsTab = null;
-    return screen(h('div', { class: 'page settings-home' },
-      h('div', { class: 'settings-tiles' }, groups.map((g) => h('button', {
-        class: 'settings-tile', 'data-group': g.id,
-        onclick: () => { state.settingsTab = g.id; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); },
-      }, icon(g.icon, 40), h('strong', {}, g.title), h('small', {}, g.sub))))));
-  }
+  const cards = {
+    shop: () => [restaurantCard(), serviceCard(), menuDefaultsCard()],
+    bills: () => [receiptCard(), ticketLabelsCard()],
+    kitchen: () => [kitchenPrinterCard()],
+    tickets: () => [splitCard()],
+    orders: () => [fixSentCard(), quickNotesCard()],
+    teams: () => [teamsCard()],
+    login: () => [autoLogoutCard()],
+    delivery: () => [platformsCard()],
+    screen: () => [displayCard(), serverCard()],
+    data: () => [backupCard(), menuBackupCard(), resetCard()],
+    about: () => [aboutCard()],
+  };
+  const group = { id: tab[0], icon: tab[1], title: tab[2], cards: cards[tab[0]] };
   const back = () => { state.settingsTab = null; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
   screen(h('div', { class: 'page settings' },
     h('div', { class: 'settings-head' },
-      h('button', { class: 'back-btn', onclick: back }, icon('back', 22), 'All settings'),
+      h('button', { class: 'back-btn', onclick: back }, icon('back', 22), 'Manage'),
       h('h2', {}, icon(group.icon, 26), group.title)),
     group.cards()));
+}
+
+/// Manage: big tiles for the other screens (History, Menu, Staff…) and,
+/// for admins, every settings area.
+function renderManageHome() {
+  state.settingsTab = null;
+  const tile = (id, ic, title, sub, onclick) => h('button', { class: 'settings-tile', 'data-group': id, onclick },
+    icon(ic, 40), h('strong', {}, title), sub && h('small', {}, sub));
+  const pages = VIEWS.filter(([id, , adm, rail]) => !rail && (!adm || isAdmin()));
+  const groups = isAdmin() ? SETTINGS_GROUPS.filter(([id]) => id !== 'screen' || !state.remote) : [];
+  const open = (id) => () => { state.settingsTab = id; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
+  screen(h('div', { class: 'page settings-home' },
+    h('h3', { class: 'manage-title' }, 'Daily work'),
+    h('div', { class: 'settings-tiles' }, pages.map(([id, label]) => tile(id, id, label, MANAGE_SUB[id], () => go(id)))),
+    groups.length > 0 && h('h3', { class: 'manage-title' }, 'Settings'),
+    groups.length > 0 && h('div', { class: 'settings-tiles' }, groups.map(([id, ic, title, sub]) =>
+      tile(id, ic, title, id === 'about' ? `Version ${state.version}` : sub, open(id))))));
+  return Promise.resolve();
 }
 
 /// Settings card: whether drinks and desserts get their own tickets.

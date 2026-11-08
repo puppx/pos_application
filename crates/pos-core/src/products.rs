@@ -30,6 +30,8 @@ pub struct Product {
     pub team_id: Option<i64>,
     /// A drink: never held for the mains, printed on its own DRINKS ticket.
     pub drink: bool,
+    /// A dessert: printed on its own DESSERTS ticket (when switched on).
+    pub dessert: bool,
     /// A set menu (see `save_set`).
     pub is_set: bool,
     /// Only sold inside set menus: no tile of its own on the order screen.
@@ -100,7 +102,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep, p.team_id, p.drink, p.is_set, p.set_only";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep, p.team_id, p.drink, p.is_set, p.set_only, p.dessert";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -125,6 +127,7 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         drink: r.get(16)?,
         is_set: r.get(17)?,
         set_only: r.get(18)?,
+        dessert: r.get(19)?,
     })
 }
 
@@ -368,6 +371,16 @@ impl Pos {
             return Err(PosError::NotFound);
         }
         self.audit(Some(s.user_id), "product.prep", &format!("{id} {prep}"))
+    }
+
+    pub fn set_dessert(&self, s: &Session, id: i64, dessert: bool) -> Result<()> {
+        s.require(Permission::ManageMenu)?;
+        let changed =
+            self.conn.execute("UPDATE products SET dessert = ?2, updated_at = unixepoch() WHERE id = ?1", params![id, dessert])?;
+        if changed == 0 {
+            return Err(PosError::NotFound);
+        }
+        self.audit(Some(s.user_id), "product.dessert", &format!("{id} {dessert}"))
     }
 
     pub fn set_drink(&self, s: &Session, id: i64, drink: bool) -> Result<()> {

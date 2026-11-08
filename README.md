@@ -71,6 +71,9 @@ Rust, so the UI can change without touching them.
 3. **Finish & Pay**, then Cash or Card. A table becomes free as soon as its order is paid.
 4. At closing time an admin uses **Reports → Close day & print summary**.
 
+**Wrong dish sent?** Tap ✎ on it: **−** or **Remove** prints a **CANCELLED** ticket for the kitchen, a new note prints a **CHANGED** ticket, and **Print again** prints just that dish again. Then add the right dish and send it as usual.
+Staff can do this by default; Settings → Orders → **Staff can take off or reduce dishes already sent** keeps it to admins.
+
 Prices are fixed when an item is added, so menu price changes never alter an open bill.
 Each table can have only one open order at a time.
 
@@ -121,6 +124,16 @@ Settings → Kitchen printer → "Call mains again prints only the table" turns 
 Tick **Drink** on an item (Menu list, item editor) or **Drinks (own ticket)** on a category (its items follow; new items in it start as drinks).
 Drinks are never held for the mains: they go with the first send, like starters, and print first on their own **DRINKS** ticket.
 Categories named "Drinks", "Beverages" or "เครื่องดื่ม" start as drinks when upgrading to 0.9.2.
+
+### Desserts
+
+Tick **Dessert** on an item or **Desserts (own ticket)** on a category. Desserts print last, on their own **DESSERTS** ticket.
+Categories named "Desserts", "Sweets" or "ของหวาน" start as desserts when upgrading to 0.10.5.
+Settings → Drinks & desserts switches the own DRINKS and DESSERTS tickets on or off; off = they print on the normal ticket with the rest.
+
+### Settings
+
+Settings opens on big tiles (Restaurant, Bills & receipts, Kitchen printer, Drinks & desserts, Orders, Kitchen teams, Login & staff, Delivery apps, Screen & devices, Backup & data, About & updates). Tap one to see only its settings; **All settings** goes back.
 
 Settings → Kitchen teams → **Use kitchen teams** switches teams off without deleting them (tickets print as before teams).
 

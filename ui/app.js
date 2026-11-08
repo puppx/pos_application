@@ -82,6 +82,15 @@ const ICONS = {
   wifi: '<path d="M2 8.8a15 15 0 0 1 20 0M5 12.6a10 10 0 0 1 14 0M8.5 16.4a5 5 0 0 1 7 0"/><circle cx="12" cy="20" r="1"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
   expand: '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>',
+  store: '<path d="M3 9l2-5h14l2 5"/><path d="M3 9h18v2a3 3 0 0 1-6 0 3 3 0 0 1-6 0 3 3 0 0 1-6 0z"/><path d="M5 13v8h14v-8M10 21v-5h4v5"/>',
+  receipt: '<path d="M6 2h12v20l-3-2-3 2-3-2-3 2z"/><path d="M9 7h6M9 11h6M9 15h4"/>',
+  chef: '<path d="M6 14a4 4 0 0 1-1-7.9A5 5 0 0 1 12 3a5 5 0 0 1 7 3.1A4 4 0 0 1 18 14v6H6z"/><path d="M6 17h12"/>',
+  cup: '<path d="M5 8h12v6a6 6 0 0 1-12 0z"/><path d="M17 10h2a2 2 0 0 1 0 4h-2M8 2v3M12 2v3"/>',
+  lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
+  tag: '<path d="M3 3h8l10 10-8 8L3 11z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
 };
 function icon(name, size = 22) {
   const el = h('span', { class: 'icon' });
@@ -342,6 +351,7 @@ const VIEWS = [
 
 function go(view) {
   if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
+  if (view === 'settings') state.settingsTab = null; // the settings menu first
   state.view = view;
   state.orderId = null;
   renderShell();
@@ -880,7 +890,10 @@ async function renderOrder() {
           it.note && h('div', { class: 'muted' }, '“', it.note, '”'),
           it.discount_cents ? h('div', { class: 'muted' }, `discount -${money(it.discount_cents)}`) : ''),
         h('td', { class: 'qty' }, h('div', { class: 'stepper' },
-          h('button', { onclick: act(() => setLine(it, { qty: it.qty - 1 })) }, '−'),
+          h('button', { onclick: act(async () => {
+            await setLine(it, { qty: it.qty - 1 });
+            if (sent) toast(`${it.name} −1 · CANCELLED ticket sent to the kitchen`);
+          }) }, '−'),
           h('span', {}, it.qty),
           h('button', { onclick: act(() => (sent
             ? (it.is_set ? openSetPicker(state.menu.find((p) => p.id === it.product_id) ?? { id: it.product_id, name: it.name, price_cents: it.unit_price_cents })
@@ -890,7 +903,7 @@ async function renderOrder() {
         h('td', {}, h('button', { class: `icon-btn ${editing === it.id ? 'on' : ''}`, title: 'Note, discount, remove',
           onclick: () => { editing = editing === it.id ? null : it.id; draw(); } }, '✎')));
       if (editing !== it.id) return row;
-      const note = h('input', { value: it.note ?? '', placeholder: 'Note (no onions…)', disabled: sent });
+      const note = h('input', { value: it.note ?? '', placeholder: 'Note (no onions…)' });
       const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: 'Discount', style: 'width:90px' });
       // Quick notes: tap to add to (or take off) the note.
       const chips = h('div', { class: 'quick-notes' });
@@ -907,13 +920,23 @@ async function renderOrder() {
         }, q)));
       };
       note.addEventListener('input', drawChips);
-      if (!sent) drawChips();
-      return [row, h('tr', {}, h('td', { colspan: 4 }, !sent && chips, h('div', { class: 'row' }, note, disc,
+      drawChips();
+      return [row, h('tr', {}, h('td', { colspan: 4 },
+        sent && h('div', { class: 'muted small sent-hint' }, 'Already in the kitchen. Fix it here: − or Remove prints a CANCELLED ticket, a new note prints a CHANGED ticket. ' +
+          'Then add the right dish and send it as usual.'),
+        chips, h('div', { class: 'row' }, note, disc,
         h('button', { class: 'primary', onclick: act(async () => {
-          await setLine(it, { note: note.value || null, discount_cents: disc.value ? parseMoney(disc.value) : 0 });
+          const newNote = note.value.trim() || null;
+          await setLine(it, { note: newNote, discount_cents: disc.value ? parseMoney(disc.value) : 0 });
           editing = null; draw();
+          if (sent && newNote !== (it.note ?? null)) toast('Note changed · CHANGED ticket sent to the kitchen');
         }) }, 'Save'),
-        h('button', { class: 'danger', onclick: act(async () => { editing = null; await setLine(it, { qty: 0 }); }) }, 'Remove'))))];
+        sent && h('button', { title: 'Print this dish on a kitchen ticket again', onclick: act(async () =>
+          reportPrint(await call('reprint_kitchen_items', { orderId, itemIds: [it.id] }), `${it.name} printed again`, true)) }, 'Print again'),
+        h('button', { class: 'danger', onclick: act(async () => {
+          editing = null; await setLine(it, { qty: 0 });
+          if (sent) toast(`${it.name} removed · CANCELLED ticket sent to the kitchen`);
+        }) }, 'Remove'))))];
     })));
     if (!order.items.length) lines.append(h('div', { class: 'empty small' }, icon('orders', 36), h('p', {}, 'Tap menu items to add them')));
     setKids(totals, 
@@ -1496,7 +1519,7 @@ async function renderMenuAdmin() {
   const activeGroups = groups.filter((g) => g.active);
   const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
   // What a new item in category `id` starts with.
-  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep, team: catById[id]?.team_id ?? null, drink: !!catById[id]?.drink });
+  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep, team: catById[id]?.team_id ?? null, drink: !!catById[id]?.drink, dessert: !!catById[id]?.dessert });
   const form = popupHost();
   const list = h('div');
   const search = h('input', { type: 'search', placeholder: 'Search items' });
@@ -1534,6 +1557,7 @@ async function renderMenuAdmin() {
       h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), teams.length > 0 && h('th', { title: 'The kitchen team whose ticket this item prints on' }, 'Team'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
         h('th', { title: 'Prepare ahead: a PREPARE NOW ticket prints while the mains wait' }, 'Prep'),
         h('th', { title: 'Drink: goes straight away, on its own DRINKS ticket' }, 'Drink'),
+        h('th', { title: 'Dessert: printed on its own DESSERTS ticket' }, 'Dessert'),
         h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
       products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
         onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
@@ -1568,6 +1592,14 @@ async function renderMenuAdmin() {
             toast(`${p.name}: ${p.drink ? 'drink (own ticket)' : 'not a drink'}`);
           }),
         })),
+        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+          type: 'checkbox', checked: p.dessert, title: 'Dessert: printed on its own DESSERTS ticket',
+          onchange: act(async (e) => {
+            await call('set_dessert', { id: p.id, dessert: e.target.checked });
+            p.dessert = e.target.checked;
+            toast(`${p.name}: ${p.dessert ? 'dessert (own ticket)' : 'not a dessert'}`);
+          }),
+        })),
         h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
         h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—'))));
     setKids(list, table,
@@ -1586,6 +1618,7 @@ async function renderMenuAdmin() {
     const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
     const prep = h('input', { type: 'checkbox', checked: c ? c.prep : false });
     const drink = h('input', { type: 'checkbox', checked: c ? c.drink : /drink|beverage|เครื่องดื่ม/i.test(c?.name ?? '') });
+    const dessert = h('input', { type: 'checkbox', checked: c ? c.dessert : /dessert|sweet|ของหวาน/i.test(c?.name ?? '') });
     const team = teamSelect(c?.team_id, 'No team');
     const moveItems = h('input', { type: 'checkbox', checked: true });
     const save = act(async () => {
@@ -1604,6 +1637,7 @@ async function renderMenuAdmin() {
       await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked, prep: prep.checked, nameAlt: alt.value.trim() || null });
       // Drinks: the items already here follow the category.
       if (drink.checked !== !!c?.drink) await call('set_category_drink', { id: saved.id, drink: drink.checked, moveItems: true });
+      if (dessert.checked !== !!c?.dessert) await call('set_category_dessert', { id: saved.id, dessert: dessert.checked, moveItems: true });
       const teamId = team.value ? Number(team.value) : null;
       if (teamId !== (c?.team_id ?? null) || (teamId != null && moveItems.checked)) {
         await call('set_category_team', { id: saved.id, teamId, moveItems: moveItems.checked });
@@ -1620,7 +1654,8 @@ async function renderMenuAdmin() {
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
         h('label', { class: 'check' }, starter, ' Items here are starters'),
         h('label', { class: 'check' }, prep, ' Items here are prepared ahead'),
-        h('label', { class: 'check', title: 'Sent straight away and printed on their own DRINKS ticket' }, drink, ' Drinks (own ticket)')),
+        h('label', { class: 'check', title: 'Sent straight away and printed on their own DRINKS ticket' }, drink, ' Drinks (own ticket)'),
+        h('label', { class: 'check', title: 'Printed on their own DESSERTS ticket' }, dessert, ' Desserts (own ticket)')),
       teams.length > 0 && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Kitchen team', team),
         h('label', { class: 'check' }, moveItems, ' Also move the items already here to this team'),
         h('span', { class: 'muted small' }, 'Each team gets its own ticket with its name as a big header.')),
@@ -1700,6 +1735,7 @@ async function renderMenuAdmin() {
       prep: h('input', { type: 'checkbox', checked: p ? p.prep : d0.prep }),
       team: teamSelect(p ? p.team_id : d0.team, 'No team'),
       drink: h('input', { type: 'checkbox', checked: p ? p.drink : d0.drink }),
+      dessert: h('input', { type: 'checkbox', checked: p ? p.dessert : d0.dessert }),
       setOnly: h('input', { type: 'checkbox', checked: !!p?.set_only }),
     };
     f.cat.value = startCat ?? '';
@@ -1708,6 +1744,8 @@ async function renderMenuAdmin() {
     f.team.addEventListener('change', () => (teamTouched = true));
     let drinkTouched = !!p;
     f.drink.addEventListener('change', () => (drinkTouched = true));
+    let dessertTouched = !!p;
+    f.dessert.addEventListener('change', () => (dessertTouched = true));
     f.tax.addEventListener('input', () => (taxTouched = true));
     f.starter.addEventListener('change', () => (starterTouched = true));
     f.prep.addEventListener('change', () => (prepTouched = true));
@@ -1718,6 +1756,7 @@ async function renderMenuAdmin() {
       if (!prepTouched) f.prep.checked = d.prep;
       if (!teamTouched) f.team.value = d.team ?? '';
       if (!drinkTouched) f.drink.checked = d.drink;
+      if (!dessertTouched) f.dessert.checked = d.dessert;
       preview();
     });
     const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
@@ -1832,6 +1871,7 @@ async function renderMenuAdmin() {
       if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds });
       if (p || v.variants.length) await call('set_variants', { productId: saved.id, variants: v.variants });
       if (saved.drink !== f.drink.checked) await call('set_drink', { id: saved.id, drink: f.drink.checked });
+      if (saved.dessert !== f.dessert.checked) await call('set_dessert', { id: saved.id, dessert: f.dessert.checked });
       if (!!saved.set_only !== f.setOnly.checked) await call('set_set_only', { id: saved.id, setOnly: f.setOnly.checked });
       state.menu = null;
       if (again) {
@@ -1850,12 +1890,13 @@ async function renderMenuAdmin() {
     const reason = h('input', { placeholder: 'Reason (delivery, count…)' });
     // 3: the rarely needed fields wait behind "More options".
     const more = h('details', { class: 'more-options' },
-      h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, drink, choices, extras, stock, codes')),
+      h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, drink, dessert, choices, extras, stock, codes')),
       h('div', { class: 'stack' },
         h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', f.tax), h('label', { class: 'field' }, 'Cost', f.cost),
           h('label', { class: 'check' }, f.starter, ' Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)')),
           h('label', { class: 'check' }, f.prep, ' Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)')),
           h('label', { class: 'check' }, f.drink, ' Drink ', h('span', { class: 'muted' }, '(sent straight away, own DRINKS ticket)')),
+          h('label', { class: 'check' }, f.dessert, ' Dessert ', h('span', { class: 'muted' }, '(own DESSERTS ticket)')),
           h('label', { class: 'check' }, f.setOnly, ' Only in set menus ', h('span', { class: 'muted' }, '(no tile of its own on the order screen)'))),
         h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
           h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering.'),
@@ -2875,79 +2916,127 @@ async function renderSettings() {
     header: header.value.trim() || null, footer: footer.value.trim() || null, currency: currency.value,
   });
 
+  const restaurantCard = () => h('div', { class: 'card stack' },
+    h('h3', {}, 'Restaurant'),
+    h('div', { class: 'row' }, store, h('button', { class: 'primary', onclick: act(async () => {
+      await call('set_setting', { key: 'store_name', value: store.value });
+      toast('Saved');
+      await start();
+    }) }, 'Save')));
+  const kitchenPrinterCard = () => h('div', { class: 'card stack' },
+    h('h3', {}, 'Kitchen printer'),
+    h('div', { class: 'muted' }, 'Tickets print on "Send to kitchen" on any ESC/POS thermal printer (Epson, Star, Xprinter…). ' +
+      'For USB printers choose "installed in Windows"; for network printers use the IP address from its self-test page.'),
+    kitchen.el,
+    h('div', { class: 'row' },
+      h('button', { onclick: act(async () => {
+        if (kitchen.none()) return toast('Choose a printer first', true);
+        printResult(await call('test_kitchen_printer', { config: kitchen.config() }), 'Test ticket sent');
+      }) }, 'Print test ticket'),
+      h('button', { class: 'primary', onclick: act(async () => {
+        await call('set_kitchen_printer', { config: kitchen.config() });
+        toast('Kitchen printer saved');
+      }) }, 'Save kitchen printer')));
+  const receiptCard = () => h('div', { class: 'card stack' },
+    h('h3', {}, 'Receipt printer & cash drawer'),
+    h('div', { class: 'muted' }, 'Customer receipts and bills. The cash drawer plugs into this printer. ' +
+      'It can be the same printer as the kitchen one.'),
+    receipt.el,
+    h('label', {}, autoPrint, ' Print a receipt automatically after payment'),
+    h('label', {}, drawer, ' Open the cash drawer for cash payments'),
+    h('label', {}, staffCopy, ' Also print a staff copy after payment, with the tax by class (net, VAT, gross)'),
+    h('div', { class: 'row' }, 'Currency symbol', currency),
+    h('label', { class: 'field' }, 'Name at the top of the bill', h('div', { class: 'row' }, shopName)),
+    h('label', { class: 'field' }, 'Address, phone, VAT number (under the name, one per line)', header),
+    h('label', { class: 'field' }, 'Message at the bottom', h('div', { class: 'row' }, footer)),
+    h('div', { class: 'row' },
+      h('button', { onclick: act(async () => {
+        if (receipt.none()) return toast('Choose a printer first', true);
+        printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: false }), 'Test receipt sent');
+      }) }, 'Print test receipt'),
+      h('button', { onclick: act(async () => {
+        if (receipt.none()) return toast('Choose a printer first', true);
+        printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: true }), 'Drawer opened');
+      }) }, 'Test cash drawer'),
+      h('button', { class: 'primary', onclick: act(async () => {
+        await call('set_receipt_settings', { settings: receiptSettings() });
+        toast('Receipt settings saved');
+      }) }, 'Save receipt settings')));
+  const aboutCard = () => h('div', { class: 'card stack' },
+    h('h3', {}, 'About'),
+    h('div', {}, `POS version ${state.version}`),
+    state.remote
+      ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
+      : [h('div', { class: 'muted' }, 'The app checks for updates when it starts and every few hours. Installing one takes about a minute: ' +
+        'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
+      h('div', { class: 'row' }, h('button', { onclick: act(async () => {
+        const info = await checkForUpdate(false);
+        if (info && !info.available) toast(`You have the latest version (${info.current})`);
+      }) }, 'Check for updates'))]);
+  const backupCard = () => h('div', { class: 'card stack' },
+    h('h3', {}, 'Backup'),
+    h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; the last 14 are kept.'),
+    h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up everything now')));
+
+  // The settings menu: one big tile per area; tap one to see just its settings.
+  const groups = [
+    { id: 'shop', icon: 'store', title: 'Restaurant', sub: 'Name, service charge, tax', cards: () => [restaurantCard(), serviceCard(), menuDefaultsCard()] },
+    { id: 'bills', icon: 'receipt', title: 'Bills & receipts', sub: 'Receipt printer, cash drawer, words on bills', cards: () => [receiptCard(), ticketLabelsCard()] },
+    { id: 'kitchen', icon: 'printer', title: 'Kitchen printer', sub: 'Printer, copies, font', cards: () => [kitchenPrinterCard()] },
+    { id: 'tickets', icon: 'cup', title: 'Drinks & desserts', sub: 'Own tickets on or off', cards: () => [splitCard()] },
+    { id: 'orders', icon: 'orders', title: 'Orders', sub: 'Fix dishes already sent, quick notes', cards: () => [fixSentCard(), quickNotesCard()] },
+    { id: 'teams', icon: 'chef', title: 'Kitchen teams', sub: 'Starter, Main, Curry, Rice…', cards: () => [teamsCard()] },
+    { id: 'login', icon: 'lock', title: 'Login & staff', sub: 'Auto logout, PIN', cards: () => [autoLogoutCard()] },
+    { id: 'delivery', icon: 'bike', title: 'Delivery apps', sub: 'Grab, LINE MAN, Foodpanda…', cards: () => [platformsCard()] },
+    { id: 'screen', icon: 'monitor', title: 'Screen & devices', sub: 'Full screen, phones and tablets', cards: () => [state.remote ? '' : displayCard(), state.remote ? '' : serverCard()] },
+    { id: 'data', icon: 'database', title: 'Backup & data', sub: 'Backups, menu copy, reset', cards: () => [backupCard(), menuBackupCard(), resetCard()] },
+    { id: 'about', icon: 'info', title: 'About & updates', sub: `Version ${state.version}`, cards: () => [aboutCard()] },
+  ].filter((g) => g.id !== 'screen' || !state.remote);
+  const group = groups.find((g) => g.id === state.settingsTab);
+  if (!group) {
+    state.settingsTab = null;
+    return screen(h('div', { class: 'page settings-home' },
+      h('div', { class: 'settings-tiles' }, groups.map((g) => h('button', {
+        class: 'settings-tile', 'data-group': g.id,
+        onclick: () => { state.settingsTab = g.id; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); },
+      }, icon(g.icon, 40), h('strong', {}, g.title), h('small', {}, g.sub))))));
+  }
+  const back = () => { state.settingsTab = null; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
   screen(h('div', { class: 'page settings' },
-    h('div', { class: 'card stack' },
-      h('h3', {}, 'Restaurant'),
-      h('div', { class: 'row' }, store, h('button', { class: 'primary', onclick: act(async () => {
-        await call('set_setting', { key: 'store_name', value: store.value });
-        toast('Saved');
-        await start();
-      }) }, 'Save'))),
-    serviceCard(),
-    menuDefaultsCard(),
-    teamsCard(),
-    ticketLabelsCard(),
-    quickNotesCard(),
-    autoLogoutCard(),
-    state.remote ? '' : displayCard(),
-    h('div', { class: 'card stack' },
-      h('h3', {}, 'Kitchen printer'),
-      h('div', { class: 'muted' }, 'Tickets print on "Send to kitchen", grouped by menu category, on any ESC/POS thermal printer (Epson, Star, Xprinter…). ' +
-        'For USB printers choose "installed in Windows"; for network printers use the IP address from its self-test page.'),
-      kitchen.el,
-      h('div', { class: 'row' },
-        h('button', { onclick: act(async () => {
-          if (kitchen.none()) return toast('Choose a printer first', true);
-          printResult(await call('test_kitchen_printer', { config: kitchen.config() }), 'Test ticket sent');
-        }) }, 'Print test ticket'),
-        h('button', { class: 'primary', onclick: act(async () => {
-          await call('set_kitchen_printer', { config: kitchen.config() });
-          toast('Kitchen printer saved');
-        }) }, 'Save kitchen printer'))),
-    h('div', { class: 'card stack' },
-      h('h3', {}, 'Receipt printer & cash drawer'),
-      h('div', { class: 'muted' }, 'Customer receipts and bills, grouped by menu category. The cash drawer plugs into this printer. ' +
-        'It can be the same printer as the kitchen one.'),
-      receipt.el,
-      h('label', {}, autoPrint, ' Print a receipt automatically after payment'),
-      h('label', {}, drawer, ' Open the cash drawer for cash payments'),
-      h('label', {}, staffCopy, ' Also print a staff copy after payment, with the tax by class (net, VAT, gross)'),
-      h('div', { class: 'row' }, 'Currency symbol', currency),
-      h('label', { class: 'field' }, 'Name at the top of the bill', h('div', { class: 'row' }, shopName)),
-      h('label', { class: 'field' }, 'Address, phone, VAT number (under the name, one per line)', header),
-      h('label', { class: 'field' }, 'Message at the bottom', h('div', { class: 'row' }, footer)),
-      h('div', { class: 'row' },
-        h('button', { onclick: act(async () => {
-          if (receipt.none()) return toast('Choose a printer first', true);
-          printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: false }), 'Test receipt sent');
-        }) }, 'Print test receipt'),
-        h('button', { onclick: act(async () => {
-          if (receipt.none()) return toast('Choose a printer first', true);
-          printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: true }), 'Drawer opened');
-        }) }, 'Test cash drawer'),
-        h('button', { class: 'primary', onclick: act(async () => {
-          await call('set_receipt_settings', { settings: receiptSettings() });
-          toast('Receipt settings saved');
-        }) }, 'Save receipt settings'))),
-    platformsCard(),
-    state.remote ? '' : serverCard(),
-    h('div', { class: 'card stack' },
-      h('h3', {}, 'About'),
-      h('div', {}, `POS version ${state.version}`),
-      state.remote
-        ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
-        : [h('div', { class: 'muted' }, 'The app checks for updates when it starts and every few hours. Installing one takes about a minute: ' +
-          'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
-        h('div', { class: 'row' }, h('button', { onclick: act(async () => {
-          const info = await checkForUpdate(false);
-          if (info && !info.available) toast(`You have the latest version (${info.current})`);
-        }) }, 'Check for updates'))]),
-    h('div', { class: 'card stack' },
-      h('h3', {}, 'Backup'),
-      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; the last 14 are kept.'),
-      h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up everything now'))),
-    menuBackupCard(),
-    resetCard()));
+    h('div', { class: 'settings-head' },
+      h('button', { class: 'back-btn', onclick: back }, icon('back', 22), 'All settings'),
+      h('h2', {}, icon(group.icon, 26), group.title)),
+    group.cards()));
+}
+
+/// Settings card: whether drinks and desserts get their own tickets.
+function splitCard() {
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Own tickets for drinks and desserts'),
+    settingSwitch('drinks_split', 'Print drinks on their own DRINKS ticket', 'Drinks on their own ticket', 'Drinks print with the food'),
+    settingSwitch('desserts_split', 'Print desserts on their own DESSERTS ticket', 'Desserts on their own ticket', 'Desserts print with the food'),
+    h('div', { class: 'muted' }, 'Which items are drinks or desserts: Menu → tick "Drink" or "Dessert" on the item, or tap a category and tick "Drinks" / "Desserts" for all of it. ' +
+      'Off = they print on the normal ticket with the rest. Drinks still go to the kitchen straight away.'));
+}
+
+/// Settings card: who may fix a dish that was already sent.
+function fixSentCard() {
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Fixing a dish already sent'),
+    settingSwitch('staff_cancel_sent', 'Staff can take off or reduce dishes already sent', 'Staff can fix sent dishes', 'Only an admin can take off sent dishes'),
+    h('div', { class: 'muted' }, 'Wrong dish sent? On the order tap ✎ on it: − or Remove prints a CANCELLED ticket for the kitchen, a new note prints a CHANGED ticket, ' +
+      '"Print again" prints that dish again. Then add the right dish and send it.'));
+}
+
+/// An on/off switch for setting `key` (on unless it is "0").
+function settingSwitch(key, label, onMsg, offMsg) {
+  const box = h('input', { type: 'checkbox', checked: true });
+  invoke('get_setting', { key }).then((v) => (box.checked = v !== '0')).catch(() => {});
+  box.onchange = act(async () => {
+    await call('set_setting', { key, value: box.checked ? '1' : '0' });
+    toast(box.checked ? onMsg : offMsg);
+  });
+  return h('label', { class: 'switch', 'data-key': key }, box, h('span', {}, ''), label);
 }
 
 /// Two taps to run `fn`: the first changes the label to `sure`.

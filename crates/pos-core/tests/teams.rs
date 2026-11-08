@@ -346,3 +346,47 @@ fn team_bar_language_is_a_setting() {
     k.pos.set_setting(&k.s, "team_names", "thai").unwrap();
     assert_eq!(bar(&k), "แกง");
 }
+
+#[test]
+fn desserts_print_last_on_their_own_ticket_and_both_can_be_switched_off() {
+    let mut k = setup();
+    let cat = k.pos.create_category(&k.s, "Desserts", None, 6).unwrap();
+    // Named like desserts: marked from the start, and its items follow.
+    let cake = k.pos.create_product(&k.s, NewProduct {
+        category_id: Some(cat.id), sku: None, barcode: None, name: "Mango sticky rice".into(), price_cents: 900, cost_cents: 0,
+        tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+    }).unwrap();
+    k.pos.set_category_dessert(&k.s, cat.id, true, true).unwrap();
+    assert!(k.pos.get_product(&k.s, cake.id).unwrap().dessert);
+    k.pos.set_drink(&k.s, k.cola.id, true).unwrap();
+
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, cake.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.cola.id, 1, None, None, &[]).unwrap();
+    let items = k.pos.get_order(&k.s, o.id).unwrap().items;
+    let t = k.pos.kitchen_tickets(&k.s, o.id, &items, false).unwrap();
+    assert_eq!(heads(&t), [Some("DRINKS"), Some("MAIN"), Some("DESSERTS")]);
+    assert_eq!(t[2].items[0].name, "Mango sticky rice");
+
+    k.pos.set_setting(&k.s, "drinks_split", "0").unwrap();
+    k.pos.set_setting(&k.s, "desserts_split", "0").unwrap();
+    let t = k.pos.kitchen_tickets(&k.s, o.id, &items, false).unwrap();
+    assert!(!heads(&t).contains(&Some("DRINKS")) && !heads(&t).contains(&Some("DESSERTS")));
+    assert_eq!(t.iter().map(|t| t.items.len()).sum::<usize>(), 3);
+}
+
+#[test]
+fn fixing_a_sent_dish_tells_the_kitchen() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    let o = k.pos.add_item(&k.s, o.id, k.soup.id, 2, None, None, &[]).unwrap();
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    let mut line = k.pos.get_order(&k.s, o.id).unwrap().items[0].clone();
+    line.qty = 1;
+    let job = k.pos.kitchen_change_job(&k.s, o.id, "CANCELLED", &[line]).unwrap().unwrap();
+    let text = String::from_utf8_lossy(&job.bytes()).to_string();
+    assert!(text.contains("CANCELLED") && text.contains("Soup"));
+    // Nothing printable: no job.
+    assert!(k.pos.kitchen_change_job(&k.s, o.id, "CANCELLED", &[]).unwrap().is_none());
+}

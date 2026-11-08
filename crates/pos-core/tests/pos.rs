@@ -241,14 +241,22 @@ fn sent_items_need_admin_to_remove() {
     pos.send_to_kitchen(&s, o.id).unwrap();
 
     let keep_note = Some("well done".to_string());
-    let reduce = ItemUpdate { qty: 1, discount_cents: 0, note: keep_note.clone() };
-    assert!(matches!(pos.update_item(&s, line, &reduce), Err(PosError::Forbidden)));
+    let reduce = ItemUpdate { qty: 2, discount_cents: 0, note: keep_note.clone() };
+    // Adding more to a sent line is never allowed (add a new line instead).
     assert!(pos.update_item(&s, line, &ItemUpdate { qty: 4, discount_cents: 0, note: keep_note.clone() }).is_err());
-    assert!(pos.update_item(&s, line, &ItemUpdate { qty: 3, discount_cents: 0, note: None }).is_err());
     // Discount on a sent item is fine for staff.
     let o = pos.update_item(&s, line, &ItemUpdate { qty: 3, discount_cents: 500, note: keep_note.clone() }).unwrap();
     assert_eq!(o.total_cents, 2500);
-    // Admin can reduce.
+    // By default staff may fix a mistake: reduce a sent line and change its note.
+    let o = pos.update_item(&s, line, &reduce).unwrap();
+    assert_eq!(o.items[0].qty, 2);
+    let o = pos.update_item(&s, line, &ItemUpdate { qty: 2, discount_cents: 500, note: Some("no onion".into()) }).unwrap();
+    assert_eq!(o.items[0].note.as_deref(), Some("no onion"));
+
+    // With the setting off, only an admin can reduce a sent line.
+    pos.set_setting(&admin, "staff_cancel_sent", "0").unwrap();
+    let reduce = ItemUpdate { qty: 1, discount_cents: 500, note: Some("no onion".into()) };
+    assert!(matches!(pos.update_item(&s, line, &reduce), Err(PosError::Forbidden)));
     let o = pos.update_item(&admin, line, &reduce).unwrap();
     assert_eq!(o.items[0].qty, 1);
 

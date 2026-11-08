@@ -875,22 +875,61 @@ impl Pos {
     /// Drinks come first, on their own DRINKS ticket.
     pub fn kitchen_tickets(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<Vec<KitchenTicket>> {
         let items = &kitchen_only(items);
-        let mut base = self.kitchen_ticket(s, order_id, items, reprint)?;
+        let base = self.kitchen_ticket(s, order_id, items, reprint)?;
+        self.split_for_kitchen(base, items)
+    }
+
+    /// A short ticket telling the kitchen about a change to dishes already
+    /// sent: "CANCELLED" (removed or fewer) or "CHANGED" (a new note), split
+    /// like any other ticket so the right team gets it. One copy.
+    pub fn kitchen_change_job(&self, s: &Session, order_id: i64, title: &str, items: &[OrderItem]) -> Result<Option<PrintJob>> {
+        let cfg = self.kitchen_printer()?;
+        let items = kitchen_only(items);
+        if cfg.target == PrinterTarget::None || items.is_empty() {
+            return Ok(None);
+        }
+        let mut base = self.kitchen_ticket(s, order_id, &items, false)?;
+        base.title = title.to_string();
+        base.footer = None;
+        let tickets = self.split_for_kitchen(base, &items)?;
+        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs)))
+    }
+
+    /// Drinks first and desserts last on tickets of their own (each when
+    /// switched on in Settings: `drinks_split`, `desserts_split`), the rest
+    /// one ticket per team.
+    pub(crate) fn split_for_kitchen(&self, mut base: KitchenTicket, items: &[OrderItem]) -> Result<Vec<KitchenTicket>> {
         let names = self.kitchen_printer()?.names.unwrap_or(PrintNames::Both);
-        let (drinks, food) = self.drinks_apart(items)?;
-        if drinks.is_empty() {
+        let drinks_on = self.setting("drinks_split")?.as_deref() != Some("0");
+        let desserts_on = self.setting("desserts_split")?.as_deref() != Some("0");
+        let mut stmt = self.conn.prepare_cached("SELECT drink, dessert FROM products WHERE id = ?1")?;
+        let (mut drinks, mut desserts, mut food) = (Vec::new(), Vec::new(), Vec::new());
+        for it in items {
+            let (drink, dessert): (bool, bool) = stmt.query_row([it.product_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.unwrap_or_default();
+            match (drink && drinks_on, dessert && desserts_on) {
+                (true, _) => drinks.push(it.clone()),
+                (_, true) => desserts.push(it.clone()),
+                _ => food.push(it.clone()),
+            }
+        }
+        drop(stmt);
+        if drinks.is_empty() && desserts.is_empty() {
             return self.split_by_team(base, items, names);
         }
-        let mut out = vec![KitchenTicket {
-            items: self.ticket_items(&drinks, names)?,
-            banner: Some(self.team_label()?("Drinks", Some("เครื่องดื่ม"))),
-            footer: None,
-            ..base.clone()
-        }];
+        let label = self.team_label()?;
+        let own = |group: &[OrderItem], en: &str, th: &str, base: &KitchenTicket| -> Result<KitchenTicket> {
+            Ok(KitchenTicket { items: self.ticket_items(group, names)?, banner: Some(label(en, Some(th))), footer: None, ..base.clone() })
+        };
+        let mut out = Vec::new();
+        if !drinks.is_empty() {
+            out.push(own(&drinks, "Drinks", "เครื่องดื่ม", &base)?);
+        }
+        let last = (!desserts.is_empty()).then(|| own(&desserts, "Desserts", "ของหวาน", &base)).transpose()?;
         if !food.is_empty() {
             base.items = self.ticket_items(&food, names)?;
             out.extend(self.split_by_team(base, &food, names)?);
         }
+        out.extend(last);
         Ok(out)
     }
 

@@ -696,6 +696,14 @@ impl Pos {
         self.get_order(s, order_id)
     }
 
+    /// The order a line belongs to.
+    pub fn order_of_item(&self, item_id: i64) -> Result<i64> {
+        self.conn
+            .query_row("SELECT order_id FROM order_items WHERE id = ?1", [item_id], |r| r.get(0))
+            .optional()?
+            .ok_or(PosError::NotFound)
+    }
+
     /// Change quantity, discount or note on a line; qty 0 removes it.
     /// Lines already sent to the kitchen can only be reduced or removed by
     /// an admin (it is food that has been made), and their note is fixed.
@@ -717,11 +725,15 @@ impl Pos {
             if upd.qty > cur.qty {
                 return invalid("this item was already sent to the kitchen; add it again instead");
             }
-            if upd.qty < cur.qty {
+            // Fixing a mistake after sending (the kitchen gets a CANCELLED
+            // ticket): staff may, unless Settings keep it to admins.
+            let staff_may = tx
+                .query_row("SELECT value FROM settings WHERE key = 'staff_cancel_sent'", [], |r| r.get::<_, String>(0))
+                .optional()?
+                .as_deref()
+                != Some("0");
+            if upd.qty < cur.qty && !staff_may {
                 s.require(Permission::VoidOrder)?;
-            }
-            if note != cur.note {
-                return invalid("the note cannot change after the item was sent to the kitchen");
             }
         }
         // A dish inside a set changes with its set; only its note is its own.

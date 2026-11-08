@@ -487,12 +487,58 @@ commands! {
         app.with_session(t, |pos, s| pos.add_item(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids))
     }
 
+    /// A change to a dish already sent tells the kitchen: fewer or removed
+    /// prints CANCELLED (with the set's dishes for a set), a new note CHANGED.
     fn update_item(app, t, item_id: i64, update: ItemUpdate) -> Order {
-        app.with_session(t, |pos, s| pos.update_item(s, item_id, &update))
+        let (order, job) = app.with_session(t, |pos, s| {
+            let order_id = pos.order_of_item(item_id)?;
+            let before = pos.get_order(s, order_id)?;
+            let order = pos.update_item(s, item_id, &update)?;
+            let Some(cur) = before.items.iter().find(|i| i.id == item_id).filter(|i| i.sent_at.is_some()) else {
+                return Ok((order, None));
+            };
+            let job = if update.qty < cur.qty {
+                let gone = cur.qty - update.qty;
+                let lines: Vec<OrderItem> = if cur.is_set {
+                    before.items.iter().filter(|i| i.parent_id == Some(cur.id) && i.sent_at.is_some())
+                        .map(|i| OrderItem { qty: i.qty / cur.qty * gone, ..i.clone() }).collect()
+                } else {
+                    vec![OrderItem { qty: gone, ..cur.clone() }]
+                };
+                pos.kitchen_change_job(s, order_id, "CANCELLED", &lines)?
+            } else if update.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) != cur.note.as_deref() {
+                let now: Vec<OrderItem> = order.items.iter().filter(|i| i.id == item_id).cloned().collect();
+                pos.kitchen_change_job(s, order_id, "CHANGED", &now)?
+            } else {
+                None
+            };
+            Ok((order, job))
+        })?;
+        // The change is saved either way; a printer problem must not undo it.
+        let _ = print(job);
+        Ok(order)
     }
 
     fn reprint_kitchen(app, t, order_id: i64) -> PrintOutcome {
         let job = app.with_session(t, |pos, s| pos.kitchen_reprint_job(s, order_id))?;
+        Ok(print(job))
+    }
+
+    /// Print chosen dishes (already sent) again, e.g. after fixing one.
+    /// A set prints with its dishes.
+    fn reprint_kitchen_items(app, t, order_id: i64, item_ids: Vec<i64>) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| {
+            let o = pos.get_order(s, order_id)?;
+            let items: Vec<OrderItem> = o
+                .items
+                .into_iter()
+                .filter(|i| i.sent_at.is_some() && (item_ids.contains(&i.id) || i.parent_id.is_some_and(|p| item_ids.contains(&p))))
+                .collect();
+            if items.is_empty() {
+                return Err(PosError::Validation("nothing to print again".into()));
+            }
+            pos.kitchen_job(s, order_id, &items, true)
+        })?;
         Ok(print(job))
     }
 
@@ -527,6 +573,14 @@ commands! {
 
     fn add_set(app, t, order_id: i64, set_id: i64, picks: Vec<SetPick>, note: Option<String>) -> Order {
         app.with_session(t, |pos, s| pos.add_set(s, order_id, set_id, &picks, note.as_deref()))
+    }
+
+    fn set_dessert(app, t, id: i64, dessert: bool) -> () {
+        app.with_session(t, |pos, s| pos.set_dessert(s, id, dessert))
+    }
+
+    fn set_category_dessert(app, t, id: i64, dessert: bool, move_items: bool) -> usize {
+        app.with_session(t, |pos, s| pos.set_category_dessert(s, id, dessert, move_items))
     }
 
     fn set_drink(app, t, id: i64, drink: bool) -> () {

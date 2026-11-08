@@ -125,6 +125,26 @@ impl Pos {
         Ok(moved)
     }
 
+    /// Mark a category as desserts (or not); `move_items` does the same to the
+    /// items already in it. Returns how many items changed.
+    pub fn set_category_dessert(&self, s: &Session, id: i64, dessert: bool, move_items: bool) -> Result<usize> {
+        s.require(Permission::ManageMenu)?;
+        let changed = self.conn.execute("UPDATE categories SET dessert = ?2 WHERE id = ?1", params![id, dessert])?;
+        if changed == 0 {
+            return Err(PosError::NotFound);
+        }
+        let moved = if move_items {
+            self.conn.execute(
+                "UPDATE products SET dessert = ?2, updated_at = unixepoch() WHERE category_id = ?1 AND deleted = 0 AND dessert <> ?2",
+                params![id, dessert],
+            )?
+        } else {
+            0
+        };
+        self.audit(Some(s.user_id), "category.dessert", &format!("{id} dessert={dessert} moved={moved}"))?;
+        Ok(moved)
+    }
+
     /// Mark a category as drinks (or not); `move_items` does the same to the
     /// items already in it. Returns how many items changed.
     pub fn set_category_drink(&self, s: &Session, id: i64, drink: bool, move_items: bool) -> Result<usize> {

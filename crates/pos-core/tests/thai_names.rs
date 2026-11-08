@@ -96,12 +96,25 @@ fn thai_prints_as_an_image() {
     let (mut pos, s, m, order) = setup();
     pos.add_item(&s, order, m.pad_thai.id, 1, None, Some(m.chicken), &[]).unwrap();
     let o = pos.get_order(&s, order).unwrap();
+    // With the printer's own font, only the Thai name is an image.
+    let mut cfg = pos.kitchen_printer().unwrap();
+    cfg.app_font = false;
+    pos.set_kitchen_printer(&s, &cfg).unwrap();
     let job = pos.kitchen_job(&s, order, &o.items, false).unwrap().unwrap();
     let b = job.bytes();
     let images = b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count();
     assert_eq!(images, 1, "the Thai name (no category heading)");
     assert!(b.windows(12).any(|w| w == b"1 x Pad Thai"));
     assert!(!b.windows(3).any(|w| w == "ผ".as_bytes()), "no raw UTF-8 Thai");
+    // With the app's font (the default), every line of words is an image,
+    // the rules stay the printer's own text.
+    cfg.app_font = true;
+    pos.set_kitchen_printer(&s, &cfg).unwrap();
+    let b = pos.kitchen_job(&s, order, &o.items, false).unwrap().unwrap().bytes();
+    assert!(!b.windows(12).any(|w| w == b"1 x Pad Thai"), "the dish is drawn, not sent as text");
+    assert!(b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count() > images);
+    assert!(b.windows(20).any(|w| w == [b'='; 20]), "rules stay as text");
+    assert!(PrinterConfig::default().app_font);
 }
 
 #[test]

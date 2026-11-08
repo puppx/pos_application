@@ -43,7 +43,7 @@ fn setup() -> Kit {
         .unwrap();
     pos.set_kitchen_printer(&s, &PrinterConfig {
         target: PrinterTarget::File { path: std::env::temp_dir().join("pos-sets-unused.bin").display().to_string() },
-        copy_delay_secs: 0, call_table_only: false, ..Default::default()
+        copy_delay_secs: 0, call_table_only: false, app_font: false, ..Default::default()
     })
     .unwrap();
     Kit { pos, s, set, sections, soup, satay, curry, rice, table: t[0].id }

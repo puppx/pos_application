@@ -45,7 +45,7 @@ fn dine_in(table_id: i64) -> NewOrder {
 fn printer(copies: u8, starter: Option<u8>, mains: Option<u8>) -> PrinterConfig {
     PrinterConfig {
         target: PrinterTarget::File { path: std::env::temp_dir().join("pos-unused.bin").display().to_string() },
-        copies, starter_copies: starter, mains_copies: mains, copy_delay_secs: 0, call_table_only: false, ..Default::default()
+        copies, starter_copies: starter, mains_copies: mains, copy_delay_secs: 0, call_table_only: false, app_font: false, ..Default::default()
     }
 }
 

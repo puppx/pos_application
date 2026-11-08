@@ -71,6 +71,10 @@ pub struct PrinterConfig {
     /// None = 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_copies: Option<u8>,
+    /// Kitchen only: print ticket text in the app's font (Sarabun, the same
+    /// as the team bars) instead of the printer's own (on by default).
+    #[serde(default = "yes")]
+    pub app_font: bool,
     /// Kitchen only: "Call mains again" prints just the table in huge
     /// letters, without the dishes (on by default).
     #[serde(default = "yes")]
@@ -138,6 +142,7 @@ impl Default for PrinterConfig {
             mains_copies: None,
             prep_copies: None,
             additional_copies: None,
+            app_font: true,
             call_table_only: true,
         }
     }
@@ -378,6 +383,18 @@ pub(crate) fn render_text(lines: &[Line], width: usize) -> String {
 /// printed as images, `width` characters wide. `bold` prints every line in
 /// bold (like the Thai font), not just the headings.
 pub(crate) fn render_escpos(lines: &[Line], width: usize, bold: bool) -> Vec<u8> {
+    render_escpos_font(lines, width, bold, false)
+}
+
+/// As [`render_escpos`]; with `app_font` every line of words prints in the
+/// app's own font (Sarabun, as on the team bars) instead of the printer's.
+/// Rules ("=====", "--- SET ---") and blank lines stay the printer's, so
+/// they still run edge to edge.
+pub(crate) fn render_escpos_font(lines: &[Line], width: usize, bold: bool, app_font: bool) -> Vec<u8> {
+    let is_rule = |t: &str| {
+        let t = t.trim();
+        t.is_empty() || ((t.starts_with('=') || t.starts_with('-')) && !crate::raster::needs_raster(t))
+    };
     // Init, code page 437, and the USA character set: printers set to the UK
     // set print "#" as "£", which turned "#12" into "£12".
     let mut b = vec![0x1B, b'@', 0x1B, b't', 0, 0x1B, b'R', 0];
@@ -386,7 +403,19 @@ pub(crate) fn render_escpos(lines: &[Line], width: usize, bold: bool) -> Vec<u8>
             b.extend(crate::raster::escpos_banner(&l.text, width * crate::raster::DOTS_PER_CHAR));
             continue;
         }
-        if crate::raster::needs_raster(&l.text) {
+        // A heading inside a rule ("------ MAIN ------") in the app's font: the
+        // words drawn with a short rule each side, as the font is wider.
+        let t = l.text.trim();
+        let rule_ch = t.chars().next().filter(|c| *c == '=' || *c == '-');
+        if let (true, Some(c)) = (app_font, rule_ch) {
+            if t.chars().any(char::is_alphanumeric) {
+                let inner = t.trim_matches(c).trim();
+                let short = c.to_string().repeat(3);
+                b.extend(crate::raster::escpos_line(&format!("{short} {inner} {short}"), l.size, true, width * crate::raster::DOTS_PER_CHAR));
+                continue;
+            }
+        }
+        if crate::raster::needs_raster(&l.text) || (app_font && !is_rule(&l.text)) {
             b.extend(crate::raster::escpos_line(l.text.trim_end(), l.size, l.center, width * crate::raster::DOTS_PER_CHAR));
             continue;
         }
@@ -470,7 +499,7 @@ pub(crate) fn kitchen_only(items: &[OrderItem]) -> Vec<OrderItem> {
 
 /// The ESC/POS bytes of several tickets one after another (each ends with a cut).
 fn escpos_all(tickets: &[KitchenTicket], cfg: &PrinterConfig) -> Vec<u8> {
-    tickets.iter().flat_map(|t| t.to_escpos(cfg.width, cfg.bold)).collect()
+    tickets.iter().flat_map(|t| t.to_escpos_font(cfg.width, cfg.bold, cfg.app_font)).collect()
 }
 
 impl KitchenTicket {
@@ -620,6 +649,11 @@ impl KitchenTicket {
     /// ESC/POS bytes, code page 437, ending with a feed and partial cut.
     pub fn to_escpos(&self, width: usize, bold: bool) -> Vec<u8> {
         render_escpos(&self.lines(width), width, bold)
+    }
+
+    /// ESC/POS bytes, optionally all in the app's font (see `PrinterConfig::app_font`).
+    pub fn to_escpos_font(&self, width: usize, bold: bool, app_font: bool) -> Vec<u8> {
+        render_escpos_font(&self.lines(width), width, bold, app_font)
     }
 }
 
@@ -1140,7 +1174,7 @@ impl Pos {
             large: cfg.large_text,
             banner: None,
         };
-        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos(cfg.width, cfg.bold), cfg.copies, cfg.copy_delay_secs))
+        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos_font(cfg.width, cfg.bold, cfg.app_font), cfg.copies, cfg.copy_delay_secs))
     }
 }
 

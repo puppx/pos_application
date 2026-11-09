@@ -663,3 +663,24 @@ td.short, strong.short { color: var(--danger); }
 .tile.sold .name { text-decoration: line-through; }
 .tag.sold { background: var(--danger); color: #fff; }
 .items.sold-mode .tile { outline: 2px dashed var(--danger); outline-offset: -4px; }
+
+/* Kitchen screen */
+.kds-bar button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+.kds { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; align-items: start; }
+.kds-card { background: var(--surface); border: 2px solid var(--line-2); border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
+.kds-card.slow { border-color: var(--warn); }
+.kds-card.late { border-color: var(--danger); }
+.kds-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--ink); color: #fff; font-size: 20px; }
+.kds-card.slow .kds-head { background: var(--warn); }
+.kds-card.late .kds-head { background: var(--danger); }
+.kds-head strong { flex: 1; }
+.kds-age { font-weight: 700; font-size: 16px; }
+.kds-sub { padding: 4px 12px; color: var(--muted); font-weight: 600; }
+.kds-items { display: flex; flex-direction: column; }
+.kds-item { display: flex; gap: 10px; align-items: flex-start; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 10px 12px; min-height: 52px; font-size: 19px; background: transparent; white-space: normal; }
+.kds-item.done { opacity: .45; text-decoration: line-through; }
+.kds-qty { font-weight: 800; min-width: 34px; }
+.kds-name { display: flex; flex-direction: column; font-weight: 700; }
+.kds-name small { font-weight: 500; font-size: 14.5px; color: var(--muted); }
+.kds-name small.kds-note { color: var(--danger); font-weight: 700; }
+.kds-done { margin: 10px; min-height: 52px; font-size: 18px; }

@@ -92,6 +92,7 @@ const ICONS = {
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
   tag: '<path d="M3 3h8l10 10-8 8L3 11z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
   shift: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M6 12h.01M18 12h.01"/>',
+  kitchen: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M7 9h4M7 12h7"/>',
 };
 function icon(name, size = 22) {
   const el = h('span', { class: 'icon' });
@@ -350,13 +351,14 @@ const VIEWS = [
   ['customers', 'Customers', false],
   ['reports', 'Reports', false],
   ['shift', 'Shift & cash', false],
+  ['kitchen', 'Kitchen screen', false],
   ['menuAdmin', 'Menu', true],
   ['plan', 'Floor plan', true],
   ['users', 'Staff', true],
 ];
 /// What each Manage tile under "Daily work" says.
 const MANAGE_SUB = {
-  history: 'Paid orders, reprint, void', shift: 'Float, money in/out, count the drawer', customers: 'Saved customers and addresses', reports: 'Sales, close the day',
+  history: 'Paid orders, reprint, void', shift: 'Float, money in/out, count the drawer', kitchen: 'Dishes to cook on a tablet, tap when done', customers: 'Saved customers and addresses', reports: 'Sales, close the day',
   menuAdmin: 'Items, categories, sets, prices', plan: 'Floors and tables', users: 'Staff, PINs, roles',
 };
 /// Settings areas on the Manage page (admin only); the cards are in renderSettings.
@@ -458,7 +460,7 @@ function renderShell() {
   const view = state.orderId ? renderOrder : {
     floor: renderFloor, orders: renderOrders, history: renderHistory, menuAdmin: renderMenuAdmin,
     plan: renderPlan, users: renderUsers, reports: renderReports, settings: renderSettings,
-    customers: renderCustomers, shift: renderShift,
+    customers: renderCustomers, shift: renderShift, kitchen: renderKitchen,
   }[state.view];
   view().catch((e) => { if (!e?.handled) toast(String(e?.message ?? e), true); });
 }
@@ -524,7 +526,8 @@ setInterval(() => {
   const mins = state.autoLogout ?? AUTO_LOGOUT_DEFAULT;
   if (!state.session || !mins) return;
   // Never throw away an unsaved floor plan: wait until it is saved or discarded.
-  if (state.planDirty) { lastActivity = Date.now(); return; }
+  // The floor plan editor with unsaved changes, and the kitchen screen, stay logged in.
+  if (state.planDirty || (state.view === 'kitchen' && !state.orderId)) { lastActivity = Date.now(); return; }
   const idle = Date.now() - lastActivity;
   const limit = mins * 60_000;
   if (idle >= limit) {
@@ -2646,6 +2649,58 @@ async function renderUsers() {
 }
 
 // ---------- reports (admin) ----------
+
+/// Kitchen screen: one card per order with the dishes still to cook.
+/// Tap a dish when it is done; "Done" clears the whole card. Refreshes by itself.
+async function renderKitchen() {
+  const teams = await call('list_teams').catch(() => []);
+  let filter = 'all';
+  try { filter = localStorage.getItem('pos.kdsFilter') || 'all'; } catch {}
+  let lastDone = null;
+  const filters = [['all', 'Everything'], ['food', 'Food'], ...teams.map((t) => [`team:${t.id}`, t.name]), ['drinks', 'Drinks'], ['desserts', 'Desserts']];
+  const bar = h('div', { class: 'row kds-bar' });
+  const board = h('div', { class: 'kds' });
+  const undo = h('button', { hidden: true, onclick: act(async () => {
+    if (!lastDone) return;
+    await call('kitchen_done', { itemIds: lastDone, done: false });
+    lastDone = null; undo.hidden = true;
+    await refresh();
+  }) }, 'Undo last done');
+  const drawBar = () => setKids(bar, filters.map(([v, label]) => h('button', { class: filter === v ? 'on' : '', onclick: () => {
+    filter = v;
+    try { localStorage.setItem('pos.kdsFilter', v); } catch {}
+    drawBar(); refresh();
+  } }, label)), h('span', { style: 'flex:1' }), undo, h('button', { onclick: act(toggleFullscreen) }, icon('expand', 18), 'Full screen'));
+  const mins = (t) => Math.max(0, Math.floor((Date.now() / 1000 - t) / 60));
+  const done = (ids) => act(async () => {
+    await call('kitchen_done', { itemIds: ids, done: true });
+    lastDone = ids; undo.hidden = false;
+    await refresh();
+  });
+  async function refresh() {
+    const orders = await call('kitchen_board', { filter });
+    setKids(board, orders.length ? orders.map((o) => {
+      const age = mins(o.since);
+      const todo = o.items.filter((i) => !i.done).map((i) => i.id);
+      return h('div', { class: `kds-card ${age >= 20 ? 'late' : age >= 10 ? 'slow' : ''}` },
+        h('div', { class: 'kds-head' }, h('strong', {}, o.heading), h('span', { class: 'kds-age' }, `${age} min`)),
+        (o.customer_name || o.paid) && h('div', { class: 'kds-sub' }, [o.customer_name, o.paid ? 'PAID' : ''].filter(Boolean).join(' · ')),
+        h('div', { class: 'kds-items' }, o.items.map((i) => h('button', { class: `kds-item ${i.done ? 'done' : ''}`,
+          onclick: i.done ? act(async () => { await call('kitchen_done', { itemIds: [i.id], done: false }); await refresh(); }) : done([i.id]) },
+          h('span', { class: 'kds-qty' }, `${i.qty}×`),
+          h('span', { class: 'kds-name' }, i.name, i.with_name && ` + ${i.with_name}`,
+            i.name_alt && h('small', { lang: 'th' }, i.name_alt),
+            i.set_name && h('small', {}, `set: ${i.set_name}`),
+            i.options.length > 0 && h('small', {}, i.options.join(', ')),
+            i.note && h('small', { class: 'kds-note' }, `“${i.note}”`))))),
+        h('button', { class: 'primary kds-done', onclick: done(todo) }, `Done (${todo.length})`));
+    }) : h('div', { class: 'empty' }, icon('check', 40), h('p', {}, 'Nothing to cook right now')));
+  }
+  drawBar();
+  screen(h('div', { class: 'page kds-page' }, bar, board));
+  await refresh();
+  live(refresh, 4000);
+}
 
 /// Shift & cash: open with a float, money in / out, close by counting.
 async function renderShift() {

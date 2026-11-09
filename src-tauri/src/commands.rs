@@ -633,6 +633,15 @@ commands! {
         app.with_session(t, |pos, s| pos.merge_into_table(s, order_id, table_id))
     }
 
+    /// Kitchen screen: what is still to do, and marking dishes done.
+    fn kitchen_board(app, t, filter: String) -> Vec<BoardOrder> {
+        app.with_session(t, |pos, s| pos.kitchen_board(s, &filter))
+    }
+
+    fn kitchen_done(app, t, item_ids: Vec<i64>, done: bool) -> () {
+        app.with_session(t, |pos, s| pos.kitchen_done(s, &item_ids, done))
+    }
+
     /// Shifts and cash-up.
     fn current_shift(app, t) -> Option<Shift> {
         app.with_session(t, |pos, s| pos.current_shift(s))

@@ -749,7 +749,7 @@ pub const LABEL_KEYS: [(&str, &str); 5] = [
 impl Pos {
     /// A saved label, else the default. A dine-in label may be blank (the
     /// table alone is printed); the others fall back to their default.
-    fn label(&self, key: &str) -> Result<String> {
+    pub(crate) fn label(&self, key: &str) -> Result<String> {
         let default = LABEL_KEYS.iter().find(|(k, _)| *k == key).map_or("", |(_, d)| *d);
         Ok(match self.setting(key)? {
             Some(v) if key == "label_dine_in" || key == "label_table" => v.trim().to_string(),

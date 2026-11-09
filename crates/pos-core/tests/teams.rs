@@ -425,3 +425,37 @@ fn drinks_and_a_team_can_go_to_other_printers() {
     // Both say NEW ORDER (worked out from the whole send).
     assert!(main_text.contains("NEW ORDER") && bar_text.contains("NEW ORDER"));
 }
+
+#[test]
+fn kitchen_screen_shows_what_is_still_to_do() {
+    let mut k = setup();
+    k.pos.set_drink(&k.s, k.cola.id, true).unwrap();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, Some("rare"), None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.green.id, 2, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.cola.id, 1, None, None, &[]).unwrap();
+    // Nothing sent yet: nothing on the screen.
+    assert!(k.pos.kitchen_board(&k.s, "all").unwrap().is_empty());
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    let board = k.pos.kitchen_board(&k.s, "all").unwrap();
+    assert_eq!(board.len(), 1);
+    assert_eq!(board[0].heading, "DINE-IN 4");
+    assert_eq!(board[0].items.len(), 3);
+    assert_eq!(board[0].items[0].note.as_deref(), Some("rare"));
+    // Filters: one team, drinks, food.
+    let curry = k.teams.iter().find(|t| t.name == "Curry").unwrap().id;
+    let only = k.pos.kitchen_board(&k.s, &format!("team:{curry}")).unwrap();
+    assert_eq!(only[0].items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Green curry"]);
+    assert_eq!(k.pos.kitchen_board(&k.s, "drinks").unwrap()[0].items.len(), 1);
+    assert_eq!(k.pos.kitchen_board(&k.s, "food").unwrap()[0].items.len(), 2);
+    // Done dish by dish; the order leaves the screen when all are done.
+    let ids: Vec<i64> = board[0].items.iter().map(|i| i.id).collect();
+    k.pos.kitchen_done(&k.s, &ids[..1], true).unwrap();
+    let b = k.pos.kitchen_board(&k.s, "all").unwrap();
+    assert!(b[0].items[0].done && !b[0].items[1].done);
+    k.pos.kitchen_done(&k.s, &ids, true).unwrap();
+    assert!(k.pos.kitchen_board(&k.s, "all").unwrap().is_empty());
+    // Undo brings it back.
+    k.pos.kitchen_done(&k.s, &ids[2..], false).unwrap();
+    assert_eq!(k.pos.kitchen_board(&k.s, "all").unwrap().len(), 1);
+}

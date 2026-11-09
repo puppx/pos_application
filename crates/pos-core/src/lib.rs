@@ -9,6 +9,7 @@ mod customers;
 mod dayclose;
 mod error;
 mod floors;
+mod kds;
 mod lan;
 mod maintenance;
 mod menu;
@@ -39,6 +40,7 @@ pub use dayclose::{BusinessDay, DayClose};
 pub use customers::{normalize_postcode, phone_digits, Customer, CustomerInput};
 pub use error::{PosError, Result};
 pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_HEIGHT, PLAN_WIDTH};
+pub use kds::{BoardItem, BoardOrder};
 pub use lan::ServerSettings;
 pub use maintenance::{MenuBackup, MenuCategory, MenuCounts, MenuItem, MenuOptionGroup, MenuPrice, MenuSetSection, MenuTeam, ResetOptions, ResetReport, SalesReset};
 pub use menu::Category;
@@ -86,6 +88,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0018_payments.sql"),
     include_str!("migrations/0019_shifts.sql"),
     include_str!("migrations/0020_sold_out.sql"),
+    include_str!("migrations/0021_kitchen_screen.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

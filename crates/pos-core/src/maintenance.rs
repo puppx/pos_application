@@ -575,6 +575,7 @@ impl Pos {
             if matches!(sales, SalesReset::All) {
                 tx.execute("DELETE FROM settings WHERE key = '_business_date'", [])?;
                 tx.execute("UPDATE customers SET order_count = 0, last_order_at = NULL", [])?;
+                tx.execute_batch("UPDATE payments SET shift_id = NULL; DELETE FROM cash_moves; DELETE FROM shifts;")?;
             }
         }
 
@@ -610,6 +611,10 @@ impl Pos {
                  UPDATE stock_movements SET user_id = NULL WHERE user_id <> {me};
                  UPDATE orders SET paid_by = {me} WHERE paid_by <> {me};
                  UPDATE orders SET closed_by = {me} WHERE closed_by <> {me};
+                 UPDATE payments SET paid_by = {me} WHERE paid_by <> {me};
+                 UPDATE cash_moves SET user_id = {me} WHERE user_id <> {me};
+                 UPDATE shifts SET opened_by = {me} WHERE opened_by <> {me};
+                 UPDATE shifts SET closed_by = {me} WHERE closed_by <> {me};
                  DELETE FROM users WHERE id <> {me}
                      AND id NOT IN (SELECT opened_by FROM orders)
                      AND id NOT IN (SELECT added_by FROM order_items)

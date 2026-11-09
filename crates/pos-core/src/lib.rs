@@ -22,6 +22,7 @@ mod products;
 mod reports;
 mod roles;
 mod service;
+mod shifts;
 mod sets;
 mod teams;
 mod users;
@@ -51,6 +52,7 @@ pub use orders::{
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
+pub use shifts::{CashMove, Shift};
 pub use sets::{SetChoice, SetPick, SetSection, SetSectionInput};
 pub use teams::{Team, TeamInput};
 pub use roles::{Permission, Role, Session};
@@ -82,6 +84,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0016_set_pairings.sql"),
     include_str!("migrations/0017_desserts.sql"),
     include_str!("migrations/0018_payments.sql"),
+    include_str!("migrations/0019_shifts.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

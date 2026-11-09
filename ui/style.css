@@ -652,3 +652,4 @@ body.kb-open #toast { bottom: calc(var(--kb-h) + 16px); }
 .dish-pick { max-height: 46vh; overflow: auto; }
 .dish-row { padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
 .dish-row.on { border-color: var(--brand); background: var(--brand-soft); }
+td.short, strong.short { color: var(--danger); }

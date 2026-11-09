@@ -97,3 +97,37 @@ fn one_tap_payment_still_works() {
     assert_eq!((o.status.as_str(), o.payment_method.as_deref(), o.change_cents), ("paid", Some("cash"), Some(1600)));
     assert_eq!(o.payments.len(), 1);
 }
+
+#[test]
+fn shift_cash_up_expects_float_cash_tips_moves_less_refunds() {
+    let mut k = setup();
+    assert!(k.pos.current_shift(&k.admin).unwrap().is_none());
+    assert!(k.pos.cash_move(&k.admin, "in", 1000, "").is_err()); // no shift yet
+    k.pos.open_shift(&k.admin, 10_000).unwrap();
+    assert!(k.pos.open_shift(&k.admin, 0).is_err()); // one at a time
+    // Order 1: 34.00 cash (50.00 handed over, 16.00 change) + 1.00 cash tip.
+    let o = open(&mut k);
+    k.pos.add_payment(&k.admin, o.id, &pay(PaymentMethod::Cash, None, 5000, 100, None)).unwrap();
+    // Order 2: card with a 3.00 tip; then voided? No: order 3 is voided.
+    k.pos.add_item(&k.admin, k.pos.open_order(&k.admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap().id, k.beer.id, 1, None, None, &[]).unwrap();
+    let o2 = k.pos.list_open_orders(&k.admin).unwrap()[0].id;
+    k.pos.add_payment(&k.admin, o2, &pay(PaymentMethod::Card, None, 0, 300, None)).unwrap();
+    let o3 = k.pos.open_order(&k.admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    k.pos.add_item(&k.admin, o3.id, k.curry.id, 1, None, None, &[]).unwrap();
+    k.pos.pay_order(&k.admin, o3.id, PaymentMethod::Cash, 1200).unwrap();
+    k.pos.void_order(&k.admin, o3.id, "wrong order").unwrap();
+    // Money in and out.
+    assert!(k.pos.cash_move(&k.admin, "out", 500, " ").is_err()); // needs a reason
+    k.pos.cash_move(&k.admin, "in", 2000, "more change").unwrap();
+    let sh = k.pos.cash_move(&k.admin, "out", 700, "milk").unwrap();
+    assert_eq!((sh.cash_cents, sh.cash_tip_cents, sh.card_cents, sh.card_tip_cents), (3400 + 1200, 100, 500, 300));
+    assert_eq!(sh.refund_cents, 1200);
+    // 100 + 34 + 1 + 12 - 12 + 20 - 7 = 148.00
+    assert_eq!(sh.expected_cents, 14_800);
+    let closed = k.pos.close_shift(&k.admin, 14_500, "").unwrap();
+    assert_eq!((closed.counted_cents, closed.difference_cents), (Some(14_500), Some(-300)));
+    assert!(k.pos.current_shift(&k.admin).unwrap().is_none());
+    let text = k.pos.shift_text(&closed).unwrap();
+    assert!(text.contains("EXPECTED CASH") && text.contains("SHORT"));
+    assert_eq!(k.pos.list_shifts(&k.admin, 10).unwrap().len(), 1);
+}

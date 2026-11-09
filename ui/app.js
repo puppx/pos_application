@@ -91,6 +91,7 @@ const ICONS = {
   database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
   tag: '<path d="M3 3h8l10 10-8 8L3 11z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
+  shift: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M6 12h.01M18 12h.01"/>',
 };
 function icon(name, size = 22) {
   const el = h('span', { class: 'icon' });
@@ -348,13 +349,14 @@ const VIEWS = [
   ['history', 'History', false],
   ['customers', 'Customers', false],
   ['reports', 'Reports', false],
+  ['shift', 'Shift & cash', false],
   ['menuAdmin', 'Menu', true],
   ['plan', 'Floor plan', true],
   ['users', 'Staff', true],
 ];
 /// What each Manage tile under "Daily work" says.
 const MANAGE_SUB = {
-  history: 'Paid orders, reprint, void', customers: 'Saved customers and addresses', reports: 'Sales, close the day',
+  history: 'Paid orders, reprint, void', shift: 'Float, money in/out, count the drawer', customers: 'Saved customers and addresses', reports: 'Sales, close the day',
   menuAdmin: 'Items, categories, sets, prices', plan: 'Floors and tables', users: 'Staff, PINs, roles',
 };
 /// Settings areas on the Manage page (admin only); the cards are in renderSettings.
@@ -456,7 +458,7 @@ function renderShell() {
   const view = state.orderId ? renderOrder : {
     floor: renderFloor, orders: renderOrders, history: renderHistory, menuAdmin: renderMenuAdmin,
     plan: renderPlan, users: renderUsers, reports: renderReports, settings: renderSettings,
-    customers: renderCustomers,
+    customers: renderCustomers, shift: renderShift,
   }[state.view];
   view().catch((e) => { if (!e?.handled) toast(String(e?.message ?? e), true); });
 }
@@ -2591,6 +2593,93 @@ async function renderUsers() {
 }
 
 // ---------- reports (admin) ----------
+
+/// Shift & cash: open with a float, money in / out, close by counting.
+async function renderShift() {
+  const [cur, past] = await Promise.all([call('current_shift'), call('list_shifts', { limit: 20 }).catch(() => [])]);
+  const report = h('pre', { class: 'report', hidden: true });
+  const moneyIn = (placeholder) => h('input', { inputmode: 'decimal', placeholder, style: 'width:140px' });
+  const cents = (el) => { try { return el.value.trim() ? parseMoney(el.value) : null; } catch { return null; } };
+  let main;
+  if (!cur) {
+    const float = moneyIn('e.g. 100');
+    main = h('div', { class: 'card stack' },
+      h('h3', {}, 'No shift open'),
+      h('div', { class: 'muted' }, 'Count the cash in the drawer (the float) and open the shift. At the end, count again: the POS shows if anything is missing.'),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Cash in the drawer now', float),
+        h('button', { class: 'primary lg', onclick: act(async () => {
+          const c = cents(float);
+          if (c == null) return toast('Enter the cash in the drawer (0 if empty)', true);
+          await call('open_shift', { floatCents: c });
+          toast('Shift open');
+          renderShift();
+        }) }, 'Open shift')));
+  } else {
+    const box = h('div', {});
+    const move = (kind) => {
+      const amt = moneyIn('Amount');
+      const why = h('input', { placeholder: kind === 'in' ? 'Reason (optional), e.g. more change' : 'What for? e.g. milk, supplier', style: 'flex:1' });
+      setKids(box, h('div', { class: 'card stack' }, h('strong', {}, kind === 'in' ? 'Put money in the drawer' : 'Take money out of the drawer'),
+        h('div', { class: 'row' }, amt, why,
+          h('button', { class: 'primary', onclick: act(async () => {
+            const c = cents(amt);
+            if (!c) return toast('Enter an amount', true);
+            const r = await call('cash_move', { kind, amountCents: c, reason: why.value });
+            toast(`${kind === 'in' ? 'Money in' : 'Money out'}: ${money(c)}` + (r.print.error ? ` (drawer did not open: ${r.print.error})` : ''));
+            renderShift();
+          }) }, 'Save'), h('button', { onclick: () => setKids(box) }, 'Cancel'))));
+      amt.focus();
+    };
+    const count = moneyIn('Counted');
+    const note = h('input', { placeholder: 'Note (optional)', style: 'flex:1' });
+    const diff = h('strong', {});
+    const showDiff = () => {
+      const c = cents(count);
+      diff.textContent = c == null ? '' : c === cur.expected_cents ? 'Exactly right' : c < cur.expected_cents ? `Short ${money(cur.expected_cents - c)}` : `Over ${money(c - cur.expected_cents)}`;
+      diff.className = c != null && c < cur.expected_cents ? 'short' : '';
+    };
+    count.addEventListener('input', showDiff);
+    const line = (label, c, cls = '') => h('tr', { class: cls }, h('td', {}, label), h('td', { class: 'num' }, money(c)));
+    main = h('div', { class: 'grid2' },
+      h('div', { class: 'card stack' },
+        h('h3', {}, 'Shift open'),
+        h('div', { class: 'muted' }, `Since ${fmtTime(cur.opened_at)} · opened by ${cur.opened_by_name} · ${cur.payment_count} payment(s)`),
+        h('table', {},
+          line('Float', cur.float_cents), line('Cash sales', cur.cash_cents),
+          cur.cash_tip_cents ? line('Cash tips', cur.cash_tip_cents) : '',
+          cur.paid_in_cents ? line('Money in', cur.paid_in_cents) : '', cur.paid_out_cents ? line('Money out', -cur.paid_out_cents) : '',
+          cur.refund_cents ? line('Cash refunds (voids)', -cur.refund_cents) : '',
+          line('Cash that should be in the drawer', cur.expected_cents, 'grand'),
+          line('Card', cur.card_cents), cur.card_tip_cents ? line('Card tips', cur.card_tip_cents) : '',
+          cur.other_cents ? line('Platforms / other', cur.other_cents) : ''),
+        cur.moves.length > 0 && h('div', { class: 'muted small' }, cur.moves.map((m) => `${m.kind === 'in' ? '+' : '−'}${money(m.amount_cents)} ${m.reason ?? ''} (${m.user_name})`).join(' · ')),
+        h('div', { class: 'row' }, h('button', { onclick: () => move('in') }, 'Money in'), h('button', { onclick: () => move('out') }, 'Money out')),
+        box),
+      h('div', { class: 'card stack' },
+        h('h3', {}, 'Close the shift'),
+        h('div', { class: 'muted' }, 'Count all the cash in the drawer and type the total.'),
+        h('div', { class: 'row' }, h('label', { class: 'field' }, 'Cash counted', count), diff),
+        h('div', { class: 'row' }, note),
+        h('button', { class: 'primary lg', onclick: act(async () => {
+          const c = cents(count);
+          if (c == null) return toast('Type the cash you counted', true);
+          const r = await call('close_shift', { countedCents: c, note: note.value });
+          toast('Shift closed' + (r.print.error ? ` (report did not print: ${r.print.error})` : r.print.attempted ? ' · report printed' : ''), !!r.print.error);
+          await renderShift();
+          report.textContent = r.text; report.hidden = false;
+        }) }, 'Close shift & print')));
+  }
+  const closed = past.filter((p) => p.shift.closed_at);
+  screen(h('div', { class: 'page' }, main,
+    closed.length > 0 && h('div', { class: 'card stack' }, h('h3', {}, 'Past shifts'), h('table', {},
+      closed.map((p) => h('tr', {},
+        h('td', {}, `${fmtTime(p.shift.opened_at)} – ${fmtTime(p.shift.closed_at)}`), h('td', { class: 'muted' }, p.shift.closed_by_name),
+        h('td', { class: 'num' }, `expected ${money(p.shift.expected_cents)}`),
+        h('td', { class: `num ${p.shift.difference_cents < 0 ? 'short' : ''}` }, p.shift.difference_cents === 0 ? 'OK' : `${p.shift.difference_cents < 0 ? 'short' : 'over'} ${money(Math.abs(p.shift.difference_cents))}`),
+        h('td', {}, h('button', { onclick: () => { report.textContent = p.text; report.hidden = false; } }, 'View'),
+          h('button', { onclick: act(async () => printResult(await call('print_shift', { id: p.shift.id }), 'Shift report printed')) }, 'Print')))))),
+    report));
+}
 
 async function renderReports() {
   const date = h('input', { type: 'date', value: today() });

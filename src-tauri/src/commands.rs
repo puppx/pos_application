@@ -113,7 +113,7 @@ pub struct AppStatus {
 
 /// Result of a print attempt. Printing problems never undo the action
 /// (items stay "sent"); the UI shows the error and offers a reprint.
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct PrintOutcome {
     /// False when no printer is configured.
     attempted: bool,
@@ -151,6 +151,14 @@ pub struct DayCloseView {
     close: DayClose,
     /// The report laid out like the printout.
     text: String,
+}
+
+/// A shift with its report as text (as printed), and the print result.
+#[derive(Serialize)]
+pub struct ShiftResult {
+    shift: Shift,
+    text: String,
+    print: PrintOutcome,
 }
 
 #[derive(Serialize)]
@@ -609,6 +617,54 @@ commands! {
     fn print_staff_copy(app, t, order_id: i64) -> PrintOutcome {
         let job = app.with_session(t, |pos, s| pos.staff_copy_job(s, order_id))?;
         Ok(print(Some(job)))
+    }
+
+    /// Shifts and cash-up.
+    fn current_shift(app, t) -> Option<Shift> {
+        app.with_session(t, |pos, s| pos.current_shift(s))
+    }
+
+    fn open_shift(app, t, float_cents: i64) -> Shift {
+        app.with_session(t, |pos, s| pos.open_shift(s, float_cents))
+    }
+
+    /// Money in or out: the drawer opens.
+    fn cash_move(app, t, kind: String, amount_cents: i64, reason: String) -> ShiftResult {
+        let (shift, text, job) = app.with_session(t, |pos, s| {
+            let shift = pos.cash_move(s, &kind, amount_cents, &reason)?;
+            let text = pos.shift_text(&shift)?;
+            let job = pos.drawer_job(s).ok();
+            Ok((shift, text, job))
+        })?;
+        Ok(ShiftResult { shift, text, print: print(job) })
+    }
+
+    /// Close the shift with the cash counted; the report prints.
+    fn close_shift(app, t, counted_cents: i64, note: String) -> ShiftResult {
+        let (shift, text, job) = app.with_session(t, |pos, s| {
+            let shift = pos.close_shift(s, counted_cents, &note)?;
+            let text = pos.shift_text(&shift)?;
+            let job = pos.shift_job(s, &shift)?;
+            Ok((shift, text, job))
+        })?;
+        Ok(ShiftResult { shift, text, print: print(job) })
+    }
+
+    fn list_shifts(app, t, limit: i64) -> Vec<ShiftResult> {
+        app.with_session(t, |pos, s| {
+            pos.list_shifts(s, limit)?
+                .into_iter()
+                .map(|shift| Ok(ShiftResult { text: pos.shift_text(&shift)?, shift, print: PrintOutcome::default() }))
+                .collect()
+        })
+    }
+
+    fn print_shift(app, t, id: i64) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| {
+            let shift = pos.list_shifts(s, 500)?.into_iter().find(|x| x.id == id).ok_or(PosError::NotFound)?;
+            pos.shift_job(s, &shift)
+        })?;
+        Ok(print(job))
     }
 
     fn open_drawer(app, t) -> PrintOutcome {

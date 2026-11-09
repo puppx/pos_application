@@ -526,8 +526,8 @@ setInterval(() => {
   const mins = state.autoLogout ?? AUTO_LOGOUT_DEFAULT;
   if (!state.session || !mins) return;
   // Never throw away an unsaved floor plan: wait until it is saved or discarded.
-  // The floor plan editor with unsaved changes, and the kitchen screen, stay logged in.
-  if (state.planDirty || (state.view === 'kitchen' && !state.orderId)) { lastActivity = Date.now(); return; }
+  // The floor plan editor with unsaved changes, and the kitchen screen for staff, stay logged in.
+  if (state.planDirty || (state.view === 'kitchen' && !state.orderId && !isAdmin())) { lastActivity = Date.now(); return; }
   const idle = Date.now() - lastActivity;
   const limit = mins * 60_000;
   if (idle >= limit) {
@@ -3423,7 +3423,7 @@ function routesCard(systemPrinters) {
         return h('div', { class: 'card stack route-card' },
           h('div', { class: 'row' }, label, h('span', { style: 'flex:1' }),
             h('button', { onclick: act(async () => printResult(await call('test_route_printer', { route: value() }), 'Test ticket sent')) }, 'Print test'),
-            h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); draw(); } }, 'Remove')),
+            h('button', { class: 'danger', onclick: () => { rows = forms.map((f) => f()); rows.splice(i, 1); draw(); } }, 'Remove')),
           pf.el,
           h('div', { class: 'row' }, h('strong', {}, 'Prints:'),
             h('label', { class: 'check' }, drinks, ' Drinks'), h('label', { class: 'check' }, desserts, ' Desserts'),

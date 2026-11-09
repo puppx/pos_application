@@ -196,3 +196,45 @@ fn upgrades_a_v0_1_0_database() {
     let platforms: i64 = conn.query_row("SELECT COUNT(*) FROM delivery_channels", [], |r| r.get(0)).unwrap();
     assert_eq!(platforms, 3);
 }
+
+/// Orders paid before split bills keep their payment (cash, change) after
+/// the upgrade: receipts, history and reports read it from `payments`.
+#[test]
+fn old_paid_orders_get_their_payment_on_upgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pos.db");
+    {
+        let mut pos = Pos::open(&path).unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        let soup = pos
+            .create_product(&admin, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap();
+        let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+        pos.add_item(&admin, o.id, soup.id, 2, None, None, &[]).unwrap();
+        pos.pay_order(&admin, o.id, PaymentMethod::Cash, 2000).unwrap();
+    }
+    {
+        // Back to how 0.10.6 stored it: the payment only on the order.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE payments; DROP TABLE cash_moves; DROP TABLE shifts;
+             ALTER TABLE orders DROP COLUMN tip_cents;
+             ALTER TABLE products DROP COLUMN sold_out;
+             ALTER TABLE order_items DROP COLUMN kitchen_done_at;
+             PRAGMA user_version = 17;",
+        )
+        .unwrap();
+    }
+    let mut pos = Pos::open(&path).unwrap();
+    let admin = pos.login("1111").unwrap();
+    let o = pos.get_order(&admin, 1).unwrap();
+    assert_eq!(o.payments.len(), 1);
+    assert_eq!((o.payments[0].method.as_str(), o.payments[0].tendered_cents, o.payments[0].change_cents), ("cash", 2000, 1000));
+    let r = pos.receipt(&admin, 1).unwrap();
+    assert_eq!(r.payment.iter().map(|(l, _)| l.trim()).collect::<Vec<_>>(), ["Cash", "Change"]);
+    let sum = pos.sales_summary(&admin, 0, i64::MAX).unwrap();
+    assert_eq!(sum.by_payment.iter().map(|g| (g.key.as_str(), g.total_cents)).collect::<Vec<_>>(), [("cash", 1000)]);
+}

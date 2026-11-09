@@ -840,8 +840,9 @@ async function renderOrder() {
             const n = mine.filter((x) => x.product_id === c.product_id).length;
             if (c.sold_out) return h('button', { class: 'sold', disabled: true, title: 'Sold out today' }, c.name, h('small', {}, 'sold out'));
             return h('button', { class: n ? 'on' : '', onclick: () => {
-              if (s.pick === 1) mine.splice(0, 1, { product_id: c.product_id, with_id: mine[0]?.with_id ?? null });
-              else if (mine.length < s.pick) mine.push({ product_id: c.product_id, with_id: null });
+              const fresh = { product_id: c.product_id, with_id: null, variant_id: null, option_ids: [] };
+              if (s.pick === 1) mine.splice(0, 1, { ...fresh, with_id: mine[0]?.with_id ?? null });
+              else if (mine.length < s.pick) mine.push(fresh);
               else if (n) mine.splice(mine.findIndex((x) => x.product_id === c.product_id), 1);
               else return toast(`${s.name}: choose ${s.pick}`, true);
               redraw();
@@ -853,13 +854,43 @@ async function renderOrder() {
             h('div', { class: 'opts' }, s.with_items.map((w) => h('button', {
               class: entry.with_id === w.product_id ? 'on' : '',
               onclick: () => { entry.with_id = w.product_id; redraw(); },
-            }, w.name, w.name_alt && h('small', { lang: 'th' }, w.name_alt)))))));
+            }, w.name, w.name_alt && h('small', { lang: 'th' }, w.name_alt)))))),
+          // Each chosen dish's own choice (chicken / beef...) and options.
+          mine.map((entry) => {
+            const vs = state.itemVariants[entry.product_id] ?? [];
+            const gs = (state.itemGroups[entry.product_id] ?? []).filter((g) => g.options.length);
+            if (!vs.length && !gs.length) return '';
+            const dish = s.items.find((c) => c.product_id === entry.product_id)?.name ?? '';
+            return h('div', { class: 'stack with-row dish-choices' },
+              vs.length > 0 && h('div', { class: 'row' }, h('span', { class: 'with-label' }, dish), h('div', { class: 'opts' }, vs.map((v) => h('button', {
+                class: entry.variant_id === v.id ? 'on' : '', onclick: () => { entry.variant_id = v.id; redraw(); },
+              }, v.name, v.name_alt && h('small', { lang: 'th' }, v.name_alt))))),
+              gs.map((g) => h('div', { class: 'row' }, h('span', { class: 'with-label' }, `${vs.length ? '' : dish + ' · '}${g.name}`, h('small', { class: 'muted' }, ` ${groupRule(g)}`)),
+                h('div', { class: 'opts' }, g.options.map((o) => {
+                  const on = entry.option_ids.includes(o.id);
+                  return h('button', { class: on ? 'on' : '', onclick: () => {
+                    const inGroup = entry.option_ids.filter((id) => g.options.some((x) => x.id === id));
+                    if (on) entry.option_ids = entry.option_ids.filter((id) => id !== o.id);
+                    else if (g.max_select === 1) entry.option_ids = [...entry.option_ids.filter((id) => !inGroup.includes(id)), o.id];
+                    else if (inGroup.length >= g.max_select) return toast(`${g.name}: up to ${g.max_select}`, true);
+                    else entry.option_ids = [...entry.option_ids, o.id];
+                    redraw();
+                  } }, o.name, o.price_cents ? h('small', {}, `+${money(o.price_cents)}`) : '');
+                })))));
+          }));
       }));
-      addBtn.disabled = sections.some((s) => chosen.get(s.id).length !== s.pick
+      const entries = sections.flatMap((s) => chosen.get(s.id));
+      const missing = entries.some((x) => {
+        if ((state.itemVariants[x.product_id] ?? []).length && x.variant_id == null) return true;
+        return (state.itemGroups[x.product_id] ?? []).some((g) => g.options.length && x.option_ids.filter((id) => g.options.some((o) => o.id === id)).length < g.min_select);
+      });
+      const extras = entries.reduce((n, x) => n + (state.itemGroups[x.product_id] ?? []).flatMap((g) => g.options).filter((o) => x.option_ids.includes(o.id)).reduce((a, o) => a + o.price_cents, 0), 0);
+      addBtn.textContent = extras ? `Add to order · ${money(p.price_cents + extras)}` : 'Add to order';
+      addBtn.disabled = missing || sections.some((s) => chosen.get(s.id).length !== s.pick
         || (s.with_items.length > 0 && chosen.get(s.id).some((x) => x.with_id == null)));
     };
     addBtn.onclick = act(async () => {
-      const picks = sections.flatMap((s) => chosen.get(s.id).map((x) => ({ section_id: s.id, product_id: x.product_id, with_id: x.with_id })));
+      const picks = sections.flatMap((s) => chosen.get(s.id).map((x) => ({ section_id: s.id, product_id: x.product_id, with_id: x.with_id, variant_id: x.variant_id, option_ids: x.option_ids })));
       order = await call('add_set', { orderId, setId: p.id, picks, note: null });
       closePicker();
       draw();
@@ -2101,10 +2132,8 @@ async function renderMenuAdmin() {
   }
   // ---- set menus: price, sections (Starter, Main, Side...) and their dishes ----
   async function editSet(p) {
-    // Dishes with choices or required options cannot go in a set (nowhere to pick them).
-    const required = new Set(groups.filter((g) => g.active && g.min_select > 0).map((g) => g.id));
-    const needsPick = (x) => !!variantsOf[x.id] || feed.links.some((l) => l.product_id === x.id && required.has(l.group_id));
-    const all = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set && !needsPick(x));
+    // Any dish can go in a set; its choices and options are picked with it on the order.
+    const all = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set);
     const byId = Object.fromEntries(all.map((x) => [x.id, x]));
     const sections = p
       ? (await call('get_set', { setId: p.id })).map((s) => ({ name: s.name, alt: s.name_alt ?? '', pick: s.pick, starter: s.starter,
@@ -2239,7 +2268,7 @@ async function renderMenuAdmin() {
         h('label', { class: 'field' }, taxIncluded ? 'Price (tax included)' : 'Price (before tax)', h('span', { class: 'field-col' }, price)),
         h('label', { class: 'field' }, 'Tax %', tax), p && h('label', { class: 'check' }, active, ' On the menu')),
       h('div', { class: 'muted small' }, 'The bill shows only the set and its price. Each section\'s dishes go to the kitchen under the set\'s name; '
-        + '"Starter course" sections go first on dine-in orders. Dishes with choices or required options cannot go in a set.'),
+        + '"Starter course" sections go first on dine-in orders. Dishes with choices (e.g. chicken or beef) or options are fine: staff pick them with the dish; options with a price add to the set price.'),
       list,
       h('div', {}, h('button', { onclick: () => { sections.push({ name: '', alt: '', pick: 1, starter: false, items: [], with: [] }); draw(); } }, '+ Section')),
       h('div', { class: 'row' },

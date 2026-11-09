@@ -172,12 +172,14 @@ Manage → Kitchen teams → **Use kitchen teams** switches teams off without de
 Menu → **+ Set menu**: a name, price and tax, and sections (Starter, Main and Side to start with; rename, add, remove or reorder them).
 Each section lists the dishes to choose from: tap **+ Add dishes** to search (English or Thai) or browse by category and tap dishes in or out. Any dish on the menu can go in any section. Add existing menu items, or make a new dish just for sets (marked "set only", so it has no tile of its own).
 "Choose" says how many dishes the customer picks from the section (set it to the number of dishes to include them all), and "Starter course" sends that section with the starters.
-Dishes with choices or required options cannot go in a set.
+Dishes with choices or options are fine too (see below).
 
 A section can also say what its dishes **come with** (e.g. Main: with rice or noodles): add the choices under "Comes with" in the section, or leave it empty for sets that have none. When ordering, each chosen dish then needs one of them, and the kitchen ticket prints it under the dish (`+ with Jasmine rice`).
 
 On the order screen the set's tile opens a picker; the order shows the set with its dishes under it.
 The bill and receipt show only the set and its price. Kitchen tickets print the dishes under `SET: <name>` between `=` rules, each section under a `-` rule, still split by team, drinks and course like any other dish.
+
+Dishes with choices (e.g. chicken or beef) or options (how cooked, extras) can go in a set. When the set is added to an order, each such dish shows its choices right under it; required ones must be picked before **Add to order**. The choice keeps the set price; options with a price (e.g. + cheese) are added to the set's price, and the kitchen ticket shows the choice and options under the dish.
 
 ### Thai and English names
 

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
 use crate::orders::{opt_text, require_open, MAX_ITEMS};
+use crate::options::{resolve_options, ItemOption};
 use crate::products::clean_alt;
+use crate::variants::resolve_variant;
 use crate::{Order, Permission, Pos, PosError, Result, Session};
 
 const MAX_SECTIONS: usize = 10;
@@ -62,20 +64,28 @@ pub struct SetSectionInput {
 }
 
 /// A chosen dish: product, what it comes with, how many.
-type Chosen<'a> = (i64, Option<&'a SetChoice>, i64);
+/// A chosen dish: product, what it comes with, how many, its choice
+/// (variant: id, name, name_alt) and its options.
+type Chosen<'a> = (i64, Option<&'a SetChoice>, i64, Option<(i64, String, Option<String>)>, Vec<ItemOption>);
 
 fn one() -> i64 {
     1
 }
 
 /// A dish chosen for one section when ordering a set.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct SetPick {
     pub section_id: i64,
     pub product_id: i64,
     /// What it comes with, when the section has "comes with" choices.
     #[serde(default)]
     pub with_id: Option<i64>,
+    /// The dish's choice (e.g. beef or chicken), when it has choices.
+    #[serde(default)]
+    pub variant_id: Option<i64>,
+    /// The dish's options (extras, how cooked...), checked like on any order.
+    #[serde(default)]
+    pub option_ids: Vec<i64>,
 }
 
 impl Pos {
@@ -106,8 +116,8 @@ impl Pos {
     }
 
     /// Replace a set's sections (and make the product a set). Dishes with
-    /// choices or required options cannot go in a set: there is no room to
-    /// pick those inside the set.
+    /// choices or options can go in too: they are picked with the dish when
+    /// the set is added to an order.
     pub fn save_set(&mut self, s: &Session, set_id: i64, sections: &[SetSectionInput]) -> Result<Vec<SetSection>> {
         s.require(Permission::ManageMenu)?;
         if sections.is_empty() || sections.len() > MAX_SECTIONS {
@@ -130,23 +140,12 @@ impl Pos {
                 return invalid(format!("{name}: add 1 to {MAX_CHOICES} dishes"));
             }
             for &p in &sec.product_ids {
-                let (pname, is_set, variants, required): (String, bool, bool, bool) = tx
-                    .query_row(
-                        "SELECT name, is_set,
-                                EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id AND v.active = 1),
-                                EXISTS (SELECT 1 FROM product_option_groups l JOIN option_groups g ON g.id = l.group_id
-                                        WHERE l.product_id = p.id AND g.active = 1 AND g.min_select > 0)
-                         FROM products p WHERE id = ?1 AND deleted = 0",
-                        [p],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                    )
+                let (pname, is_set): (String, bool) = tx
+                    .query_row("SELECT name, is_set FROM products p WHERE id = ?1 AND deleted = 0", [p], |r| Ok((r.get(0)?, r.get(1)?)))
                     .optional()?
                     .ok_or_else(|| PosError::Validation(format!("{name}: a dish is no longer on the menu")))?;
                 if is_set || p == set_id {
                     return invalid(format!("{pname} is a set menu itself"));
-                }
-                if variants || required {
-                    return invalid(format!("{pname} has choices or options to pick, so it cannot go in a set; make a plain item for the set"));
                 }
             }
             if sec.with_ids.len() > MAX_CHOICES {
@@ -267,10 +266,22 @@ impl Pos {
                             .ok_or_else(|| PosError::Validation(format!("{}: it cannot come with that", sec.name)))?,
                     ),
                 };
+                // The dish's own choice and options, checked like on any order.
+                let variant = resolve_variant(&tx, p.product_id, p.variant_id)
+                    .map_err(|e| PosError::Validation(format!("{}: {e}", sec.name)))?
+                    .map(|(id, vname, _price, valt)| (id, vname, valt));
+                let options = resolve_options(&tx, p.product_id, &p.option_ids).map_err(|e| PosError::Validation(format!("{}: {e}", sec.name)))?;
                 let key = with.map(|c| c.product_id);
-                match counts.iter_mut().find(|c| c.0 == p.product_id && c.1.map(|w| w.product_id) == key) {
+                let vkey = variant.as_ref().map(|v| v.0);
+                let okey: Vec<i64> = options.iter().map(|o| o.option_id).collect();
+                match counts.iter_mut().find(|c| {
+                    c.0 == p.product_id
+                        && c.1.map(|w| w.product_id) == key
+                        && c.3.as_ref().map(|v| v.0) == vkey
+                        && c.4.iter().map(|o| o.option_id).collect::<Vec<_>>() == okey
+                }) {
                     Some(c) => c.2 += 1,
-                    None => counts.push((p.product_id, with, 1)),
+                    None => counts.push((p.product_id, with, 1, variant, options)),
                 }
             }
             chosen.push((sec, counts));
@@ -283,21 +294,28 @@ impl Pos {
         if lines + 1 + dishes > MAX_ITEMS {
             return invalid("this order has too many lines");
         }
+        // Extras with a price (e.g. + king prawns) go on the set's price; the
+        // dish's choice keeps the set price.
+        let extras: i64 = chosen.iter().flat_map(|c| c.1.iter()).map(|c| c.2 * c.4.iter().map(|o| o.price_cents).sum::<i64>()).sum();
         tx.execute(
             "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, starter, name_alt, prep, is_set)
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 0, ?8, 0, 1)",
-            params![order_id, set_id, name, price, rate, note, s.user_id, alt],
+            params![order_id, set_id, name, price + extras, rate, note, s.user_id, alt],
         )?;
         let parent = tx.last_insert_rowid();
         let mut info = tx.prepare_cached("SELECT name, name_alt, prep FROM products WHERE id = ?1")?;
         let mut ins = tx.prepare_cached(
             "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, added_by, starter, name_alt, prep,
-                                      parent_id, section_name, section_alt, with_name, with_alt)
-             VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                      parent_id, section_name, section_alt, with_name, with_alt, variant_id)
+             VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )?;
+        let mut opt = tx.prepare_cached(
+            "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents, name_alt) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         let mut names: HashMap<i64, (String, Option<String>, bool)> = HashMap::new();
         for (sec, counts) in &chosen {
-            for &(p, with, qty) in counts {
+            for (p, with, qty, variant, options) in counts {
+                let (p, with, qty) = (*p, *with, *qty);
                 let (pname, palt, prep) = match names.get(&p) {
                     Some(v) => v.clone(),
                     None => {
@@ -305,6 +323,15 @@ impl Pos {
                         names.insert(p, v.clone());
                         v
                     }
+                };
+                // "Pad Thai (Beef)", Thai for whichever part has it.
+                let (pname, palt) = match variant {
+                    Some((_, vname, valt)) => {
+                        let alt = (palt.is_some() || valt.is_some())
+                            .then(|| format!("{} ({})", palt.as_deref().unwrap_or(&pname), valt.as_deref().unwrap_or(vname)));
+                        (format!("{pname} ({vname})"), alt)
+                    }
+                    None => (pname, palt),
                 };
                 ins.execute(params![
                     order_id,
@@ -319,11 +346,17 @@ impl Pos {
                     sec.name,
                     sec.name_alt,
                     with.map(|c| c.name.clone()),
-                    with.and_then(|c| c.name_alt.clone())
+                    with.and_then(|c| c.name_alt.clone()),
+                    variant.as_ref().map(|v| v.0)
                 ])?;
+                let item_id = tx.last_insert_rowid();
+                for o in options {
+                    opt.execute(params![item_id, o.option_id, o.group_name, o.name, o.price_cents, o.name_alt])?;
+                }
             }
         }
         drop(ins);
+        drop(opt);
         drop(info);
         tx.commit()?;
         self.get_order(s, order_id)

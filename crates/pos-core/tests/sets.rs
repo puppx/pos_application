@@ -55,9 +55,9 @@ fn dine_in(table: i64) -> NewOrder {
 
 fn picks(k: &Kit, starter: i64) -> Vec<SetPick> {
     vec![
-        SetPick { section_id: k.sections[0].id, product_id: starter, with_id: None },
-        SetPick { section_id: k.sections[1].id, product_id: k.curry.id, with_id: None },
-        SetPick { section_id: k.sections[2].id, product_id: k.rice.id, with_id: None },
+        SetPick { section_id: k.sections[0].id, product_id: starter, with_id: None, ..Default::default() },
+        SetPick { section_id: k.sections[1].id, product_id: k.curry.id, with_id: None, ..Default::default() },
+        SetPick { section_id: k.sections[2].id, product_id: k.rice.id, with_id: None, ..Default::default() },
     ]
 }
 
@@ -192,7 +192,7 @@ fn a_section_can_say_what_its_dishes_come_with() {
     ]).unwrap();
     assert_eq!(secs[1].with_items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Jasmine rice", "Egg noodles"]);
     assert!(secs[0].with_items.is_empty());
-    let pick = |section: i64, product_id: i64, with_id: Option<i64>| SetPick { section_id: section, product_id, with_id };
+    let pick = |section: i64, product_id: i64, with_id: Option<i64>| SetPick { section_id: section, product_id, with_id, ..Default::default() };
     let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
     // Every main needs what it comes with, from the list.
     let missing = [pick(secs[0].id, k.soup.id, None), pick(secs[1].id, k.curry.id, Some(k.rice.id)), pick(secs[1].id, k.satay.id, None)];
@@ -217,4 +217,47 @@ fn a_section_can_say_what_its_dishes_come_with() {
     k.pos.import_menu(&k.s, &backup).unwrap();
     let set = k.pos.list_products(&k.s, false, 100, 0).unwrap().into_iter().find(|p| p.is_set).unwrap();
     assert_eq!(k.pos.get_set(&k.s, set.id).unwrap()[1].with_items.len(), 2);
+}
+
+#[test]
+fn set_dishes_can_have_choices_and_options() {
+    let mut k = setup();
+    // Pad Thai: chicken or beef (a choice), and extras (prawns +2.00).
+    let pad = k.pos.create_product(&k.s, NewProduct {
+        category_id: None, sku: None, barcode: None, name: "Pad Thai".into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 1000,
+        stock_qty: 0, track_stock: false, starter: false, name_alt: Some("ผัดไทย".into()), prep: false, team_id: None,
+    }).unwrap();
+    let vs = k.pos.set_variants(&k.s, pad.id, &[
+        VariantInput { id: None, name: "Chicken".into(), price_cents: 1000, name_alt: Some("ไก่".into()) },
+        VariantInput { id: None, name: "Beef".into(), price_cents: 1200, name_alt: None },
+    ]).unwrap();
+    let g = k.pos.create_option_group(&k.s, "Extras", 0, 2).unwrap();
+    let g = k.pos.save_group_options(&k.s, g.id, &[OptionInput { id: None, name: "King prawns".into(), price_cents: 200, name_alt: None }]).unwrap();
+    k.pos.set_product_option_groups(&k.s, pad.id, &[g.id]).unwrap();
+    // Accepted in a set now.
+    let sections = k.pos.save_set(&k.s, k.set.id, &[
+        SetSectionInput { name: "Main".into(), name_alt: None, pick: 2, starter: false, product_ids: vec![pad.id, k.curry.id], with_ids: vec![] },
+    ]).unwrap();
+    let main = sections[0].id;
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    // The choice is needed.
+    let no_choice = [SetPick { section_id: main, product_id: pad.id, ..Default::default() }, SetPick { section_id: main, product_id: k.curry.id, ..Default::default() }];
+    assert!(k.pos.add_set(&k.s, o.id, k.set.id, &no_choice, None).is_err());
+    let beef = vs.iter().find(|v| v.name == "Beef").unwrap().id;
+    let prawns = g.options[0].id;
+    let ok = [
+        SetPick { section_id: main, product_id: pad.id, variant_id: Some(beef), option_ids: vec![prawns], ..Default::default() },
+        SetPick { section_id: main, product_id: k.curry.id, ..Default::default() },
+    ];
+    let o = k.pos.add_set(&k.s, o.id, k.set.id, &ok, None).unwrap();
+    let set_line = o.items.iter().find(|i| i.is_set).unwrap();
+    // The set price plus the paid extra; the choice keeps the set price.
+    assert_eq!(set_line.unit_price_cents, 2500 + 200);
+    let dish = o.items.iter().find(|i| i.product_id == pad.id).unwrap();
+    assert_eq!((dish.name.as_str(), dish.name_alt.as_deref(), dish.variant_id), ("Pad Thai (Beef)", Some("ผัดไทย (Beef)"), Some(beef)));
+    assert_eq!(dish.options.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["King prawns"]);
+    // The kitchen ticket shows the choice and the extra.
+    let t = k.pos.kitchen_tickets(&k.s, o.id, &o.items, false).unwrap();
+    let text: String = t.iter().map(|t| t.to_text(42)).collect();
+    assert!(text.contains("Pad Thai (Beef)") && text.contains("King prawns"), "{text}");
 }

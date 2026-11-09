@@ -712,3 +712,6 @@ td.short, strong.short { color: var(--danger); }
   .pay-one { grid-template-columns: 1fr; }
 }
 .pay-field small.bad { color: var(--danger); }
+.dish-choices { gap: 6px; }
+.dish-choices .row { align-items: center; flex-wrap: wrap; }
+.dish-choices .with-label { text-align: left; }

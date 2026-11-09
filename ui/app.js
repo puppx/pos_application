@@ -1025,17 +1025,54 @@ async function renderOrder() {
   allCourses.onchange = () => draw();
 
   // --- secondary actions: move table, customer details, cancel ---
+  // Move: the whole order to another table (joining its bill if busy), or some dishes.
   const showMove = act(async () => {
     const floors = await call('list_floors');
     const statuses = await Promise.all(floors.map((f) => call('floor_status', { floorId: f.id })));
     const sel = h('select', {}, floors.map((f, i) => h('optgroup', { label: f.name },
-      statuses[i].filter((t) => !t.order_id).map((t) => h('option', { value: t.id }, t.name)))));
-    setKids(extra, h('div', { class: 'row card' }, 'Move to', sel,
-      h('button', { class: 'primary', onclick: act(async () => {
-        order = await call('move_order', { id: orderId, tableId: Number(sel.value) });
-        setKids(extra); header(); toast(`Moved to ${order.table_name}`);
-      }) }, 'Move'),
-      h('button', { onclick: () => setKids(extra) }, 'Close')));
+      statuses[i].filter((t) => t.id !== order.table_id).map((t) => h('option', { value: t.id }, t.order_id ? `${t.name} (has a bill: join)` : t.name)))));
+    const goTo = (o, msg) => { toast(msg); state.orderId = o.id; renderShell(); };
+    const whole = act(async () => {
+      const busy = sel.selectedOptions[0]?.textContent.includes('join');
+      const o = await call('merge_into_table', { orderId, tableId: Number(sel.value) });
+      goTo(o, busy ? `Joined onto ${o.table_name}: one bill` : `Moved to ${o.table_name}`);
+    });
+    const some = () => {
+      const pick = new Map();
+      const list = h('div', { class: 'stack dish-pick' });
+      const ok = h('button', { class: 'primary' });
+      const bill = order.items.filter((i) => !i.parent_id);
+      const drawPick = () => {
+        setKids(list, bill.map((it) => {
+          const q = pick.get(it.id) ?? 0;
+          const set = (v) => { v = Math.max(0, Math.min(it.qty, v)); if (v) pick.set(it.id, v); else pick.delete(it.id); drawPick(); };
+          return h('div', { class: `row dish-row ${q ? 'on' : ''}`, onclick: () => set(q < it.qty ? q + 1 : 0) },
+            h('span', { style: 'flex:1' }, it.name),
+            h('div', { class: 'stepper', onclick: (e) => e.stopPropagation() },
+              h('button', { onclick: () => set(q - 1) }, '−'), h('span', {}, `${q}/${it.qty}`), h('button', { onclick: () => set(q + 1) }, '+')));
+        }));
+        ok.textContent = pick.size ? `Move ${[...pick.values()].reduce((a, b) => a + b, 0)} dish(es)` : 'Tap the dishes to move';
+        ok.disabled = !pick.size;
+      };
+      ok.onclick = act(async () => {
+        const all = bill.every((i) => (pick.get(i.id) ?? 0) >= i.qty);
+        const o = await call('move_items', { orderId, tableId: Number(sel.value), items: [...pick.entries()] });
+        if (all) return goTo(o, `Everything moved to ${o.table_name}`);
+        order = await call('get_order', { id: orderId });
+        setKids(extra); draw();
+        toast(`Moved to ${o.table_name} (nothing reprinted)`);
+      });
+      setKids(extra, h('div', { class: 'stack card' }, h('div', { class: 'row' }, 'Move to', sel), list,
+        h('div', { class: 'row' }, ok, h('button', { onclick: () => setKids(extra) }, 'Close'))));
+      drawPick();
+    };
+    setKids(extra, h('div', { class: 'stack card' },
+      h('div', { class: 'row' }, 'Move to', sel),
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: whole }, 'Whole order'),
+        h('button', { onclick: some }, 'Some dishes'),
+        h('button', { onclick: () => setKids(extra) }, 'Close')),
+      h('div', { class: 'muted small' }, 'A table that already has a bill: the dishes join that bill. Dishes already sent stay sent.')));
   });
   const showDetails = () => {
     const f = customerFields(order.order_type, order);

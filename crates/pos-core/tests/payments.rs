@@ -145,3 +145,43 @@ fn sold_out_until_end_of_day() {
     k.pos.close_day(&k.admin).unwrap();
     assert!(!k.pos.get_product(&k.admin, k.curry.id).unwrap().sold_out);
 }
+
+#[test]
+fn move_dishes_and_join_tables() {
+    let mut k = setup();
+    let floor = k.pos.list_floors(&k.admin).unwrap()[0].id;
+    let tables = k.pos
+        .save_floor_layout(&k.admin, floor, &[
+            TableLayout { id: Some(k.table), name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 },
+            TableLayout { id: None, name: "2".into(), shape: TableShape::Rect, x: 100, y: 0, w: 80, h: 80 },
+            TableLayout { id: None, name: "3".into(), shape: TableShape::Rect, x: 200, y: 0, w: 80, h: 80 },
+        ])
+        .unwrap();
+    let (t2, t3) = (tables[1].id, tables[2].id);
+    let o = open(&mut k); // 2 curry, 2 beer on table 1
+    k.pos.send_to_kitchen(&k.admin, o.id).unwrap();
+    let (curry, beer) = (o.items[0].id, o.items[1].id);
+    // One curry to table 2 (free): a new order there, still marked sent.
+    let o2 = k.pos.move_items(&k.admin, o.id, t2, &[(curry, 1)]).unwrap();
+    assert_eq!(o2.table_id, Some(t2));
+    assert_eq!((o2.items.len(), o2.items[0].qty, o2.items[0].sent_at.is_some()), (1, 1, true));
+    let left = k.pos.get_order(&k.admin, o.id).unwrap();
+    assert_eq!((left.items[0].qty, left.total_cents), (1, 2200));
+    // The rest of table 1 joins table 2: one bill, table 1 is free.
+    let joined = k.pos.merge_into_table(&k.admin, o.id, t2).unwrap();
+    assert_eq!(joined.id, o2.id);
+    assert_eq!(joined.total_cents, 3400);
+    assert!(k.pos.table_order(&k.admin, k.table).unwrap().is_none());
+    assert!(matches!(k.pos.get_order(&k.admin, o.id), Err(PosError::NotFound)));
+    // Joining onto a free table just moves the order.
+    let moved = k.pos.merge_into_table(&k.admin, joined.id, t3).unwrap();
+    assert_eq!((moved.id, moved.table_id), (joined.id, Some(t3)));
+    // Moving every dish away removes the empty order.
+    let _ = beer;
+    let all: Vec<_> = moved.items.iter().map(|i| (i.id, i.qty)).collect();
+    let back = k.pos.move_items(&k.admin, moved.id, k.table, &all).unwrap();
+    assert_eq!(back.total_cents, 3400);
+    assert!(k.pos.get_order(&k.admin, moved.id).is_err());
+    // Nothing cancelled in the reports.
+    assert_eq!(k.pos.sales_summary(&k.admin, 0, i64::MAX).unwrap().cancelled_count, 0);
+}

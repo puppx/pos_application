@@ -494,6 +494,62 @@ pub(crate) fn summary_from_row(r: &Row) -> rusqlite::Result<OrderSummary> {
     })
 }
 
+/// The order on `table_id` that dishes from `order_id` move to (opened if
+/// the table is free, with the same service charge and tax as the source).
+fn move_target(tx: &Transaction, s: &Session, order_id: i64, table_id: i64) -> Result<i64> {
+    require_open(tx, order_id)?;
+    let paid: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = ?1)", [order_id], |r| r.get(0))?;
+    if paid {
+        return invalid("this order has part payments: finish paying it first");
+    }
+    let here: Option<i64> = tx.query_row("SELECT table_id FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+    if here == Some(table_id) {
+        return invalid("that is the same table");
+    }
+    let open: Option<i64> =
+        tx.query_row("SELECT id FROM orders WHERE table_id = ?1 AND status = 'open'", [table_id], |r| r.get(0)).optional()?;
+    if let Some(id) = open {
+        return Ok(id);
+    }
+    check_table(tx, table_id)?;
+    tx.execute(
+        "INSERT INTO orders (order_type, table_id, opened_by, service_bp, tax_incl, tax_bp)
+         SELECT 'dine_in', ?2, ?3, service_bp, tax_incl, tax_bp FROM orders WHERE id = ?1",
+        params![order_id, table_id, s.user_id],
+    )
+    .map_err(|e| map_unique(e, TABLE_BUSY))?;
+    Ok(tx.last_insert_rowid())
+}
+
+/// A copy of an order line (with its options) on `order_id`, `qty` of it.
+fn copy_line(tx: &Transaction, item: i64, order_id: i64, qty: i64, discount: i64, parent: Option<i64>) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at,
+                                  added_by, added_at, name_alt, starter, held, variant_id, prep, prep_sent_at, is_set,
+                                  parent_id, section_name, section_alt, with_name, with_alt)
+         SELECT ?2, product_id, name, unit_price_cents, tax_rate_bp, ?3, ?4, note, sent_at, added_by, added_at, name_alt, starter,
+                held, variant_id, prep, prep_sent_at, is_set, COALESCE(?5, parent_id), section_name, section_alt, with_name, with_alt
+         FROM order_items WHERE id = ?1",
+        params![item, order_id, qty, discount, parent],
+    )?;
+    let new = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents, name_alt)
+         SELECT ?2, option_id, group_name, name, price_cents, name_alt FROM order_item_options WHERE item_id = ?1",
+        params![item, new],
+    )?;
+    Ok(new)
+}
+
+/// Remove an open order with no dishes left (after moving them away).
+fn drop_if_empty(tx: &Transaction, order_id: i64) -> Result<()> {
+    let left: i64 = tx.query_row("SELECT COUNT(*) FROM order_items WHERE order_id = ?1", [order_id], |r| r.get(0))?;
+    if left == 0 {
+        tx.execute("DELETE FROM orders WHERE id = ?1 AND status = 'open'", [order_id])?;
+    }
+    Ok(())
+}
+
 /// Close an order its payments cover: totals, the payment summary (one
 /// method, or NULL when mixed) and stock for tracked items.
 fn close_paid(tx: &Transaction, s: &Session, order_id: i64, t: &Totals) -> Result<()> {
@@ -716,6 +772,84 @@ impl Pos {
         }
         self.audit(Some(s.user_id), "order.move", &format!("{id} -> table {table_id}"))?;
         self.get_order(s, id)
+    }
+
+    /// Move dishes to another table: `items` (order line, how many) go to
+    /// that table's open order, or a new one if the table is free. A set's
+    /// dishes go with it. Sent dishes stay sent (no new kitchen ticket). An
+    /// order left empty is removed. Returns the order they went to.
+    pub fn move_items(&mut self, s: &Session, order_id: i64, table_id: i64, items: &[(i64, i64)]) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let target = move_target(&tx, s, order_id, table_id)?;
+        let lines = load_items(&tx, order_id)?;
+        let mut moved = 0;
+        for &(item, q) in items {
+            if q <= 0 {
+                continue;
+            }
+            let it = lines
+                .iter()
+                .find(|i| i.id == item && i.parent_id.is_none())
+                .ok_or_else(|| PosError::Validation("that dish is not on this order".into()))?;
+            let q = q.min(it.qty);
+            if q == it.qty {
+                tx.execute("UPDATE order_items SET order_id = ?2 WHERE id = ?1 OR parent_id = ?1", params![item, target])?;
+            } else {
+                let new = copy_line(&tx, item, target, q, it.discount_cents * q / it.qty, None)?;
+                tx.execute(
+                    "UPDATE order_items SET qty = qty - ?2, discount_cents = discount_cents - ?3 WHERE id = ?1",
+                    params![item, q, it.discount_cents * q / it.qty],
+                )?;
+                // Each dish of a set keeps its count per set.
+                for c in lines.iter().filter(|c| c.parent_id == Some(item)) {
+                    let part = c.qty / it.qty * q;
+                    copy_line(&tx, c.id, target, part, 0, Some(new))?;
+                    tx.execute("UPDATE order_items SET qty = qty - ?2 WHERE id = ?1", params![c.id, part])?;
+                }
+            }
+            moved += q;
+        }
+        if moved == 0 {
+            return invalid("choose the dishes to move");
+        }
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM order_items WHERE order_id = ?1", [target], |r| r.get(0))?;
+        if count > MAX_ITEMS {
+            return invalid("that table's order would have too many lines");
+        }
+        drop_if_empty(&tx, order_id)?;
+        audit_tx(&tx, s.user_id, "order.move_items", &format!("{order_id} -> order {target}: {moved} dish(es)"))?;
+        tx.commit()?;
+        self.get_order(s, target)
+    }
+
+    /// Put a whole order onto another table. If that table already has an
+    /// order, the two become one bill (this order is removed); otherwise the
+    /// order just moves there.
+    pub fn merge_into_table(&mut self, s: &Session, order_id: i64, table_id: i64) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        let busy: Option<i64> = self
+            .conn
+            .query_row("SELECT id FROM orders WHERE table_id = ?1 AND status = 'open'", [table_id], |r| r.get(0))
+            .optional()?;
+        if busy.is_none() {
+            return self.move_order(s, order_id, table_id);
+        }
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let target = move_target(&tx, s, order_id, table_id)?;
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM order_items WHERE order_id IN (?1, ?2)",
+            params![order_id, target],
+            |r| r.get(0),
+        )?;
+        if count > MAX_ITEMS {
+            return invalid("the joined bill would have too many lines");
+        }
+        tx.execute("UPDATE order_items SET order_id = ?2 WHERE order_id = ?1", params![order_id, target])?;
+        drop_if_empty(&tx, order_id)?;
+        audit_tx(&tx, s.user_id, "order.merge", &format!("{order_id} -> order {target}"))?;
+        tx.commit()?;
+        self.get_order(s, target)
     }
 
     /// Add a menu item at its current price. Items with choices (e.g. soup:

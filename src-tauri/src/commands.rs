@@ -623,6 +623,16 @@ commands! {
         app.with_session(t, |pos, s| pos.set_sold_out(s, id, sold_out))
     }
 
+    /// Move chosen dishes to another table (a new order there if it is free).
+    fn move_items(app, t, order_id: i64, table_id: i64, items: Vec<(i64, i64)>) -> Order {
+        app.with_session(t, |pos, s| pos.move_items(s, order_id, table_id, &items))
+    }
+
+    /// Join this order onto another table's bill (or just move there).
+    fn merge_into_table(app, t, order_id: i64, table_id: i64) -> Order {
+        app.with_session(t, |pos, s| pos.merge_into_table(s, order_id, table_id))
+    }
+
     /// Shifts and cash-up.
     fn current_shift(app, t) -> Option<Shift> {
         app.with_session(t, |pos, s| pos.current_shift(s))

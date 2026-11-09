@@ -424,3 +424,46 @@ fn file_database_persists_and_backs_up() {
     let mut restored = Pos::open(dir.path().join("backup.db")).unwrap();
     assert!(restored.login("1111").is_ok());
 }
+
+#[test]
+fn managers_run_the_menu_and_floor_but_cannot_delete() {
+    let (mut pos, admin) = setup();
+    pos.create_user(&admin, "Mia", Role::Manager, "3333").unwrap();
+    let m = pos.login("3333").unwrap();
+    assert_eq!(m.role, Role::Manager);
+    // Menu and floor plan: yes.
+    let soup = item(&mut pos, &m, "Soup", 500, 0, None);
+    let (_, g, _, _) = floors(&mut pos, &m);
+    // Kitchen settings: yes; the rest of the settings: no.
+    pos.set_setting(&m, "drinks_split", "0").unwrap();
+    assert!(matches!(pos.set_setting(&m, "store_name", "X"), Err(PosError::Forbidden)));
+    // Staff: no.
+    assert!(matches!(pos.create_user(&m, "Bob", Role::Staff, "4444"), Err(PosError::Forbidden)));
+    // Deleting anything: no.
+    assert!(matches!(pos.delete_product(&m, soup.id), Err(PosError::Forbidden)));
+    // Voids and cancelling orders already in the kitchen: yes.
+    let o = pos.open_order(&m, &dine_in(g[0].id)).unwrap();
+    pos.add_item(&m, o.id, soup.id, 1, None, None, &[]).unwrap();
+    pos.send_to_kitchen(&m, o.id).unwrap();
+    pos.cancel_order(&m, o.id, "").unwrap();
+    assert!(matches!(pos.delete_order(&m, o.id, ""), Err(PosError::Forbidden)));
+    pos.delete_order(&admin, o.id, "").unwrap();
+}
+
+#[test]
+fn a_pin_approves_without_logging_in() {
+    let (mut pos, admin) = setup();
+    let s = staff(&mut pos, &admin);
+    let who = pos.pin_owner("1111").unwrap();
+    assert_eq!((who.user_id, who.role), (admin.user_id, Role::Admin));
+    assert!(matches!(pos.pin_owner("9999"), Err(PosError::InvalidPin)));
+    // Staff cannot cancel an order already sent; with the admin's PIN it can.
+    let (_, g, _, _) = floors(&mut pos, &admin);
+    let burger = item(&mut pos, &admin, "Burger", 1000, 0, None);
+    let o = pos.open_order(&s, &dine_in(g[0].id)).unwrap();
+    pos.add_item(&s, o.id, burger.id, 1, None, None, &[]).unwrap();
+    pos.send_to_kitchen(&s, o.id).unwrap();
+    assert!(matches!(pos.cancel_order(&s, o.id, ""), Err(PosError::Forbidden)));
+    let approver = pos.pin_owner("1111").unwrap();
+    pos.cancel_order(&approver, o.id, "").unwrap();
+}

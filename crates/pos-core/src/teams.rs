@@ -52,7 +52,7 @@ impl Pos {
     /// ids are renamed, new ones added, missing ones removed. A removed team's
     /// items and categories go back to the general ticket.
     pub fn save_teams(&mut self, s: &Session, list: &[TeamInput]) -> Result<Vec<Team>> {
-        s.require(Permission::ManageSettings)?;
+        s.require(Permission::KitchenSettings)?;
         if list.len() > MAX_TEAMS {
             return invalid(format!("at most {MAX_TEAMS} teams"));
         }

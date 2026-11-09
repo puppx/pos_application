@@ -89,6 +89,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0019_shifts.sql"),
     include_str!("migrations/0020_sold_out.sql"),
     include_str!("migrations/0021_kitchen_screen.sql"),
+    include_str!("migrations/0022_manager_role.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
@@ -142,7 +143,9 @@ impl Pos {
     }
 
     pub fn set_setting(&self, s: &Session, key: &str, value: &str) -> Result<()> {
-        s.require(Permission::ManageSettings)?;
+        // Managers may change the kitchen settings; the rest is for admins.
+        const KITCHEN: &[&str] = &["drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes"];
+        s.require(if KITCHEN.contains(&key) { Permission::KitchenSettings } else { Permission::ManageSettings })?;
         if key.starts_with('_') {
             return error::invalid("reserved setting key");
         }
@@ -172,6 +175,11 @@ impl Pos {
     pub fn optimize(&self) -> Result<()> {
         self.conn.execute_batch("PRAGMA optimize;")?;
         Ok(())
+    }
+
+    /// Record something the app layer did (e.g. deleted backup files).
+    pub fn audit_event(&self, s: &Session, action: &str, detail: &str) -> Result<()> {
+        self.audit(Some(s.user_id), action, detail)
     }
 
     fn audit(&self, user_id: Option<i64>, action: &str, detail: &str) -> Result<()> {

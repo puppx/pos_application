@@ -1294,7 +1294,7 @@ impl Pos {
     /// A sample ticket for every team, to see the headers on the kitchen
     /// printer. None when no kitchen printer is set up.
     pub fn test_teams_job(&self, s: &Session) -> Result<Option<PrintJob>> {
-        s.require(Permission::ManageSettings)?;
+        s.require(Permission::KitchenSettings)?;
         let teams = crate::teams::load_teams(&self.conn)?;
         if teams.is_empty() {
             return invalid("add a team first");

@@ -267,18 +267,23 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 - Permissions are checked in Rust on every command, and the user is re-checked against the database each time. A disabled or demoted user loses access immediately.
 - There must always be at least one active admin.
 
-| | Admin | Staff |
-| --- | :---: | :---: |
-| Open orders, add items, send to kitchen, reprint, take payment | ✔ | ✔ |
-| Move tables, edit customer details, discounts | ✔ | ✔ |
-| Remove or reduce items already sent to the kitchen | ✔ | |
-| Cancel an order that has items in the kitchen | ✔ | |
-| Void / refund paid orders | ✔ | |
-| Order history | all | own |
-| Menu, options, stock, floor plan, users | ✔ | |
-| Kitchen printer setup | ✔ | |
-| Reports and End of day (close day, print summary) | ✔ | ✔ |
-| Settings, backup, reset data | ✔ | |
+| | Admin | Manager | Staff |
+| --- | :---: | :---: | :---: |
+| Open orders, add items, send to kitchen, reprint, take payment | ✔ | ✔ | ✔ |
+| Move tables and dishes, edit customer details, discounts | ✔ | ✔ | ✔ |
+| Remove or reduce items already sent to the kitchen (unless Settings keep it to admins) | ✔ | ✔ | ✔ |
+| Cancel an order that has items in the kitchen | ✔ | ✔ | with a manager's or admin's PIN |
+| Void / refund paid orders | ✔ | ✔ | |
+| Order history | all | all | own |
+| Menu, options, stock, floor plan | ✔ | ✔ | |
+| Kitchen settings (drinks / desserts tickets, kitchen teams, quick notes) | ✔ | ✔ | |
+| Reports, End of day, shifts | ✔ | ✔ | ✔ |
+| **Delete** anything (orders, menu items, categories, options, floors, customers, backups) | ✔ | | |
+| Staff and PINs, printers, bills, delivery apps, other settings, backup, reset data | ✔ | | |
+
+**Cancel** asks for a PIN in a confirm box (no more double tap): your own PIN for an order the kitchen has not got yet; a manager's or admin's PIN once it has. The PIN only approves the cancel; nobody is logged in or out.
+
+**Delete several at once** (admins): History, Menu (items, categories, option groups), Customers, Floor plan (floors) and Manage → Backup & data (full backups and menu backups) each have a **Delete several…** button: tick what to delete (or **All**), tap Delete, then tap again to confirm. Single backups can also be deleted from their row.
 
 ## Other devices (local server)
 

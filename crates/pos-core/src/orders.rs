@@ -1325,7 +1325,7 @@ impl Pos {
     /// history, reports and the customer's order count. Stock taken by a
     /// paid order is put back. Admin only; logged with the reason.
     pub fn delete_order(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<()> {
-        s.require(Permission::VoidOrder)?;
+        s.require(Permission::Delete)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let (status, total, customer): (String, Option<i64>, Option<i64>) = tx
             .query_row("SELECT status, total_cents, customer_id FROM orders WHERE id = ?1", [order_id], |r| {

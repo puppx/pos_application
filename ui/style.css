@@ -715,3 +715,14 @@ td.short, strong.short { color: var(--danger); }
 .dish-choices { gap: 6px; }
 .dish-choices .row { align-items: center; flex-wrap: wrap; }
 .dish-choices .with-label { text-align: left; }
+
+/* Bulk delete, PIN confirm */
+button.danger-outline { color: var(--danger); border-color: var(--danger); background: var(--surface); }
+button.danger-outline:hover { background: var(--danger-soft); }
+.bulk-list { max-height: 55vh; overflow: auto; gap: 4px; }
+.bulk-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
+.bulk-row.on { border-color: var(--danger); background: var(--danger-soft); }
+.bulk-row input { width: 20px; height: 20px; }
+.pin-dots { display: flex; justify-content: center; gap: 12px; padding: 8px 0; }
+.pin-dots span { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--ink-2); }
+.pin-dots span.on { background: var(--ink); }

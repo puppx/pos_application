@@ -192,6 +192,30 @@ pub struct ResetResult {
     backup: String,
 }
 
+/// Result of deleting several things at once.
+#[derive(Serialize)]
+pub struct BulkResult {
+    deleted: usize,
+    /// Menu items still named on past orders: hidden instead of deleted.
+    hidden: usize,
+    /// One message per thing that could not be deleted.
+    errors: Vec<String>,
+}
+
+/// A full backup file in the backup folder.
+#[derive(Serialize)]
+pub struct BackupFile {
+    name: String,
+    size: u64,
+    /// Unix seconds.
+    modified: i64,
+}
+
+/// "pos-....db" in the backup folder only: never a path.
+fn is_full_backup_name(name: &str) -> bool {
+    name.starts_with("pos-") && name.ends_with(".db") && !name.contains(['/', '\\']) && !name.contains("..")
+}
+
 /// Menu backups in `dir`, newest first.
 fn menu_backups(dir: &Path) -> Vec<(MenuBackupFile, PathBuf)> {
     let mut v: Vec<_> = std::fs::read_dir(dir)
@@ -767,8 +791,16 @@ commands! {
         app.with_session(t, |pos, s| pos.remove_payment(s, order_id, payment_id))
     }
 
-    fn cancel_order(app, t, order_id: i64, reason: String) -> () {
-        app.with_session(t, |pos, s| pos.cancel_order(s, order_id, &reason))
+    /// Cancel an open order, confirmed with a PIN: the PIN's owner cancels
+    /// it (an order already in the kitchen needs a manager's or admin's PIN).
+    fn cancel_order(app, t, order_id: i64, reason: String, pin: Option<String>) -> () {
+        app.with_session(t, |pos, s| match pin.as_deref() {
+            Some(p) => {
+                let approver = pos.pin_owner(p)?;
+                pos.cancel_order(&approver, order_id, &reason)
+            }
+            None => pos.cancel_order(s, order_id, &reason),
+        })
     }
 
     fn void_order(app, t, order_id: i64, reason: String) -> Order {
@@ -968,6 +1000,88 @@ commands! {
 
     fn set_setting(app, t, key: String, value: String) -> () {
         app.with_session(t, |pos, s| pos.set_setting(s, &key, &value))
+    }
+
+    /// Delete several things at once (admins only). `kind`: order, product,
+    /// category, customer, floor or option_group. Each is checked like a
+    /// single delete; the ones that cannot go are listed in `errors`.
+    fn delete_many(app, t, kind: String, ids: Vec<i64>, reason: Option<String>) -> BulkResult {
+        app.with_session(t, |pos, s| {
+            s.require(Permission::Delete)?;
+            if ids.is_empty() || ids.len() > 1000 {
+                return Err(PosError::Validation("choose what to delete".into()));
+            }
+            let mut r = BulkResult { deleted: 0, hidden: 0, errors: Vec::new() };
+            for id in ids {
+                let res = match kind.as_str() {
+                    "order" => pos.delete_order(s, id, reason.as_deref().unwrap_or("")).map(|_| true),
+                    "product" => pos.delete_product(s, id),
+                    "category" => pos.delete_category(s, id).map(|_| true),
+                    "customer" => pos.delete_customer(s, id).map(|_| true),
+                    "floor" => pos.delete_floor(s, id).map(|_| true),
+                    "option_group" => pos.delete_option_group(s, id).map(|_| true),
+                    _ => return Err(PosError::Validation("nothing of that kind can be deleted".into())),
+                };
+                match res {
+                    Ok(true) => r.deleted += 1,
+                    Ok(false) => r.hidden += 1,
+                    Err(e) => r.errors.push(e.to_string()),
+                }
+            }
+            Ok(r)
+        })
+    }
+
+    /// Full backups in the backup folder, newest first.
+    fn list_full_backups(app, t) -> Vec<BackupFile> {
+        app.with_session(t, |_, s| s.require(Permission::Backup))?;
+        Ok(list_backups(&app.backup_dir)
+            .into_iter()
+            .filter_map(|(at, p)| {
+                let name = p.file_name()?.to_string_lossy().to_string();
+                let size = std::fs::metadata(&p).ok()?.len();
+                let modified = at.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+                Some(BackupFile { name, size, modified })
+            })
+            .filter(|b| is_full_backup_name(&b.name))
+            .collect())
+    }
+
+    /// Delete full backups by name (admins only).
+    fn delete_backups(app, t, names: Vec<String>) -> usize {
+        app.with_session(t, |pos, s| {
+            s.require(Permission::Backup)?;
+            s.require(Permission::Delete)?;
+            let mut n = 0;
+            for name in &names {
+                if !is_full_backup_name(name) {
+                    return Err(PosError::Validation("that is not a backup".into()));
+                }
+                if std::fs::remove_file(app.backup_dir.join(name)).is_ok() {
+                    n += 1;
+                }
+            }
+            pos.audit_event(s, "backup.delete", &names.join(" "))?;
+            Ok(n)
+        })
+    }
+
+    /// Delete menu backups by name (admins only).
+    fn delete_menu_backups(app, t, names: Vec<String>) -> usize {
+        app.with_session(t, |pos, s| {
+            s.require(Permission::Delete)?;
+            let mut n = 0;
+            for name in &names {
+                if !is_menu_backup_name(name) {
+                    return Err(PosError::Validation("that is not a menu backup".into()));
+                }
+                if std::fs::remove_file(app.backup_dir.join(name)).is_ok() {
+                    n += 1;
+                }
+            }
+            pos.audit_event(s, "backup.menu_delete", &names.join(" "))?;
+            Ok(n)
+        })
     }
 
     fn backup_now(app, t) -> String {

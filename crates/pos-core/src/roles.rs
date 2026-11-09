@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Admin,
+    /// Runs the floor and the menu: everything staff do, plus the menu, the
+    /// floor plan, voids, all orders and the kitchen settings. Cannot delete
+    /// anything, manage staff, back up or change the rest of the settings.
+    Manager,
     Staff,
 }
 
@@ -11,6 +15,7 @@ impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Admin => "admin",
+            Role::Manager => "manager",
             Role::Staff => "staff",
         }
     }
@@ -18,6 +23,7 @@ impl Role {
     pub fn parse(s: &str) -> Option<Role> {
         match s {
             "admin" => Some(Role::Admin),
+            "manager" => Some(Role::Manager),
             "staff" => Some(Role::Staff),
             _ => None,
         }
@@ -26,6 +32,18 @@ impl Role {
     pub fn can(self, p: Permission) -> bool {
         match self {
             Role::Admin => true,
+            Role::Manager => matches!(
+                p,
+                Permission::Sell
+                    | Permission::ViewOwnOrders
+                    | Permission::ViewAllOrders
+                    | Permission::VoidOrder
+                    | Permission::ManageMenu
+                    | Permission::AdjustStock
+                    | Permission::ManageFloorPlan
+                    | Permission::ViewReports
+                    | Permission::KitchenSettings
+            ),
             // Staff run the shift: they can see sales reports and close the day.
             Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnOrders | Permission::ViewReports),
         }
@@ -47,7 +65,13 @@ pub enum Permission {
     /// Sales reports and End of day (closing the day, viewing and reprinting past days).
     ViewReports,
     ManageSettings,
+    /// The kitchen settings only: drinks / desserts tickets, kitchen teams,
+    /// quick notes (admins and managers).
+    KitchenSettings,
     Backup,
+    /// Deleting anything for good: orders, menu items, categories, options,
+    /// floors, customers, backups (admins only).
+    Delete,
 }
 
 /// An authenticated user. Created only by `Pos::login`, so holding one is

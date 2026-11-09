@@ -136,6 +136,7 @@ impl Pos {
     /// Delete a category; its items stay on the menu without a category.
     pub fn delete_category(&mut self, s: &Session, id: i64) -> Result<()> {
         s.require(Permission::ManageMenu)?;
+        s.require(Permission::Delete)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let name: String = tx
             .query_row("SELECT name FROM categories WHERE id = ?1", [id], |r| r.get(0))

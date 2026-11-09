@@ -178,6 +178,11 @@ function dayRange(iso) {
   return [new Date(y, m - 1, d).getTime() / 1000, new Date(y, m - 1, d + 1).getTime() / 1000];
 }
 const isAdmin = () => state.session?.role === 'admin';
+/// Admins and managers (menu, floor plan, kitchen settings).
+const isManager = () => ['admin', 'manager'].includes(state.session?.role);
+const ROLE_LABEL = { admin: 'Admin', manager: 'Manager', staff: 'Staff' };
+/// May this user open a page that needs `need` (false, 'manager' or 'admin')?
+const canSee = (need) => !need || (need === 'manager' ? isManager() : isAdmin());
 /// "2026-10-12" -> "Mon 12 Oct"
 function dayLabel(iso) {
   const [y, m, d] = iso.split('-').map(Number);
@@ -352,9 +357,9 @@ const VIEWS = [
   ['reports', 'Reports', false],
   ['shift', 'Shift & cash', false],
   ['kitchen', 'Kitchen screen', false],
-  ['menuAdmin', 'Menu', true],
-  ['plan', 'Floor plan', true],
-  ['users', 'Staff', true],
+  ['menuAdmin', 'Menu', 'manager'],
+  ['plan', 'Floor plan', 'manager'],
+  ['users', 'Staff', 'admin'],
 ];
 /// What each Manage tile under "Daily work" says.
 const MANAGE_SUB = {
@@ -439,7 +444,7 @@ function renderShell() {
   loadAutoLogout();
   clearInterval(state.clockTimer);
   if (!state.remote) startUpdateChecks();
-  if (!VIEWS.some(([id, , adm]) => id === state.view && (!adm || isAdmin()))) state.view = 'floor';
+  if (!VIEWS.some(([id, , need]) => id === state.view && canSee(need))) state.view = 'floor';
   document.getElementById('bar').hidden = false;
   document.getElementById('rail').hidden = false;
   setKids(document.getElementById('brand'), logoImg());
@@ -451,7 +456,7 @@ function renderShell() {
   const title = state.orderId ? 'Order' : inManage(state.view) ? `Manage › ${name}` : name;
   document.getElementById('title').replaceChildren(h('span', {}, state.storeName || 'POS'), h('span', { class: 'sep' }, '/'), title);
   document.getElementById('who').replaceChildren(h('span', { class: 'avatar' }, initials(state.session.name)),
-    h('span', { class: 'who-text' }, h('strong', {}, state.session.name), h('small', {}, state.session.role === 'admin' ? 'Admin' : 'Staff')));
+    h('span', { class: 'who-text' }, h('strong', {}, state.session.name), h('small', {}, ROLE_LABEL[state.session.role] ?? 'Staff')));
   document.getElementById('mode').hidden = !state.remote;
   drawUpdateBar();
   drawBusinessDay();
@@ -586,7 +591,7 @@ async function renderFloor() {
   if (!floors.some((f) => f.id === state.floorId)) state.floorId = floors[0]?.id ?? null;
   if (!floors.length) {
     return screen(h('div', { class: 'empty' }, icon('plan', 48), h('h2', {}, 'No floor plan yet'),
-      isAdmin() ? h('button', { class: 'primary lg', onclick: () => go('plan') }, 'Draw the floor plan') : h('p', {}, 'Ask an admin to set it up.')));
+      isManager() ? h('button', { class: 'primary lg', onclick: () => go('plan') }, 'Draw the floor plan') : h('p', {}, 'Ask an admin to set it up.')));
   }
   const plan = planBox(290);
   const stats = h('div', { class: 'stats' });
@@ -1163,10 +1168,45 @@ async function renderOrder() {
       h('div', { class: 'muted small' }, '"Menu rates" uses each item\'s own tax. A rate here applies to every item on this order, including ones added later.')));
   };
   // Two taps, no reason: the first asks "Tap again", the second cancels.
-  const cancelBtn = () => confirmBtn('Cancel', 'Tap again to cancel the order', async () => {
-    await call('cancel_order', { orderId, reason: '' });
-    toast('Order cancelled'); closeOrder();
-  });
+  // Cancel: a confirm box asking for a PIN (a manager's or admin's once the kitchen has the order).
+  const cancelBtn = () => h('button', { class: 'danger', onclick: () => {
+    const sent = order.items.some((i) => i.sent_at);
+    let pin = '';
+    const dots = h('div', { class: 'pin-dots' });
+    const err = h('div', { class: 'change short' });
+    const ok = h('button', { class: 'danger paybig' }, 'Cancel order');
+    const drawPin = () => { setKids(dots, ...Array.from({ length: Math.max(4, pin.length) }, (_, i) => h('span', { class: i < pin.length ? 'on' : '' }))); ok.disabled = pin.length < 4; };
+    const key = (k) => { if (k === '⌫') pin = pin.slice(0, -1); else if (k === 'C') pin = ''; else if (pin.length < 8) pin += k; err.textContent = ''; drawPin(); };
+    const go = act(async () => {
+      if (pin.length < 4) return;
+      try {
+        await invoke('cancel_order', { orderId, reason: '', pin });
+      } catch (e) {
+        const msg = String(e?.message ?? e);
+        pin = ''; drawPin();
+        err.textContent = /permission/i.test(msg) ? 'This order is already in the kitchen: a manager or admin PIN is needed'
+          : /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
+        return;
+      }
+      closeModal(); toast(`Order #${order.id} cancelled`); closeOrder();
+    });
+    ok.onclick = go;
+    showModal(h('h3', {}, `Cancel order #${order.id}?`),
+      h('div', { class: 'muted' }, sent ? 'The kitchen already has this order. Enter a manager or admin PIN to cancel it.' : 'Enter your PIN to confirm.'),
+      dots, err,
+      h('div', { class: 'keypad' }, ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))),
+      ok, h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Keep the order')));
+    drawPin();
+    document.removeEventListener('keydown', state.modalKeys);
+    document.activeElement?.blur();
+    state.modalKeys = (e) => {
+      if (/^[0-9]$/.test(e.key)) key(e.key);
+      else if (e.key === 'Backspace') key('⌫');
+      else if (e.key === 'Enter') { e.preventDefault(); go(); }
+      else if (e.key === 'Escape') closeModal();
+    };
+    document.addEventListener('keydown', state.modalKeys);
+  } }, 'Cancel');
 
   const head = h('div', { class: 'ticket-head' });
   function header() {
@@ -1549,7 +1589,7 @@ function orderDetail(o, onChange) {
       if (p.error) toast(`Did not print: ${p.error}`, true);
       else toast(p.attempted ? 'Kitchen ticket reprinted' : 'No kitchen printer is set up', !p.attempted);
     }) }, 'Reprint kitchen ticket')),
-    isAdmin() && o.status === 'paid' && h('div', { class: 'row' }, reason,
+    isManager() && o.status === 'paid' && h('div', { class: 'row' }, reason,
       h('button', { class: 'danger', onclick: act(async () => {
         await call('void_order', { orderId: o.id, reason: reason.value });
         toast('Order voided');
@@ -1644,6 +1684,7 @@ async function renderHistory() {
   const load = act(async () => {
     const [from, to] = dayRange(date.value);
     const orders = await call('list_orders', { from, to, limit: 500, offset: 0 });
+    shown = orders;
     setKids(list, h('table', {},
       h('tr', {}, h('th', {}, '#'), h('th', {}, 'Opened'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Total')),
       orders.map((o) => h('tr', { class: 'click', onclick: act(() => show(o.id)) },
@@ -1660,8 +1701,13 @@ async function renderHistory() {
     }));
   }
   date.onchange = load;
+  let shown = [];
+  const bulk = () => bulkDelete('Delete orders', shown.filter((o) => o.status !== 'open').map((o) => ({
+    id: o.id, label: `#${o.id} ${TYPE[o.order_type] ?? ''} · ${where(o)}`, sub: `${o.status} · ${money(o.total_cents)}`,
+  })), (ids) => deleteMany('order', ids, 'order(s)'), async () => { setKids(detail); await load(); });
   screen(h('div', { class: 'page split' },
-    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('label', { class: 'field' }, 'Day', date)), h('div', { class: 'panel' }, list)),
+    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('label', { class: 'field' }, 'Day', date), h('span', { class: 'grow' }),
+      isAdmin() && h('button', { class: 'danger-outline', onclick: bulk }, 'Delete several…')), h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, detail)));
   await load();
 }
@@ -1738,6 +1784,7 @@ async function renderMenuAdmin() {
   // ---- the list ----
   const loadProducts = act(async () => {
     let products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
+    state.menuShown = products;
     const q = search.value.trim().toLowerCase();
     if (q) products = products.filter((p) => matches(p, q));
     else if (state.menuTab === 'none') products = products.filter((p) => p.category_id == null);
@@ -1854,7 +1901,7 @@ async function renderMenuAdmin() {
         h('button', { class: 'primary', onclick: save }, 'Save'),
         h('button', { onclick: () => setKids(form) }, 'Cancel'),
         h('span', { style: 'flex:1' }),
-        c && confirmBtn('Delete category', `Tap again to delete "${c.name}"`, async () => {
+        c && isAdmin() && confirmBtn('Delete category', `Tap again to delete "${c.name}"`, async () => {
           await call('delete_category', { id: c.id });
           toast(`${c.name} deleted; its items now have no category`);
           state.menuTab = 'all';
@@ -1896,7 +1943,7 @@ async function renderMenuAdmin() {
       h('div', {}, h('button', { onclick: addRow }, '+ Option')),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'),
         h('span', { style: 'flex:1' }),
-        g && confirmBtn('Delete group', `Tap again to delete "${g.name}"`, async () => {
+        g && isAdmin() && confirmBtn('Delete group', `Tap again to delete "${g.name}"`, async () => {
           await call('delete_option_group', { id: g.id });
           toast(`${g.name} deleted`); await changed();
         }))));
@@ -2122,7 +2169,7 @@ async function renderMenuAdmin() {
           const fresh = (await call('list_products', { includeInactive: true, limit: 500, offset: 0 })).find((x) => x.id === copy.id);
           state.openEditor?.(fresh ?? copy);
         }) }, 'Duplicate'),
-        p && confirmBtn('Delete item', `Tap again to delete "${p.name}" for good`, async () => {
+        p && isAdmin() && confirmBtn('Delete item', `Tap again to delete "${p.name}" for good`, async () => {
           await call('delete_product', { id: p.id });
           toast(`${p.name} deleted`);
           await changed();
@@ -2275,7 +2322,7 @@ async function renderMenuAdmin() {
         h('button', { class: 'primary', onclick: save }, 'Save set'),
         h('button', { onclick: () => setKids(form) }, 'Cancel'),
         h('span', { style: 'flex:1' }),
-        p && confirmBtn('Delete set', `Tap again to delete "${p.name}"`, async () => {
+        p && isAdmin() && confirmBtn('Delete set', `Tap again to delete "${p.name}"`, async () => {
           await call('delete_product', { id: p.id });
           toast(`${p.name} deleted`);
           await changed();
@@ -2357,11 +2404,17 @@ async function renderMenuAdmin() {
   screen(h('div', { class: 'page' },
     h('div', { class: 'stack' },
       h('div', { class: 'grid2' }, h('div', { class: 'card stack' },
-        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Categories'), h('button', { onclick: () => editCategory(null) }, '+ Category')),
+        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Categories'),
+          isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete categories', cats.map((c) => ({ id: c.id, label: c.name })),
+            (ids) => deleteMany('category', ids, 'categor(ies)'), async () => { state.menuTab = 'all'; await changed(); }) }, 'Delete…'),
+          h('button', { onclick: () => editCategory(null) }, '+ Category')),
         catChips,
         cats.length > 1 && h('div', { class: 'muted small' }, 'Drag ⠿ to change the order. Tap a category to set its colour and defaults (tax, starters).')),
       h('div', { class: 'card stack' },
-        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Options (sizes, extras…)'), h('button', { onclick: () => editGroup(null) }, '+ Option group')),
+        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Options (sizes, extras…)'),
+          isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete option groups', groups.map((g) => ({ id: g.id, label: g.name, sub: groupRule(g) })),
+            (ids) => deleteMany('option_group', ids, 'group(s)'), () => changed()) }, 'Delete…'),
+          h('button', { onclick: () => editGroup(null) }, '+ Option group')),
         h('div', { class: 'row' }, groups.length ? groups.map((g) => h('button', {
           style: g.active ? '' : 'opacity:.5', onclick: () => editGroup(g), title: g.options.filter((o) => o.active).map((o) => o.name).join(', '),
         }, g.name, h('small', { class: 'muted' }, ` ${groupRule(g)}`)))
@@ -2372,7 +2425,10 @@ async function renderMenuAdmin() {
         h('button', { onclick: act(() => editSet(null)) }, icon('plus', 18), 'Set menu'),
         h('button', { onclick: pasteImport }, 'Paste a menu'),
         h('div', { class: 'searchbox grow' }, icon('search', 18), search),
-        h('label', { class: 'check' }, showInactive, ' Show removed')),
+        h('label', { class: 'check' }, showInactive, ' Show removed'),
+        isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete menu items', (state.menuShown ?? []).map((p) => ({
+          id: p.id, label: p.name, sub: [catById[p.category_id]?.name, money(p.price_cents)].filter(Boolean).join(' · '),
+        })), (ids) => deleteMany('product', ids, 'item(s)'), () => changed()) }, 'Delete several…')),
       h('div', { class: 'panel' }, list)),
     form));
   await loadProducts();
@@ -2399,6 +2455,7 @@ function splitCsv(line) {
 // ---------- floor plan editor (admin) ----------
 
 async function renderPlan() {
+  let floorsList = [];
   const newFloor = h('input', { placeholder: 'New floor name', style: 'width:150px' });
   const addFloor = act(async () => {
     if (state.planDirty) return toast('Save or discard changes on this floor first', true);
@@ -2410,7 +2467,10 @@ async function renderPlan() {
     if (state.planDirty) return toast('Save or discard changes on this floor first', true);
     state.floorId = id;
     renderPlan();
-  }, [newFloor, h('button', { onclick: addFloor }, '+ Floor')]);
+  }, [newFloor, h('button', { onclick: addFloor }, '+ Floor'),
+    isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete floors', floorsList.map((f) => ({ id: f.id, label: f.name })),
+      (ids) => deleteMany('floor', ids, 'floor(s)'), () => { setDirty(false); state.floorId = null; return renderPlan(); }) }, 'Delete…')]);
+  floorsList = floors;
   if (!floors.length) {
     return screen(h('div', { class: 'page narrow card stack' },
       h('h3', {}, 'Floor plan'), 'Create your first floor (for example "Ground floor"), then add tables to it.', tabs));
@@ -2522,7 +2582,7 @@ async function renderPlan() {
           await call('update_floor', { id: floor.id, name: rename.value, sortOrder: floor.sort_order });
           toast('Renamed'); renderPlan();
         }) }, 'Rename')),
-        h('button', { class: 'danger', onclick: act(async () => {
+        isAdmin() && h('button', { class: 'danger', onclick: act(async () => {
           await call('delete_floor', { id: floor.id });
           setDirty(false); state.floorId = null; toast('Floor removed'); renderPlan();
         }) }, 'Delete floor')));
@@ -2559,13 +2619,14 @@ async function renderUsers() {
       h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Role'), h('th', {}, 'Status'), h('th', {}, 'Last login')),
       users.map((u) => h('tr', { class: 'click', onclick: () => edit(u) },
         h('td', {}, h('span', { class: 'row nowrap' }, h('span', { class: 'avatar sm' }, initials(u.name)), u.name)),
-        h('td', {}, h('span', { class: `chip ${u.role === 'admin' ? 'info' : ''}` }, u.role === 'admin' ? 'Admin' : 'Staff')),
+        h('td', {}, h('span', { class: `chip ${u.role === 'staff' ? '' : 'info'}` }, ROLE_LABEL[u.role] ?? 'Staff')),
         h('td', {}, h('span', { class: `status ${u.active ? 's-paid' : 's-cancelled'}` }, u.active ? 'active' : 'disabled')),
         h('td', {}, u.last_login_at ? fmtTime(u.last_login_at) : '—')))));
   };
   function edit(u) {
     const name = h('input', { value: u?.name ?? '', placeholder: 'Name' });
-    const role = h('select', {}, h('option', { value: 'staff' }, 'Staff'), h('option', { value: 'admin' }, 'Admin'));
+    const role = h('select', { title: 'Staff: take orders and payments. Manager: also the menu, floor plan, voids, reports and kitchen settings (cannot delete or manage staff). Admin: everything.' },
+      h('option', { value: 'staff' }, 'Staff'), h('option', { value: 'manager' }, 'Manager'), h('option', { value: 'admin' }, 'Admin'));
     role.value = u?.role ?? 'staff';
     const active = h('input', { type: 'checkbox', checked: u ? u.active : true });
     const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: u ? 'New PIN (optional)' : 'PIN (4-8 digits)' });
@@ -2825,8 +2886,9 @@ async function renderCustomers() {
   const list = h('div');
   const panel = h('div', { 'data-hint': 'Find a customer to edit them, see their orders or start a new order.' });
   let timer;
+  let found = [];
   const load = async () => {
-    const found = await call('search_customers', { query: q.value, limit: 100 });
+    found = await call('search_customers', { query: q.value, limit: 100 });
     setKids(list, found.length ? h('table', {},
       h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Phone'), h('th', {}, 'Address'), h('th', { class: 'num' }, 'Orders')),
       found.map((c) => h('tr', { class: 'click', onclick: () => edit(c) },
@@ -2865,6 +2927,8 @@ async function renderCustomers() {
 
   screen(h('div', { class: 'page split' },
     h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('div', { class: 'searchbox grow' }, icon('search', 20), q),
+      isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete customers', found.map((c) => ({ id: c.id, label: c.name, sub: c.phone ?? '' })),
+        (ids) => deleteMany('customer', ids, 'customer(s)'), async () => { setKids(panel); await load(); }) }, 'Delete several…'),
       h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Customer')), h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, panel)));
   await load();
@@ -3221,7 +3285,7 @@ function serverCard() {
 const printResult = (r, ok) => toast(r.error ? `Did not print: ${r.error}` : ok, !!r.error);
 
 async function renderSettings() {
-  const tab = isAdmin() && SETTINGS_GROUPS.find(([id]) => id === state.settingsTab && (id !== 'screen' || !state.remote));
+  const tab = settingsGroups().find(([id]) => id === state.settingsTab);
   if (!tab) return renderManageHome();
   const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
   const [kitchenCfg, receiptCfg, systemPrinters] = await Promise.all([
@@ -3304,17 +3368,35 @@ async function renderSettings() {
         const info = await checkForUpdate(false);
         if (info && !info.available) toast(`You have the latest version (${info.current})`);
       }) }, 'Check for updates'))]);
-  const backupCard = () => h('div', { class: 'card stack' },
-    h('h3', {}, 'Backup'),
-    h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; the last 14 are kept.'),
-    h('div', {}, h('button', { onclick: act(async () => toast('Backup saved: ' + (await call('backup_now')))) }, 'Back up everything now')));
+  const backupCard = () => {
+    const list = h('div', { class: 'stack' });
+    const size = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+    let files = [];
+    const load = async () => {
+      files = await call('list_full_backups').catch(() => []);
+      setKids(list, files.length ? h('table', {}, files.map((f) => h('tr', {},
+        h('td', {}, fmtTime(f.modified)), h('td', { class: 'muted small' }, f.name), h('td', { class: 'num muted' }, size(f.size)),
+        h('td', { class: 'num' }, isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => {
+          await call('delete_backups', { names: [f.name] }); toast('Backup deleted'); await load();
+        }, 'danger-outline'))))) : h('div', { class: 'muted' }, 'No backups yet.'));
+    };
+    load();
+    return h('div', { class: 'card stack' },
+      h('h3', {}, 'Backup'),
+      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; the last 14 are kept.'),
+      h('div', { class: 'row' }, h('button', { onclick: act(async () => { toast('Backup saved: ' + (await call('backup_now'))); await load(); }) }, 'Back up everything now'),
+        h('span', { class: 'grow' }),
+        isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete backups', files.map((f) => ({ id: f.name, label: fmtTime(f.modified), sub: `${f.name} · ${size(f.size)}` })),
+          async (names) => `${await call('delete_backups', { names })} backup(s) deleted`, load) }, 'Delete several…')),
+      list);
+  };
 
   const cards = {
     shop: () => [restaurantCard(), serviceCard(), menuDefaultsCard()],
     bills: () => [receiptCard(), ticketLabelsCard()],
     kitchen: () => [kitchenPrinterCard(), routesCard(systemPrinters)],
     tickets: () => [splitCard()],
-    orders: () => [fixSentCard(), quickNotesCard()],
+    orders: () => [isAdmin() && fixSentCard(), quickNotesCard()],
     teams: () => [teamsCard()],
     login: () => [autoLogoutCard()],
     delivery: () => [platformsCard()],
@@ -3331,14 +3413,21 @@ async function renderSettings() {
     group.cards()));
 }
 
+/// The settings areas this user may open: all for admins, the kitchen ones
+/// for managers, none for staff.
+function settingsGroups() {
+  const kitchen = ['tickets', 'orders', 'teams'];
+  return SETTINGS_GROUPS.filter(([id]) => (id !== 'screen' || !state.remote) && (isAdmin() || (state.session?.role === 'manager' && kitchen.includes(id))));
+}
+
 /// Manage: big tiles for the other screens (History, Menu, Staff…) and,
 /// for admins, every settings area.
 function renderManageHome() {
   state.settingsTab = null;
   const tile = (id, ic, title, sub, onclick) => h('button', { class: 'settings-tile', 'data-group': id, onclick },
     icon(ic, 40), h('strong', {}, title), sub && h('small', {}, sub));
-  const pages = VIEWS.filter(([id, , adm, rail]) => !rail && (!adm || isAdmin()));
-  const groups = isAdmin() ? SETTINGS_GROUPS.filter(([id]) => id !== 'screen' || !state.remote) : [];
+  const pages = VIEWS.filter(([, , need, rail]) => !rail && canSee(need));
+  const groups = settingsGroups();
   const open = (id) => () => { state.settingsTab = id; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
   screen(h('div', { class: 'page settings-home' },
     h('h3', { class: 'manage-title' }, 'Daily work'),
@@ -3427,6 +3516,48 @@ function settingSwitch(key, label, onMsg, offMsg) {
   return h('label', { class: 'switch', 'data-key': key }, box, h('span', {}, ''), label);
 }
 
+/// Tick several things and delete them in one go (admins only). `items`:
+/// [{ id, label, sub }]; `del(ids)` deletes and returns a message.
+function bulkDelete(title, items, del, done) {
+  if (!items.length) return toast('Nothing to delete here', true);
+  const picked = new Set();
+  const list = h('div', { class: 'stack bulk-list' });
+  const all = h('input', { type: 'checkbox' });
+  const btn = h('button', { class: 'danger' });
+  let sure = false;
+  const draw = () => {
+    setKids(list, items.map((it) => {
+      const box = h('input', { type: 'checkbox', checked: picked.has(it.id) });
+      box.onchange = () => { if (box.checked) picked.add(it.id); else picked.delete(it.id); sure = false; drawBtn(); };
+      return h('label', { class: `bulk-row ${picked.has(it.id) ? 'on' : ''}` }, box, h('span', { class: 'grow' }, it.label), it.sub && h('span', { class: 'muted small' }, it.sub));
+    }));
+    all.checked = picked.size === items.length;
+    drawBtn();
+  };
+  const drawBtn = () => {
+    btn.textContent = !picked.size ? 'Tick what to delete' : sure ? `Tap again: delete ${picked.size} for good` : `Delete ${picked.size}`;
+    btn.disabled = !picked.size;
+  };
+  all.onchange = () => { picked.clear(); if (all.checked) items.forEach((it) => picked.add(it.id)); sure = false; draw(); };
+  btn.onclick = act(async () => {
+    if (!sure) { sure = true; drawBtn(); return; }
+    const msg = await del([...picked]);
+    closeModal();
+    toast(msg);
+    await done?.();
+  });
+  showModal(h('div', { class: 'row' }, h('h3', { class: 'grow' }, title), h('label', { class: 'check' }, all, ' All')),
+    list, h('div', { class: 'row' }, btn, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Close')));
+  draw();
+}
+
+/// Delete several of one kind through `delete_many`; the message says what happened.
+async function deleteMany(kind, ids, what) {
+  const r = await call('delete_many', { kind, ids });
+  return [`${r.deleted} ${what} deleted`, r.hidden && `${r.hidden} hidden (still on past orders)`, r.errors.length && `${r.errors.length} not deleted: ${r.errors[0]}`]
+    .filter(Boolean).join(' · ');
+}
+
 /// Two taps to run `fn`: the first changes the label to `sure`.
 function confirmBtn(label, sure, fn, cls = 'danger') {
   const b = h('button', { class: cls });
@@ -3448,16 +3579,19 @@ function confirmBtn(label, sure, fn, cls = 'danger') {
 /// Menu only: save, list, restore, and restore from a file (another till).
 function menuBackupCard() {
   const list = h('div', { class: 'stack' });
+  let menuFiles = [];
   const restored = async (n) => {
     state.menu = null;
     toast(`Menu restored: ${n.items} items, ${n.categories} categories, ${n.option_groups} option groups`);
   };
   const load = async () => {
     const files = await call('list_menu_backups');
+    menuFiles = files;
     setKids(list, files.length
       ? h('table', {}, files.slice(0, 10).map((f) => h('tr', {},
         h('td', {}, fmtTime(f.saved_at)), h('td', { class: 'muted' }, `${f.items} items`),
-        h('td', { class: 'num' }, confirmBtn('Restore', 'Tap again: replace the menu', async () => restored(await call('restore_menu_backup', { name: f.name })), '')))))
+        h('td', { class: 'num' }, confirmBtn('Restore', 'Tap again: replace the menu', async () => restored(await call('restore_menu_backup', { name: f.name })), ''),
+          isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => { await call('delete_menu_backups', { names: [f.name] }); toast('Menu backup deleted'); await load(); }, 'danger-outline')))))
       : h('div', { class: 'muted' }, 'No menu backups yet.'));
   };
   const file = h('input', { type: 'file', accept: '.json,application/json', hidden: true });
@@ -3494,7 +3628,9 @@ function menuBackupCard() {
     h('p', { class: 'muted' }, 'Save just the menu (categories, items, choices, options and prices), then restore it later or load it on another till. ' +
       'Restoring replaces the current menu; past orders are not changed.'),
     h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Back up menu'),
-      h('button', { onclick: () => file.click() }, 'Restore from a file…'), file),
+      h('button', { onclick: () => file.click() }, 'Restore from a file…'), file, h('span', { class: 'grow' }),
+      isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete menu backups', menuFiles.map((f) => ({ id: f.name, label: fmtTime(f.saved_at), sub: `${f.items} items` })),
+        async (names) => `${await call('delete_menu_backups', { names })} menu backup(s) deleted`, load) }, 'Delete several…')),
     picked, list);
 }
 

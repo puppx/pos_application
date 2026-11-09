@@ -316,6 +316,7 @@ impl Pos {
     /// copy of the name and price). Returns true if the row was removed.
     pub fn delete_product(&mut self, s: &Session, id: i64) -> Result<bool> {
         s.require(Permission::ManageMenu)?;
+        s.require(Permission::Delete)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let name: String = tx
             .query_row("SELECT name FROM products WHERE id = ?1 AND deleted = 0", [id], |r| r.get(0))

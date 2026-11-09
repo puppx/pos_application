@@ -229,7 +229,7 @@ impl Pos {
     /// Remove a customer from the list (admin). Past orders keep their copy
     /// of the name and address.
     pub fn delete_customer(&self, s: &Session, id: i64) -> Result<()> {
-        s.require(Permission::ManageSettings)?;
+        s.require(Permission::Delete)?;
         if self.conn.execute("UPDATE customers SET active = 0 WHERE id = ?1 AND active = 1", [id])? == 0 {
             return Err(PosError::NotFound);
         }

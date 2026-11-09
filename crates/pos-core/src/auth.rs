@@ -135,6 +135,28 @@ impl Pos {
         Ok(Session { user_id, name, role })
     }
 
+    /// Who a PIN belongs to, to approve one action (e.g. cancelling an order)
+    /// without logging them in. Wrong PINs count towards the lock-out.
+    pub fn pin_owner(&mut self, pin: &str) -> Result<Session> {
+        self.throttle.check(Instant::now())?;
+        let found = match self.hash_pin(pin) {
+            Ok(hash) => self
+                .conn
+                .prepare_cached("SELECT id, name, role FROM users WHERE pin_hash = ?1 AND active = 1")?
+                .query_row([hash], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .optional()?,
+            Err(_) => None,
+        };
+        let Some((user_id, name, role)) = found else {
+            self.throttle.record_failure(Instant::now());
+            self.audit(None, "pin.failed", "")?;
+            return Err(PosError::InvalidPin);
+        };
+        self.throttle.record_success();
+        let role = Role::parse(&role).ok_or_else(|| PosError::Internal("bad role".into()))?;
+        Ok(Session { user_id, name, role })
+    }
+
     /// How many digits make a PIN, for logging in without pressing OK: the
     /// longest active PIN, once every active user's length is known (shorter
     /// PINs still press OK). None when switched off (setting `pin_auto_login`

@@ -159,6 +159,7 @@ impl Pos {
     /// Remove a floor and its tables. Refused while any table has an open order.
     pub fn delete_floor(&mut self, s: &Session, id: i64) -> Result<()> {
         s.require(Permission::ManageFloorPlan)?;
+        s.require(Permission::Delete)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let busy: Option<String> = tx
             .query_row(

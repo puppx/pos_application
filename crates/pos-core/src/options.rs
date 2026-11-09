@@ -233,6 +233,7 @@ impl Pos {
     /// item that used it. Past orders keep their own copy of the options.
     pub fn delete_option_group(&mut self, s: &Session, id: i64) -> Result<()> {
         s.require(Permission::ManageMenu)?;
+        s.require(Permission::Delete)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let name: String = tx
             .query_row("SELECT name FROM option_groups WHERE id = ?1 AND deleted = 0", [id], |r| r.get(0))

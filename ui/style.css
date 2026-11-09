@@ -638,3 +638,17 @@ body.kb-open .popup, body.kb-open #modal { bottom: var(--kb-h); }
 body.kb-open #toast { bottom: calc(var(--kb-h) + 16px); }
 #keyboard.on { background: var(--ink); color: #fff; }
 @media (max-width: 700px) { .osk-key { min-height: 44px; font-size: 18px; } .osk-key.fn { font-size: 14px; } }
+
+/* Finish & Pay: split bill, tips */
+.pay-parts { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--go-soft); display: flex; flex-direction: column; gap: 4px; }
+.pay-part { min-height: 0; }
+.link-btn { min-height: 30px; padding: 0 10px; font-size: 13px; }
+.pay-now { background: var(--brand-soft); border-radius: var(--radius-sm); padding: 8px 10px; }
+.pay-extras button { min-height: 44px; }
+.paygrid.tips, .paygrid.splits { grid-template-columns: repeat(3, 1fr); }
+.paygrid.tips button, .paygrid.splits button { min-height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 18px; }
+.paygrid.tips button small, .paygrid.splits button small { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.paygrid.tips button.on { background: var(--brand); color: #fff; border-color: var(--brand); }
+.dish-pick { max-height: 46vh; overflow: auto; }
+.dish-row { padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
+.dish-row.on { border-color: var(--brand); background: var(--brand-soft); }

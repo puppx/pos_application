@@ -30,6 +30,11 @@ pub struct SalesSummary {
     pub voided_count: i64,
     pub voided_total_cents: i64,
     pub cancelled_count: i64,
+    /// Tips taken (not in `total_cents`, not taxed).
+    #[serde(default)]
+    pub tip_cents: i64,
+    /// Payments by method: `count` is payments, `total_cents` the amounts
+    /// towards bills (tips are in `tip_cents`). A split bill counts each part.
     pub by_payment: Vec<GroupTotal>,
     pub by_type: Vec<GroupTotal>,
     /// Delivery platforms; orders taken directly are under "Direct".
@@ -72,7 +77,8 @@ impl Pos {
                     COUNT(*) FILTER (WHERE status = 'voided'),
                     COALESCE(SUM(total_cents) FILTER (WHERE status = 'voided'), 0),
                     COALESCE(SUM(service_cents) FILTER (WHERE status = 'paid'), 0),
-                    COALESCE(SUM(tax_cents) FILTER (WHERE status = 'paid' AND tax_incl = 1), 0)
+                    COALESCE(SUM(tax_cents) FILTER (WHERE status = 'paid' AND tax_incl = 1), 0),
+                    COALESCE(SUM(tip_cents) FILTER (WHERE status = 'paid'), 0)
                  FROM orders WHERE paid_at >= ?1 AND paid_at < ?2",
             )?
             .query_row(params![from, to], |r| {
@@ -89,6 +95,7 @@ impl Pos {
                     voided_count: r.get(5)?,
                     voided_total_cents: r.get(6)?,
                     cancelled_count: 0,
+                    tip_cents: r.get(9)?,
                     by_payment: Vec::new(),
                     by_type: Vec::new(),
                     by_channel: Vec::new(),
@@ -101,17 +108,25 @@ impl Pos {
                 "SELECT COUNT(*) FROM orders WHERE opened_at >= ?1 AND opened_at < ?2 AND status = 'cancelled'",
             )?
             .query_row(params![from, to], |r| r.get(0))?;
-        for (col, out) in [("payment_method", &mut sum.by_payment), ("order_type", &mut sum.by_type)] {
-            let mut stmt = self.conn.prepare_cached(&format!(
-                "SELECT {col}, COUNT(*), SUM(total_cents) FROM orders
-                 WHERE paid_at >= ?1 AND paid_at < ?2 AND status = 'paid'
-                 GROUP BY {col} ORDER BY 3 DESC"
-            ))?;
-            let rows = stmt.query_map(params![from, to], |r| {
-                Ok(GroupTotal { key: r.get(0)?, count: r.get(1)?, total_cents: r.get(2)? })
-            })?;
-            *out = rows.collect::<rusqlite::Result<_>>()?;
-        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT order_type, COUNT(*), SUM(total_cents) FROM orders
+             WHERE paid_at >= ?1 AND paid_at < ?2 AND status = 'paid'
+             GROUP BY order_type ORDER BY 3 DESC",
+        )?;
+        let rows = stmt.query_map(params![from, to], |r| {
+            Ok(GroupTotal { key: r.get(0)?, count: r.get(1)?, total_cents: r.get(2)? })
+        })?;
+        sum.by_type = rows.collect::<rusqlite::Result<_>>()?;
+        // By the order's paid time, so the methods add up to the total.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT p.method, COUNT(*), SUM(p.amount_cents) FROM payments p JOIN orders o ON o.id = p.order_id
+             WHERE o.paid_at >= ?1 AND o.paid_at < ?2 AND o.status = 'paid'
+             GROUP BY p.method ORDER BY 3 DESC",
+        )?;
+        let rows = stmt.query_map(params![from, to], |r| {
+            Ok(GroupTotal { key: r.get(0)?, count: r.get(1)?, total_cents: r.get(2)? })
+        })?;
+        sum.by_payment = rows.collect::<rusqlite::Result<_>>()?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT COALESCE(ch.name, 'Direct'), COUNT(*), SUM(o.total_cents)
              FROM orders o LEFT JOIN delivery_channels ch ON ch.id = o.channel_id

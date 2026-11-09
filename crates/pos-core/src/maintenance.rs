@@ -564,6 +564,7 @@ impl Pos {
                      (SELECT id FROM order_items WHERE order_id IN (SELECT id FROM reset_orders));
                  DELETE FROM order_items WHERE order_id IN (SELECT id FROM reset_orders);
                  DELETE FROM stock_movements WHERE order_id IN (SELECT id FROM reset_orders);
+                 DELETE FROM payments WHERE order_id IN (SELECT id FROM reset_orders);
                  DELETE FROM day_closes WHERE {closes};"
             ))?;
             report.orders = count(&tx, "SELECT COUNT(*) FROM reset_orders")?;

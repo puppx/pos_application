@@ -117,6 +117,9 @@ impl DayClose {
             g.iter().map(|g| (label(&g.key), g.count, g.total_cents)).collect::<Vec<_>>()
         };
         section(&mut v, "PAYMENTS", rows(&sum.by_payment, payment_label));
+        if sum.tip_cents != 0 {
+            two_col(&mut v, Size::Normal, false, "  Tips (not in total)", &m(sum.tip_cents), width, "");
+        }
         section(&mut v, "ORDER TYPES", rows(&sum.by_type, type_label));
         if sum.by_channel.iter().any(|c| c.key != "Direct") {
             section(&mut v, "PLATFORMS", rows(&sum.by_channel, str::to_string));

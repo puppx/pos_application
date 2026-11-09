@@ -253,8 +253,9 @@ impl Receipt {
         two_col(&mut v, Size::Normal, true, &format!("{} #{}", self.title, self.order_id), &self.time, width, "");
         v.push(Line::new(Size::Normal, true, false, self.heading.clone()));
         v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
-        for (label, amount) in self.payment.iter().take(1) {
-            two_col(&mut v, Size::Normal, false, &format!("Paid: {label}"), &self.money(*amount), width, "");
+        for (label, amount) in self.payment.iter().filter(|(l, _)| !l.starts_with("  Change")) {
+            let label = if label.starts_with(' ') { label.clone() } else { format!("Paid: {label}") };
+            two_col(&mut v, Size::Normal, false, &label, &self.money(*amount), width, "");
         }
         line(&mut v, '-');
         two_col(&mut v, Size::Normal, true, "ITEM", "AMOUNT", width, "");
@@ -381,16 +382,24 @@ impl Pos {
             .prepare_cached("SELECT name FROM users WHERE id = ?1")?
             .query_row([o.paid_by.unwrap_or(o.opened_by)], |r| r.get(0))?;
         let mut payment = Vec::new();
-        if o.status == "paid" {
-            let label = match o.payment_method.as_deref() {
-                Some("cash") => "Cash".to_string(),
-                Some("card") => "Card".to_string(),
+        // Each payment (several for a split bill), with its tip and change.
+        // A bill printed after a part payment shows what is left to pay.
+        for p in &o.payments {
+            let label = match p.method.as_str() {
+                "cash" => "Cash".to_string(),
+                "card" => "Card".to_string(),
                 _ => o.channel_name.as_ref().map(|c| format!("Paid by {c}")).unwrap_or_else(|| "Other".into()),
             };
-            payment.push((label, o.tendered_cents.unwrap_or(o.total_cents)));
-            if let Some(change) = o.change_cents.filter(|c| *c > 0) {
-                payment.push(("Change".into(), change));
+            payment.push((label, p.tendered_cents));
+            if p.tip_cents > 0 {
+                payment.push(("  Tip".into(), p.tip_cents));
             }
+            if p.change_cents > 0 {
+                payment.push(("  Change".into(), p.change_cents));
+            }
+        }
+        if o.status == "open" && o.paid_cents > 0 {
+            payment.push(("LEFT TO PAY".into(), (o.total_cents - o.paid_cents).max(0)));
         }
         // Receipts print English, or English with Thai under it.
         let names = match cfg.printer.names {
@@ -483,16 +492,18 @@ impl Pos {
         if cfg.printer.target == PrinterTarget::None {
             return Ok(None);
         }
-        let drawer = cfg.drawer_on_cash && order.payment_method.as_deref() == Some("cash");
+        // The drawer opens for a cash payment, the last part of a split bill included.
+        let drawer = cfg.drawer_on_cash && order.payments.last().is_some_and(|p| p.method == "cash");
         let lead: &[u8] = if drawer { &DRAWER_KICK } else { &[] };
         let p = &cfg.printer;
-        let r = (cfg.auto_print || cfg.staff_copy).then(|| self.build_receipt(order, &cfg)).transpose()?;
+        // A part payment: only the drawer; the receipt waits for the last part.
+        let r = (order.status == "paid" && (cfg.auto_print || cfg.staff_copy)).then(|| self.build_receipt(order, &cfg)).transpose()?;
         let mut job = match &r {
             Some(r) if cfg.auto_print => Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs)),
             _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec())),
         };
         // The staff copy follows the customer's, as one more part of the job.
-        if let (Some(r), true) = (&r, cfg.staff_copy) {
+        if let (Some(r), true) = (&r, cfg.staff_copy && order.status == "paid") {
             let staff = r.staff_to_escpos(p.width, p.bold);
             match &mut job {
                 Some(j) => j.parts.push(staff),
@@ -548,7 +559,7 @@ impl Pos {
             tax_classes: vec![TaxClass { rate_bp: 1000, net_cents: 2850, vat_cents: 285, gross_cents: 3135 }],
             service: None,
             total_cents: 3135,
-            payment: vec![("Cash".into(), 4000), ("Change".into(), 865)],
+            payment: vec![("Cash".into(), 4000), ("  Change".into(), 865)],
         };
         let p = &cfg.printer;
         Ok(PrintJob::copies(p.target.clone(), &[], r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs))

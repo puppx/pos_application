@@ -656,6 +656,21 @@ commands! {
         Ok(PayResult { order, print: print(job) })
     }
 
+    /// One payment: the rest, an amount, or chosen dishes, with a tip.
+    /// The receipt prints when the last part is paid; cash opens the drawer.
+    fn add_payment(app, t, order_id: i64, payment: PaymentInput) -> PayResult {
+        let (order, job) = app.with_session(t, |pos, s| {
+            let order = pos.add_payment(s, order_id, &payment)?;
+            let job = pos.payment_print_job(s, &order)?;
+            Ok((order, job))
+        })?;
+        Ok(PayResult { order, print: print(job) })
+    }
+
+    fn remove_payment(app, t, order_id: i64, payment_id: i64) -> Order {
+        app.with_session(t, |pos, s| pos.remove_payment(s, order_id, payment_id))
+    }
+
     fn cancel_order(app, t, order_id: i64, reason: String) -> () {
         app.with_session(t, |pos, s| pos.cancel_order(s, order_id, &reason))
     }

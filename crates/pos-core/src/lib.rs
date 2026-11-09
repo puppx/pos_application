@@ -46,7 +46,7 @@ pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInpu
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
 pub use printing::{system_printers, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
 pub use orders::{
-    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, PaymentMethod,
+    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod,
 };
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
@@ -81,6 +81,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0015_set_menus.sql"),
     include_str!("migrations/0016_set_pairings.sql"),
     include_str!("migrations/0017_desserts.sql"),
+    include_str!("migrations/0018_payments.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

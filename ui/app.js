@@ -879,17 +879,27 @@ async function renderOrder() {
   }
   const finish = act(async () => {
     if (!order.items.length) return toast('The order is empty', true);
-    payDialog(order, async (method, tenderedCents) => {
-      // Anything not yet sent (mains waiting included) goes to the kitchen with the payment.
-      let printError = null;
-      if (order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
-      const { order: paid, print: receipt } = await call('pay_order', { orderId, method, tenderedCents });
-      const msg = `Order #${paid.id} paid: ${money(paid.total_cents)}` + (paid.change_cents ? ` · change ${money(paid.change_cents)}` : '');
+    let sentFirst = false;
+    let printError = null;
+    payDialog(order, async (payment) => {
+      // Anything not yet sent (mains waiting included) goes to the kitchen with the first payment.
+      if (!sentFirst && order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
+      sentFirst = true;
+      const { order: res, print: receipt } = await call('add_payment', { orderId, payment });
+      if (res.status !== 'paid') {
+        order = res;
+        draw();
+        toast(`Paid ${money(res.payments.at(-1).amount_cents)} · ${money(res.total_cents - res.paid_cents)} left to pay`);
+        return res;
+      }
+      const last = res.payments.at(-1);
+      const msg = `Order #${res.id} paid: ${money(res.total_cents)}` + (res.tip_cents ? ` + tip ${money(res.tip_cents)}` : '') +
+        (last?.change_cents ? ` · change ${money(last.change_cents)}` : '');
       closeOrder();
       if (printError) toast(`${msg}. Kitchen ticket did not print (${printError}); reprint it from History.`, true);
       else if (receipt.error) toast(`${msg}. Receipt/drawer did not work (${receipt.error}); reprint from History.`, true);
       else toast(msg);
-      return paid;
+      return res;
     });
   });
 
@@ -974,7 +984,9 @@ async function renderOrder() {
       (order.service_bp || state.service?.rate_bp) ? h('tr', { class: 'service-row', onclick: showService, title: 'Change or remove the service charge' },
         h('td', {}, `${state.service?.label || 'Service charge'} ${order.service_bp ? pct(order.service_bp) + '%' : '(none)'} `, h('span', { class: 'edit-link' }, 'change')),
         h('td', { class: 'num' }, money(order.service_cents))) : '',
-      h('tr', { class: 'grand' }, h('td', {}, 'Total'), h('td', { class: 'num' }, money(order.total_cents))));
+      h('tr', { class: 'grand' }, h('td', {}, 'Total'), h('td', { class: 'num' }, money(order.total_cents))),
+      order.paid_cents ? h('tr', {}, h('td', {}, 'Paid so far'), h('td', { class: 'num' }, '-' + money(order.paid_cents))) : '',
+      order.paid_cents ? h('tr', { class: 'grand' }, h('td', {}, 'Left to pay'), h('td', { class: 'num' }, money(order.total_cents - order.paid_cents))) : '');
     // A set's own line is for the bill; its dishes are what the kitchen gets.
     const qty = (f) => order.items.filter((i) => !i.is_set).filter(f).reduce((n, i) => n + i.qty, 0);
     const unsent = qty((i) => !i.sent_at && !i.held);
@@ -989,7 +1001,7 @@ async function renderOrder() {
     mainsBtn.textContent = waiting ? `Call mains (${waiting})` : 'Call mains again';
     mainsBtn.title = waiting ? 'Send the mains to the kitchen' : 'Print a short "MAIN COURSE" ticket so the kitchen fires the mains now';
     mainsBtn.hidden = !waiting && !mainsSent;
-    setKids(payBtn, h('span', {}, 'Finish & Pay'), h('strong', {}, money(order.total_cents)));
+    setKids(payBtn, h('span', {}, order.paid_cents ? 'Pay the rest' : 'Finish & Pay'), h('strong', {}, money(order.total_cents - (order.paid_cents ?? 0))));
     const count = order.items.filter((i) => !i.parent_id).reduce((n, i) => n + i.qty, 0);
     setKids(phoneBar, layout?.classList.contains('show-ticket') ? '← Back to menu' : `View order · ${count} item(s)`,
       h('strong', {}, money(order.total_cents)));
@@ -1126,70 +1138,210 @@ function showModal(...kids) {
 /// "Finish & Pay": choose Cash or Card (or the delivery platform); for cash
 /// enter what the customer handed over and see the change. `pay(method,
 /// tenderedCents)` takes the payment and returns the paid order.
+/// Finish & Pay. One tap for the usual case (Cash or Card for the whole
+/// bill); "Split bill" pays part of it (evenly, an amount, or chosen dishes)
+/// and "Tip" adds a tip. `pay(input)` takes one payment and returns the order
+/// (still open after a part payment).
 function payDialog(order, pay) {
-  const total = order.total_cents;
-  const title = h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `Order #${order.id}`), h('span', { class: 'muted' }, 'Total'),
-    h('span', { class: 'big' }, money(total)));
   let busy = false;
-  const take = async (method, tendered) => {
-    if (busy) return;
-    busy = true;
-    try {
-      const paid = await pay(method, tendered);
-      if (method === 'cash' && paid.change_cents > 0) {
-        showModal(h('div', { class: 'center', style: 'margin:0' },
-          h('div', { class: 'muted' }, 'Give change'), h('div', { class: 'huge' }, money(paid.change_cents)),
-          h('div', { class: 'muted' }, `Cash ${money(paid.tendered_cents)} − total ${money(paid.total_cents)}`),
-          h('button', { class: 'primary pay', onclick: closeModal }, 'Done')));
-        setKeys((e) => { if (e.key === 'Enter' || e.key === 'Escape') closeModal(); });
-      } else closeModal();
-    } catch (e) {
-      busy = false;
-      if (!e?.handled) toast(String(e?.message ?? e), true);
-    }
-  };
+  let part = null; // { amount, items?, label } for the next payment; null = everything left
+  let even = null; // { n, done }: split evenly between n people
+  let tip = 0;
+  const left = () => Math.max(0, order.total_cents - (order.paid_cents ?? 0));
+  const evenAmount = () => (even.n - even.done <= 1 ? left() : Math.round(left() / (even.n - even.done)));
+  const due = () => (part ? Math.min(part.amount, left()) : left());
+  const lineDue = (it) => it.line_total_cents + (order.tax_incl ? 0 : it.tax_cents);
   const setKeys = (fn) => {
     document.removeEventListener('keydown', state.modalKeys);
     state.modalKeys = fn;
     document.addEventListener('keydown', fn);
   };
-  const cancel = h('button', { onclick: closeModal }, 'Cancel');
+  const cancel = h('button', { onclick: closeModal }, 'Close');
+  const title = () => h('div', { class: 'stack', style: 'gap:6px' },
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `Order #${order.id}`), h('span', { class: 'muted' }, 'Total'),
+      h('span', { class: order.paid_cents ? '' : 'big' }, money(order.total_cents))),
+    order.paid_cents > 0 && h('div', { class: 'pay-parts' },
+      order.payments.map((p) => h('div', { class: 'row pay-part' },
+        h('span', { style: 'flex:1' }, `✓ ${p.method === 'cash' ? 'Cash' : p.method === 'card' ? 'Card' : 'Other'} ${money(p.amount_cents)}`,
+          p.tip_cents ? h('span', { class: 'muted' }, ` + tip ${money(p.tip_cents)}`) : ''),
+        h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(async () => {
+          order = await call('remove_payment', { orderId: order.id, paymentId: p.id });
+          even = null; part = null;
+          choose();
+        }) }, 'undo'))),
+      h('div', { class: 'row' }, h('strong', { style: 'flex:1' }, 'Left to pay'), h('span', { class: 'big' }, money(left())))),
+    (part || tip > 0) && h('div', { class: 'row pay-now' },
+      h('span', { style: 'flex:1' }, part ? part.label : 'Paying'), h('strong', {}, money(due())),
+      tip > 0 && h('span', { class: 'muted' }, ` + tip ${money(tip)}`)));
+
+  const take = async (method, tendered) => {
+    if (busy) return;
+    busy = true;
+    try {
+      const input = { method, tendered_cents: tendered, tip_cents: tip, amount_cents: part && !part.items ? due() : null, items: part?.items ?? null };
+      const before = order.payments?.length ?? 0;
+      const res = await pay(input);
+      const p = res.payments?.[before] ?? res.payments?.[res.payments.length - 1];
+      order = res;
+      busy = false;
+      if (even) even.done += 1;
+      part = null;
+      tip = 0;
+      const next = () => {
+        if (res.status === 'paid') return closeModal();
+        if (even && even.done < even.n) part = { amount: evenAmount(), label: `Person ${even.done + 1} of ${even.n}` };
+        choose();
+      };
+      if (method === 'cash' && p?.change_cents > 0) {
+        showModal(h('div', { class: 'center', style: 'margin:0' },
+          h('div', { class: 'muted' }, 'Give change'), h('div', { class: 'huge' }, money(p.change_cents)),
+          h('div', { class: 'muted' }, `Cash ${money(p.tendered_cents)} − ${money(p.amount_cents + p.tip_cents)}`),
+          res.status !== 'paid' && h('div', { class: 'muted' }, `Left to pay: ${money(left())}`),
+          h('button', { class: 'primary pay', onclick: next }, res.status === 'paid' ? 'Done' : 'Next payment')));
+        setKeys((e) => { if (e.key === 'Enter' || e.key === 'Escape') next(); });
+      } else next();
+    } catch (e) {
+      busy = false;
+      if (!e?.handled) toast(String(e?.message ?? e), true);
+    }
+  };
 
   const choose = () => {
     setKeys((e) => { if (e.key === 'Escape') closeModal(); });
-    showModal(title,
+    showModal(title(),
       h('div', { class: 'paygrid' },
         h('button', { class: 'primary paybig', onclick: cash }, 'Cash'),
         h('button', { class: 'primary paybig', onclick: card }, 'Card'),
         order.channel_id && h('button', { class: 'platform paybig', style: '--c:#374151', onclick: () => take('other', 0) },
           `Paid by ${order.channel_name}`)),
-      h('div', { class: 'row' }, cancel));
+      h('div', { class: 'row pay-extras' },
+        h('button', { onclick: split }, part ? 'Change split' : 'Split bill'),
+        h('button', { onclick: tipScreen }, tip ? `Tip ${money(tip)}` : 'Add tip'),
+        part && !even && h('button', { onclick: () => { part = null; choose(); } }, 'Pay everything left'),
+        h('span', { style: 'flex:1' }), cancel));
   };
 
   const card = () => {
-    const confirm = h('button', { class: 'primary paybig', onclick: () => take('card', 0) }, `Card payment taken · ${money(total)}`);
+    const amount = due() + tip;
+    const confirm = h('button', { class: 'primary paybig', onclick: () => take('card', 0) }, `Card payment taken · ${money(amount)}`);
     setKeys((e) => { if (e.key === 'Enter') take('card', 0); else if (e.key === 'Escape') choose(); });
-    showModal(title, h('div', { class: 'muted' }, 'Take the payment on the card machine, then confirm here.'), confirm,
+    showModal(title(), h('div', { class: 'muted' }, `Take ${money(amount)} on the card machine, then confirm here.`), confirm,
       h('div', { class: 'row' }, h('button', { onclick: choose }, '← Back'), cancel));
   };
 
+  // A small keypad screen for an amount; `done(cents)` gets the result.
+  const keypadScreen = (heading, hint, start, done, okLabel) => {
+    let typed = start ? String(start / 100) : '';
+    const amount = h('div', { class: 'amount' });
+    const ok = h('button', { class: 'primary paybig' }, okLabel);
+    const cents = () => { try { return typed ? parseMoney(typed) : 0; } catch { return null; } };
+    const redraw = () => { amount.textContent = typed || '0'; };
+    const key = (k) => {
+      if (k === '⌫') typed = typed.slice(0, -1);
+      else if (k === 'C') typed = '';
+      else if (k === '.' && typed.includes('.')) return;
+      else if (/\.\d\d$/.test(typed)) return;
+      else if (typed.replace('.', '').length >= 7) return;
+      else typed += k;
+      redraw();
+    };
+    const go = () => { const c = cents(); if (c != null) done(c); };
+    ok.onclick = go;
+    setKeys((e) => {
+      if (/^[0-9.]$/.test(e.key)) key(e.key);
+      else if (e.key === 'Backspace') key('⌫');
+      else if (e.key === 'Enter') go();
+      else if (e.key === 'Escape') choose();
+    });
+    showModal(title(), h('div', { class: 'row' }, h('span', { class: 'muted' }, heading), amount), hint && h('div', { class: 'muted' }, hint),
+      h('div', { class: 'keypad' }, ['7', '8', '9', '4', '5', '6', '1', '2', '3', '.', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))),
+      ok, h('div', { class: 'row' }, h('button', { onclick: choose }, '← Back'), h('button', { onclick: () => key('C') }, 'Clear'), cancel));
+    redraw();
+  };
+
+  const tipScreen = () => {
+    const base = due();
+    const pick = (c) => { tip = c; choose(); };
+    setKeys((e) => { if (e.key === 'Escape') choose(); });
+    showModal(title(), h('div', { class: 'muted' }, `Tip on top of ${money(base)}. It is not part of the sales or the tax.`),
+      h('div', { class: 'paygrid tips' },
+        h('button', { class: tip === 0 ? 'on' : '', onclick: () => pick(0) }, 'No tip'),
+        [500, 1000, 1500].map((bp) => { const c = Math.round(base * bp / 10000); return h('button', { class: tip === c && c ? 'on' : '', onclick: () => pick(c) }, `${bp / 100}%`, h('small', {}, money(c))); }),
+        h('button', { onclick: () => keypadScreen('Tip', null, tip, pick, 'Set tip') }, 'Other amount')),
+      h('div', { class: 'row' }, h('button', { onclick: choose }, '← Back'), cancel));
+  };
+
+  const split = () => {
+    setKeys((e) => { if (e.key === 'Escape') choose(); });
+    const evenly = (n) => { even = { n, done: 0 }; part = { amount: evenAmount(), label: `Person 1 of ${n}` }; choose(); };
+    showModal(title(),
+      h('h3', {}, 'Split evenly'),
+      h('div', { class: 'paygrid splits' }, [2, 3, 4, 5, 6, 8].map((n) => h('button', { onclick: () => evenly(n) }, `÷ ${n}`, h('small', {}, `${money(Math.round(left() / n))} each`)))),
+      h('div', { class: 'row' },
+        h('button', { class: 'paybig', style: 'flex:1', onclick: () => keypadScreen('Amount to pay now', `Left to pay: ${money(left())}`, 0, (c) => {
+          if (c <= 0) return toast('Enter an amount', true);
+          if (c > left()) return toast(`That is more than the ${money(left())} left`, true);
+          even = null; part = { amount: c, label: 'Part payment' }; choose();
+        }, 'Use this amount') }, 'Type an amount'),
+        h('button', { class: 'paybig', style: 'flex:1', onclick: dishes }, 'Choose dishes')),
+      h('div', { class: 'row' }, h('button', { onclick: choose }, '← Back'), cancel));
+  };
+
+  const dishes = () => {
+    const bill = order.items.filter((i) => !i.parent_id && i.qty - i.paid_qty > 0);
+    const all = order.items.filter((i) => !i.parent_id).reduce((n, i) => n + lineDue(i), 0);
+    const pick = new Map();
+    const list = h('div', { class: 'stack dish-pick' });
+    const ok = h('button', { class: 'primary paybig' });
+    const share = () => {
+      let sel = 0;
+      for (const [id, q] of pick) { const it = bill.find((i) => i.id === id); sel += Math.floor(lineDue(it) * q / it.qty); }
+      const everything = bill.every((i) => (pick.get(i.id) ?? 0) >= i.qty - i.paid_qty);
+      return everything ? left() : Math.min(left(), Math.round(order.total_cents * sel / (all || 1)));
+    };
+    const draw = () => {
+      setKids(list, bill.map((it) => {
+        const q = pick.get(it.id) ?? 0;
+        const max = it.qty - it.paid_qty;
+        const set = (v) => { v = Math.max(0, Math.min(max, v)); if (v) pick.set(it.id, v); else pick.delete(it.id); draw(); };
+        return h('div', { class: `row dish-row ${q ? 'on' : ''}`, onclick: () => set(q < max ? q + 1 : 0) },
+          h('span', { style: 'flex:1' }, it.name, max < it.qty ? h('span', { class: 'muted' }, ` (${it.paid_qty} paid)`) : ''),
+          h('div', { class: 'stepper', onclick: (e) => e.stopPropagation() },
+            h('button', { onclick: () => set(q - 1) }, '−'), h('span', {}, `${q}/${max}`), h('button', { onclick: () => set(q + 1) }, '+')));
+      }));
+      const c = pick.size ? share() : 0;
+      ok.textContent = pick.size ? `Pay for these · ${money(c)}` : 'Tap the dishes this person pays for';
+      ok.disabled = !pick.size;
+    };
+    ok.onclick = () => {
+      even = null;
+      part = { amount: share(), items: [...pick.entries()], label: `${[...pick.values()].reduce((a, b) => a + b, 0)} dish(es)` };
+      choose();
+    };
+    setKeys((e) => { if (e.key === 'Escape') split(); });
+    showModal(title(), h('div', { class: 'muted' }, 'Tap a dish to add it (tap again for more). The service charge is shared the same way.'),
+      list, ok, h('div', { class: 'row' }, h('button', { onclick: split }, '← Back'), cancel));
+    draw();
+  };
+
   const cash = () => {
+    const target = due() + tip;
     let typed = '';
     const amount = h('div', { class: 'amount' });
     const change = h('div', { class: 'change' });
     const ok = h('button', { class: 'primary paybig' });
     const cents = () => {
-      if (!typed) return total;
+      if (!typed) return target;
       try { return parseMoney(typed); } catch { return null; }
     };
     const redraw = () => {
       const c = cents();
-      amount.textContent = typed ? typed : `${money(total)} (exact)`;
-      const enough = c != null && c >= total;
+      amount.textContent = typed ? typed : `${money(target)} (exact)`;
+      const enough = c != null && c >= target;
       change.textContent = c == null ? 'Enter an amount like 20 or 12.50'
-        : enough ? `Change: ${money(c - total)}` : `Short by ${money(total - c)}`;
+        : enough ? `Change: ${money(c - target)}` : `Short by ${money(target - c)}`;
       change.className = `change ${enough ? '' : 'short'}`;
-      ok.textContent = enough ? `Take cash · change ${money(c - total)}` : 'Take cash';
+      ok.textContent = enough ? `Take cash · change ${money(c - target)}` : 'Take cash';
       ok.disabled = !enough;
     };
     const key = (k) => {
@@ -1201,22 +1353,22 @@ function payDialog(order, pay) {
       else typed += k;
       redraw();
     };
-    const go = () => { const c = cents(); if (c != null && c >= total) take('cash', c); };
+    const go = () => { const c = cents(); if (c != null && c >= target) take('cash', c); };
     ok.onclick = go;
-    // Quick amounts: exact, then the next round notes above the total.
-    const quick = [...new Set([500, 1000, 2000, 5000, Math.ceil(total / 100) * 100, Math.ceil(total / 500) * 500, Math.ceil(total / 1000) * 1000]
-      .filter((c) => c > total))].sort((a, b) => a - b).slice(0, 4);
-    const quickBtn = (c, label) => h('button', { onclick: () => { typed = c === total ? '' : String(c / 100); redraw(); if (c === total) go(); } }, label);
+    // Quick amounts: exact, then the next round notes above it.
+    const quick = [...new Set([500, 1000, 2000, 5000, Math.ceil(target / 100) * 100, Math.ceil(target / 500) * 500, Math.ceil(target / 1000) * 1000]
+      .filter((c) => c > target))].sort((a, b) => a - b).slice(0, 4);
+    const quickBtn = (c, label) => h('button', { onclick: () => { typed = c === target ? '' : String(c / 100); redraw(); if (c === target) go(); } }, label);
     setKeys((e) => {
       if (/^[0-9.]$/.test(e.key)) key(e.key);
       else if (e.key === 'Backspace') key('⌫');
       else if (e.key === 'Enter') go();
       else if (e.key === 'Escape') choose();
     });
-    showModal(title,
+    showModal(title(),
       h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Cash received'), amount),
       change,
-      h('div', { class: 'row' }, quickBtn(total, 'Exact'), quick.map((c) => quickBtn(c, money(c)))),
+      h('div', { class: 'row' }, quickBtn(target, 'Exact'), quick.map((c) => quickBtn(c, money(c)))),
       h('div', { class: 'keypad' }, ['7', '8', '9', '4', '5', '6', '1', '2', '3', '.', '0', '⌫'].map((k) =>
         h('button', { onclick: () => key(k) }, k))),
       ok,
@@ -1364,7 +1516,7 @@ function orderDetail(o, onChange) {
   return h('div', { class: 'card stack' },
     h('h3', {}, `#${o.id} ${TYPE[o.order_type]} · ${where(o)} — ${o.status}`),
     h('div', { class: 'muted' }, `Opened ${fmtTime(o.opened_at)} by ${o.opened_by_name}` +
-      (o.paid_at ? ` · paid ${fmtTime(o.paid_at)} (${o.payment_method})` : '')),
+      (o.paid_at ? ` · paid ${fmtTime(o.paid_at)}` : '')),
     (o.customer_phone || o.delivery_address) && h('div', { class: 'muted' }, [o.customer_phone, o.delivery_address].filter(Boolean).join(' · ')),
     h('table', {}, o.items.map((i) => h('tr', {},
       h('td', {}, i.name, i.options.length > 0 && h('div', { class: 'muted' }, i.options.map((x) => x.name).join(', ')),
@@ -1373,7 +1525,10 @@ function orderDetail(o, onChange) {
       h('td', { class: 'num' }, i.discount_cents ? '-' + money(i.discount_cents) : ''),
       h('td', { class: 'num' }, money(i.line_total_cents))))),
     h('div', {}, `Tax ${o.tax_incl ? 'included ' : ''}${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
-      o.tendered_cents != null ? ` · Tendered ${money(o.tendered_cents)} · Change ${money(o.change_cents)}` : ''),
+      o.tip_cents ? ` · Tip ${money(o.tip_cents)}` : ''),
+    o.payments?.length > 0 && h('div', { class: 'muted' }, o.payments.map((p) =>
+      `${p.method} ${money(p.amount_cents)}` + (p.tip_cents ? ` + tip ${money(p.tip_cents)}` : '') +
+      (p.change_cents ? ` (tendered ${money(p.tendered_cents)}, change ${money(p.change_cents)})` : '') + ` · ${p.paid_by_name}`).join('  |  ')),
     o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
     o.status !== 'cancelled' && h('div', {}, h('button', { onclick: act(async () => {
       printResult(await call('print_receipt', { orderId: o.id }), o.status === 'paid' ? 'Receipt printed' : 'Printed');
@@ -2494,6 +2649,7 @@ async function renderReports() {
           ['Paid orders', s.order_count], [s.tax_included_cents ? 'Sales (menu prices)' : 'Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
           ...(s.tax_cents - s.tax_included_cents ? [['Tax added on top', money(s.tax_cents - s.tax_included_cents)]] : []),
           ['Service charge', money(s.service_cents)], ['Total', money(s.total_cents)],
+          ...(s.tip_cents ? [['Tips (not in total)', money(s.tip_cents)]] : []),
           ...(s.tax_included_cents ? [['Tax included in prices', money(s.tax_included_cents)]] : []),
           ['Voided / refunded', `${s.voided_count} (${money(s.voided_total_cents)})`], ['Cancelled', s.cancelled_count]])),
         h('div', { class: 'card' }, h('h3', {}, 'By order type'),

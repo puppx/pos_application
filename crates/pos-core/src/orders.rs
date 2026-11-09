@@ -138,6 +138,41 @@ pub struct OrderItem {
     /// What a set's dish comes with (rice, noodles...), when chosen.
     pub with_name: Option<String>,
     pub with_alt: Option<String>,
+    /// How many of this line were already paid for with "pay for these dishes".
+    pub paid_qty: i64,
+}
+
+/// One payment towards an order (an order can have several: split bill).
+#[derive(Debug, Clone, Serialize)]
+pub struct Payment {
+    pub id: i64,
+    pub method: String,
+    /// Towards the bill.
+    pub amount_cents: i64,
+    /// On top of the bill; not sales, not taxed.
+    pub tip_cents: i64,
+    pub tendered_cents: i64,
+    pub change_cents: i64,
+    /// The dishes it paid for: (order item id, qty); empty for an amount.
+    pub items: Vec<(i64, i64)>,
+    pub paid_by_name: String,
+    pub paid_at: i64,
+}
+
+/// A payment to take: the whole rest (no amount, no items), an amount
+/// (split evenly or typed), or chosen dishes (their share of the bill).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaymentInput {
+    pub method: PaymentMethod,
+    #[serde(default)]
+    pub amount_cents: Option<i64>,
+    /// Cash handed over (cash only); ignored for card.
+    #[serde(default)]
+    pub tendered_cents: i64,
+    #[serde(default)]
+    pub tip_cents: i64,
+    #[serde(default)]
+    pub items: Option<Vec<(i64, i64)>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,6 +216,12 @@ pub struct Order {
     pub closed_at: Option<i64>,
     pub close_reason: Option<String>,
     pub items: Vec<OrderItem>,
+    /// Payments so far (one for a normal order, several for a split bill).
+    pub payments: Vec<Payment>,
+    /// Sum of the payments' amounts (towards the bill, tips not counted).
+    pub paid_cents: i64,
+    /// Sum of the tips.
+    pub tip_cents: i64,
 }
 
 /// One row in the open-orders board or order history.
@@ -331,6 +372,7 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         section_alt: r.get(18)?,
         with_name: r.get(19)?,
         with_alt: r.get(20)?,
+        paid_qty: 0,
     })
 }
 
@@ -357,6 +399,33 @@ fn load_items(conn: &Connection, order_id: i64) -> Result<Vec<OrderItem>> {
         }
     }
     Ok(items)
+}
+
+fn load_payments(conn: &Connection, order_id: i64) -> Result<Vec<Payment>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT p.id, p.method, p.amount_cents, p.tip_cents, p.tendered_cents, p.change_cents, p.items, u.name, p.paid_at
+         FROM payments p JOIN users u ON u.id = p.paid_by WHERE p.order_id = ?1 ORDER BY p.id",
+    )?;
+    let rows = stmt.query_map([order_id], |r| {
+        let items: Option<String> = r.get(6)?;
+        Ok(Payment {
+            id: r.get(0)?,
+            method: r.get(1)?,
+            amount_cents: r.get(2)?,
+            tip_cents: r.get(3)?,
+            tendered_cents: r.get(4)?,
+            change_cents: r.get(5)?,
+            items: items.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+            paid_by_name: r.get(7)?,
+            paid_at: r.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// What a customer pays for a line, without the service charge.
+fn line_due(it: &OrderItem, tax_incl: bool) -> i64 {
+    it.line_total_cents + if tax_incl { 0 } else { it.tax_cents }
 }
 
 /// Option ids on an order line, sorted, for comparing lines.
@@ -423,6 +492,41 @@ pub(crate) fn summary_from_row(r: &Row) -> rusqlite::Result<OrderSummary> {
         unsent_count: r.get(14)?,
         held_count: r.get(15)?,
     })
+}
+
+/// Close an order its payments cover: totals, the payment summary (one
+/// method, or NULL when mixed) and stock for tracked items.
+fn close_paid(tx: &Transaction, s: &Session, order_id: i64, t: &Totals) -> Result<()> {
+    let (methods, method, tendered, change, tips): (i64, Option<String>, i64, i64, i64) = tx.query_row(
+        "SELECT COUNT(DISTINCT method), MIN(method), COALESCE(SUM(tendered_cents), 0), COALESCE(SUM(change_cents), 0), COALESCE(SUM(tip_cents), 0)
+         FROM payments WHERE order_id = ?1",
+        [order_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+    let method = if methods == 1 { method } else { None };
+    tx.prepare_cached(
+        "UPDATE orders SET status = 'paid', subtotal_cents = ?2, discount_cents = ?3, tax_cents = ?4,
+             total_cents = ?5, payment_method = ?6, tendered_cents = ?7, change_cents = ?8,
+             paid_by = ?9, paid_at = unixepoch(), service_cents = ?10, tip_cents = ?11
+         WHERE id = ?1",
+    )?
+    .execute(params![order_id, t.subtotal, t.discount, t.tax, t.total, method, tendered, change, s.user_id, t.service, tips])?;
+    // Stock may go negative: service is never blocked by a miscount.
+    tx.prepare_cached(
+        "INSERT INTO stock_movements (product_id, delta, reason, order_id, user_id)
+         SELECT i.product_id, -SUM(i.qty), 'sale', ?1, ?2
+         FROM order_items i JOIN products p ON p.id = i.product_id
+         WHERE i.order_id = ?1 AND p.track_stock = 1 GROUP BY i.product_id",
+    )?
+    .execute(params![order_id, s.user_id])?;
+    tx.prepare_cached(
+        "UPDATE products SET stock_qty = stock_qty + (
+             SELECT m.delta FROM stock_movements m
+             WHERE m.order_id = ?1 AND m.reason = 'sale' AND m.product_id = products.id)
+         WHERE id IN (SELECT product_id FROM stock_movements WHERE order_id = ?1 AND reason = 'sale')",
+    )?
+    .execute([order_id])?;
+    Ok(())
 }
 
 fn audit_tx(tx: &Transaction, user_id: i64, action: &str, detail: &str) -> Result<()> {
@@ -538,6 +642,9 @@ impl Pos {
                     service_cents: 0,
                     total_cents: 0,
                     items: Vec::new(),
+                    payments: Vec::new(),
+                    paid_cents: 0,
+                    tip_cents: 0,
                 })
             })
             .optional()?
@@ -553,6 +660,16 @@ impl Pos {
             }
         }
         o.items = load_items(&self.conn, id)?;
+        o.payments = load_payments(&self.conn, id)?;
+        o.paid_cents = o.payments.iter().map(|p| p.amount_cents).sum();
+        o.tip_cents = o.payments.iter().map(|p| p.tip_cents).sum();
+        for p in &o.payments {
+            for (item, qty) in &p.items {
+                if let Some(it) = o.items.iter_mut().find(|i| i.id == *item) {
+                    it.paid_qty += qty;
+                }
+            }
+        }
         let t = totals(&o.items, o.service_bp, o.tax_incl);
         (o.subtotal_cents, o.discount_cents, o.tax_cents, o.service_cents, o.total_cents) =
             (t.subtotal, t.discount, t.tax, t.service, t.total);
@@ -890,8 +1007,16 @@ impl Pos {
         self.get_order(s, order_id)
     }
 
-    /// Take payment and close the order. Stock is taken for tracked items.
+    /// Take payment for the rest of the order and close it. Stock is taken
+    /// for tracked items.
     pub fn pay_order(&mut self, s: &Session, order_id: i64, method: PaymentMethod, tendered_cents: i64) -> Result<Order> {
+        self.add_payment(s, order_id, &PaymentInput { method, amount_cents: None, tendered_cents, tip_cents: 0, items: None })
+    }
+
+    /// Take one payment: the rest of the bill, an amount (split evenly or
+    /// typed) or chosen dishes (their share of the bill, service included).
+    /// A tip can go on top. The order closes once the payments cover it.
+    pub fn add_payment(&mut self, s: &Session, order_id: i64, p: &PaymentInput) -> Result<Order> {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
@@ -902,44 +1027,96 @@ impl Pos {
         let (service_bp, tax_incl): (i64, bool) =
             tx.query_row("SELECT service_bp, tax_incl FROM orders WHERE id = ?1", [order_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let t = totals(&items, service_bp, tax_incl);
-        let tendered = match method {
-            PaymentMethod::Cash if tendered_cents < t.total => return invalid("cash tendered is less than the total"),
-            PaymentMethod::Cash => tendered_cents,
-            _ => t.total,
+        let earlier = load_payments(&tx, order_id)?;
+        let paid: i64 = earlier.iter().map(|p| p.amount_cents).sum();
+        let left = t.total - paid;
+        // Already covered (dishes taken off after a part payment): just close.
+        if left <= 0 && !earlier.is_empty() {
+            close_paid(&tx, s, order_id, &t)?;
+            tx.commit()?;
+            return self.get_order(s, order_id);
+        }
+        let mut chosen: Option<String> = None;
+        let amount = if let Some(sel) = &p.items {
+            let mut paid_qty: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+            for (id, q) in earlier.iter().flat_map(|p| p.items.iter()) {
+                *paid_qty.entry(*id).or_default() += q;
+            }
+            let mut picked: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+            for &(id, q) in sel {
+                if q > 0 {
+                    *picked.entry(id).or_default() += q;
+                }
+            }
+            if picked.is_empty() {
+                return invalid("choose the dishes to pay for");
+            }
+            let bill: Vec<&OrderItem> = items.iter().filter(|i| i.parent_id.is_none()).collect();
+            let all: i64 = bill.iter().map(|i| line_due(i, tax_incl)).sum();
+            let mut part = 0i64;
+            for (&id, &q) in &picked {
+                let it = bill.iter().find(|i| i.id == id).ok_or_else(|| PosError::Validation("that dish is not on this bill".into()))?;
+                if q > it.qty - paid_qty.get(&id).copied().unwrap_or(0) {
+                    return invalid(format!("{} is already paid for", it.name));
+                }
+                part += line_due(it, tax_incl) * q / it.qty;
+            }
+            let everything = bill.iter().all(|i| paid_qty.get(&i.id).copied().unwrap_or(0) + picked.get(&i.id).copied().unwrap_or(0) >= i.qty);
+            let mut list: Vec<(i64, i64)> = picked.into_iter().collect();
+            list.sort();
+            chosen = Some(serde_json::to_string(&list).map_err(|e| PosError::Internal(e.to_string()))?);
+            if everything || all == 0 {
+                left
+            } else {
+                ((t.total as i128 * part as i128 + all as i128 / 2) / all as i128) as i64
+            }
+            .min(left)
+        } else {
+            p.amount_cents.unwrap_or(left)
         };
-        tx.prepare_cached(
-            "UPDATE orders SET status = 'paid', subtotal_cents = ?2, discount_cents = ?3, tax_cents = ?4,
-                 total_cents = ?5, payment_method = ?6, tendered_cents = ?7, change_cents = ?8,
-                 paid_by = ?9, paid_at = unixepoch(), service_cents = ?10
-             WHERE id = ?1",
-        )?
-        .execute(params![
-            order_id,
-            t.subtotal,
-            t.discount,
-            t.tax,
-            t.total,
-            method.as_str(),
-            tendered,
-            tendered - t.total,
-            s.user_id,
-            t.service
-        ])?;
-        // Stock may go negative: service is never blocked by a miscount.
-        tx.prepare_cached(
-            "INSERT INTO stock_movements (product_id, delta, reason, order_id, user_id)
-             SELECT i.product_id, -SUM(i.qty), 'sale', ?1, ?2
-             FROM order_items i JOIN products p ON p.id = i.product_id
-             WHERE i.order_id = ?1 AND p.track_stock = 1 GROUP BY i.product_id",
-        )?
-        .execute(params![order_id, s.user_id])?;
-        tx.prepare_cached(
-            "UPDATE products SET stock_qty = stock_qty + (
-                 SELECT m.delta FROM stock_movements m
-                 WHERE m.order_id = ?1 AND m.reason = 'sale' AND m.product_id = products.id)
-             WHERE id IN (SELECT product_id FROM stock_movements WHERE order_id = ?1 AND reason = 'sale')",
-        )?
-        .execute([order_id])?;
+        if amount <= 0 {
+            return invalid("enter an amount to pay");
+        }
+        if amount > left {
+            return invalid("that is more than is left to pay");
+        }
+        if !(0..=t.total.max(amount) * 10).contains(&p.tip_cents) {
+            return invalid("invalid tip");
+        }
+        let due = amount + p.tip_cents;
+        let (tendered, change) = match p.method {
+            PaymentMethod::Cash if p.tendered_cents < due => return invalid("cash tendered is less than the amount to pay"),
+            PaymentMethod::Cash => (p.tendered_cents, p.tendered_cents - due),
+            _ => (due, 0),
+        };
+        let shift: Option<i64> = tx
+            .query_row("SELECT id FROM shifts WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+            .optional()
+            .unwrap_or(None);
+        tx.execute(
+            "INSERT INTO payments (order_id, method, amount_cents, tip_cents, tendered_cents, change_cents, items, paid_by, shift_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![order_id, p.method.as_str(), amount, p.tip_cents, tendered, change, chosen, s.user_id, shift],
+        )?;
+        if paid + amount >= t.total {
+            close_paid(&tx, s, order_id, &t)?;
+        } else {
+            audit_tx(&tx, s.user_id, "order.part_payment", &format!("order {order_id} {} {amount}", p.method.as_str()))?;
+        }
+        tx.commit()?;
+        self.get_order(s, order_id)
+    }
+
+    /// Take back a part payment taken by mistake (the order is still open).
+    pub fn remove_payment(&mut self, s: &Session, order_id: i64, payment_id: i64) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        require_open(&tx, order_id)?;
+        let n = tx.execute("DELETE FROM payments WHERE id = ?1 AND order_id = ?2", params![payment_id, order_id])?;
+        if n == 0 {
+            return Err(PosError::NotFound);
+        }
+        audit_tx(&tx, s.user_id, "order.payment_removed", &format!("order {order_id} payment {payment_id}"))?;
         tx.commit()?;
         self.get_order(s, order_id)
     }
@@ -958,6 +1135,10 @@ impl Pos {
         )?;
         if sent {
             s.require(Permission::VoidOrder)?;
+        }
+        let paid: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = ?1)", [order_id], |r| r.get(0))?;
+        if paid {
+            return invalid("this order has part payments: take them back first (tap the payment) or finish paying");
         }
         tx.execute(
             "UPDATE orders SET status = 'cancelled', closed_by = ?2, closed_at = unixepoch(), close_reason = ?3
@@ -1030,6 +1211,7 @@ impl Pos {
         )?;
         tx.execute("DELETE FROM order_items WHERE order_id = ?1", [order_id])?;
         tx.execute("DELETE FROM stock_movements WHERE order_id = ?1", [order_id])?;
+        tx.execute("DELETE FROM payments WHERE order_id = ?1", [order_id])?;
         tx.execute("DELETE FROM orders WHERE id = ?1", [order_id])?;
         if let Some(c) = customer {
             tx.execute("UPDATE customers SET order_count = MAX(order_count - 1, 0) WHERE id = ?1", [c])?;

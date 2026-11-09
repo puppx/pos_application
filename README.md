@@ -127,9 +127,10 @@ Categories named "Drinks", "Beverages" or "เครื่องดื่ม" st
 
 ### Split bill and tips
 
-**Finish & Pay** is still one tap for the usual case: **Cash** or **Card** for the whole bill. Under it:
-- **Split bill**: *÷ 2 … ÷ 8* (each person pays their share in turn, cash or card), *Type an amount*, or *Choose dishes* (tap what this person had; the service charge is shared the same way). The order stays open, showing **Left to pay**, until the last part is paid; the receipt then lists every payment.
-- **Add tip**: 5%, 10%, 15% or any amount, on top of the bill. Tips are not sales and not taxed; Reports and the end-of-day summary show them on their own line.
+**Finish & Pay** is one screen. The usual case needs no choices: it opens on *Everything*, *No tip* and *Cash*, so tap **Take cash** (or a quick note like 20.00 to see the change), or tap **Card** and confirm. On the same screen:
+- **Pay**: *Everything*, *Split evenly* (÷ 2 … ÷ 6, each person in turn), *Amount* (typed on the keypad) or *Dishes* (tap what this person had; the service charge is shared the same way). The order stays open, showing **Left to pay**, until the last part is paid; the receipt then lists every payment.
+- **Tip**: 5%, 10%, 15% or another amount, on top of the bill. Tips are not sales and not taxed; Reports and the end-of-day summary show them on their own line.
+- **Payment method**: Cash, Card, or the delivery platform for its orders. The keypad types into the highlighted box (cash received, amount or tip); tap a box to type there.
 - A part payment taken by mistake: tap **undo** next to it. An order with part payments cannot be cancelled until they are taken back.
 
 ### Shift & cash

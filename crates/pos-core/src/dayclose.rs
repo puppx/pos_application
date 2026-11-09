@@ -181,6 +181,8 @@ impl Pos {
             params![key, from, to, s.user_id, json],
         )?;
         let id = tx.last_insert_rowid();
+        // A new day: everything sold out today is back on sale.
+        tx.execute("UPDATE products SET sold_out = 0 WHERE sold_out = 1", [])?;
         let next = (date + chrono::Days::new(1)).max(Local::now().date_naive());
         tx.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)

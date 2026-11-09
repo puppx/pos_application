@@ -619,6 +619,10 @@ commands! {
         Ok(print(Some(job)))
     }
 
+    fn set_sold_out(app, t, id: i64, sold_out: bool) -> () {
+        app.with_session(t, |pos, s| pos.set_sold_out(s, id, sold_out))
+    }
+
     /// Shifts and cash-up.
     fn current_shift(app, t) -> Option<Shift> {
         app.with_session(t, |pos, s| pos.current_shift(s))

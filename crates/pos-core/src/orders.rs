@@ -741,11 +741,14 @@ impl Pos {
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, base, rate, starter, alt, prep): (String, i64, i64, bool, Option<String>, bool) = tx
-            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep FROM products WHERE id = ?1 AND active = 1 AND is_set = 0")?
-            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        let (name, base, rate, starter, alt, prep, sold_out): (String, i64, i64, bool, Option<String>, bool, bool) = tx
+            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep, sold_out FROM products WHERE id = ?1 AND active = 1 AND is_set = 0")?
+            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available (a set menu needs its dishes chosen)".into()))?;
+        if sold_out {
+            return invalid(format!("{name} is sold out today"));
+        }
         // A tax rate chosen for the whole order applies to new lines too.
         let order_tax: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
         let rate = order_tax.unwrap_or(rate);

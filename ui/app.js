@@ -683,6 +683,15 @@ async function renderOrder() {
 
   // --- menu side ---
   const search = h('input', { type: 'search', placeholder: 'Search menu or scan barcode…' });
+  // "Sold out" mode: tapping an item marks it sold out for today (or back on sale).
+  let soldMode = false;
+  const soldBtn = h('button', { class: 'sold-btn', title: 'Mark items sold out for today', onclick: () => { soldMode = !soldMode; drawMenu(); if (soldMode) toast('Tap the items that are sold out today (tap again to put back). Tap Done when finished.'); } });
+  const toggleSold = (p) => act(async () => {
+    await call('set_sold_out', { id: p.id, soldOut: !p.sold_out });
+    p.sold_out = !p.sold_out;
+    drawMenu();
+    toast(p.sold_out ? `${p.name}: sold out today` : `${p.name}: back on sale`);
+  });
   const cats = h('div', { class: 'cats' });
   const grid = h('div', { class: 'items' });
   const picker = h('div', { class: 'stack picker', hidden: true });
@@ -697,11 +706,15 @@ async function renderOrder() {
       }, h('span', { class: 'dot' }), c.name)));
     const q = search.value.trim().toLowerCase();
     const list = state.menu.filter((p) => q ? matches(p, q) : state.catId == null || p.category_id === state.catId);
+    soldBtn.classList.toggle('on', soldMode);
+    soldBtn.textContent = soldMode ? 'Done' : 'Sold out';
+    grid.classList.toggle('sold-mode', soldMode);
     setKids(grid, ...list.slice(0, 300).map((p) => h('button', {
-      class: 'tile', style: catStyle(catColor[p.category_id]), onclick: choose(p),
+      class: `tile ${p.sold_out ? 'sold' : ''}`, style: catStyle(catColor[p.category_id]), onclick: soldMode ? toggleSold(p) : p.sold_out
+        ? () => toast(`${p.name} is sold out today. Tap "Sold out" above to put it back on sale.`, true) : choose(p),
     }, h('span', { class: 'names' }, h('span', { class: 'name' }, p.name), p.name_alt && h('span', { class: 'alt', lang: 'th' }, p.name_alt)),
       h('span', { class: 'foot' },
-        h('span', { class: 'price' }, itemPrice(p, state.itemVariants[p.id])),
+        p.sold_out ? h('span', { class: 'tag sold' }, 'SOLD OUT') : h('span', { class: 'price' }, itemPrice(p, state.itemVariants[p.id])),
         p.is_set && h('span', { class: 'tag set' }, 'Set'),
         p.starter && h('span', { class: 'tag' }, 'Starter'),
         (p.is_set || state.itemGroups[p.id] || state.itemVariants[p.id]) && h('span', { class: 'more', title: 'Has choices' }, '•••')))));
@@ -822,6 +835,7 @@ async function renderOrder() {
             mine.length > 0 && s.pick > 1 && h('button', { class: 'ghost small-btn', onclick: () => { mine.length = 0; redraw(); } }, 'Clear')),
           h('div', { class: 'opts' }, s.items.map((c) => {
             const n = mine.filter((x) => x.product_id === c.product_id).length;
+            if (c.sold_out) return h('button', { class: 'sold', disabled: true, title: 'Sold out today' }, c.name, h('small', {}, 'sold out'));
             return h('button', { class: n ? 'on' : '', onclick: () => {
               if (s.pick === 1) mine.splice(0, 1, { product_id: c.product_id, with_id: mine[0]?.with_id ?? null });
               else if (mine.length < s.pick) mine.push({ product_id: c.product_id, with_id: null });
@@ -1097,9 +1111,11 @@ async function renderOrder() {
   header();
   draw();
   drawMenu();
+  // Sold-out marks may have changed on another device: refresh them.
+  call('menu').then((m) => { state.menu = m; drawMenu(); }).catch(() => {});
   layout = h('div', { class: 'order' },
     h('div', { class: 'cats-col' }, cats),
-    h('div', { class: 'menu' }, h('div', { class: 'searchbox' }, icon('search', 20), search), grid, picker),
+    h('div', { class: 'menu' }, h('div', { class: 'row nowrap menu-top' }, h('div', { class: 'searchbox' }, icon('search', 20), search), soldBtn), grid, picker),
     h('div', { class: 'ticket' },
       head, lines, extra,
       h('div', { class: 'ticket-foot' },

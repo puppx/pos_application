@@ -32,6 +32,8 @@ pub struct Product {
     pub drink: bool,
     /// A dessert: printed on its own DESSERTS ticket (when switched on).
     pub dessert: bool,
+    /// Sold out for today: cannot be added to orders until End of day.
+    pub sold_out: bool,
     /// A set menu (see `save_set`).
     pub is_set: bool,
     /// Only sold inside set menus: no tile of its own on the order screen.
@@ -102,7 +104,7 @@ fn yes() -> bool {
 }
 
 const COLS: &str =
-    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep, p.team_id, p.drink, p.is_set, p.set_only, p.dessert";
+    "p.id, p.category_id, p.sku, p.barcode, p.name, p.price_cents, p.cost_cents, p.tax_rate_bp, p.stock_qty, p.track_stock, p.active, p.starter, p.sort_order, p.name_alt, p.prep, p.team_id, p.drink, p.is_set, p.set_only, p.dessert, p.sold_out";
 const CODE_TAKEN: &str = "SKU or barcode is already used by another product";
 const MAX_LIMIT: i64 = 500;
 
@@ -128,6 +130,7 @@ pub(crate) fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         is_set: r.get(17)?,
         set_only: r.get(18)?,
         dessert: r.get(19)?,
+        sold_out: r.get(20)?,
     })
 }
 
@@ -381,6 +384,18 @@ impl Pos {
             return Err(PosError::NotFound);
         }
         self.audit(Some(s.user_id), "product.dessert", &format!("{id} {dessert}"))
+    }
+
+    /// Sold out for today (or back on sale). Staff can do it; End of day
+    /// puts everything back on sale.
+    pub fn set_sold_out(&self, s: &Session, id: i64, sold_out: bool) -> Result<()> {
+        s.require(Permission::Sell)?;
+        let changed =
+            self.conn.execute("UPDATE products SET sold_out = ?2, updated_at = unixepoch() WHERE id = ?1", params![id, sold_out])?;
+        if changed == 0 {
+            return Err(PosError::NotFound);
+        }
+        self.audit(Some(s.user_id), "product.sold_out", &format!("{id} {sold_out}"))
     }
 
     pub fn set_drink(&self, s: &Session, id: i64, drink: bool) -> Result<()> {

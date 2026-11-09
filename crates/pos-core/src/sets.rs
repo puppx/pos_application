@@ -41,6 +41,8 @@ pub struct SetChoice {
     pub product_id: i64,
     pub name: String,
     pub name_alt: Option<String>,
+    /// Sold out today: shown, but cannot be chosen.
+    pub sold_out: bool,
 }
 
 /// A section as edited in the set editor.
@@ -88,14 +90,14 @@ impl Pos {
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.id, p.name, p.name_alt FROM set_section_items i JOIN products p ON p.id = i.product_id
+            "SELECT p.id, p.name, p.name_alt, p.sold_out FROM set_section_items i JOIN products p ON p.id = i.product_id
              WHERE i.section_id = ?1 AND p.active = 1 AND p.deleted = 0 ORDER BY i.sort_order, p.name",
         )?;
         let mut with = self.conn.prepare_cached(
-            "SELECT p.id, p.name, p.name_alt FROM set_section_with i JOIN products p ON p.id = i.product_id
+            "SELECT p.id, p.name, p.name_alt, p.sold_out FROM set_section_with i JOIN products p ON p.id = i.product_id
              WHERE i.section_id = ?1 AND p.active = 1 AND p.deleted = 0 ORDER BY i.sort_order, p.name",
         )?;
-        let choice = |r: &rusqlite::Row| Ok(SetChoice { product_id: r.get(0)?, name: r.get(1)?, name_alt: r.get(2)? });
+        let choice = |r: &rusqlite::Row| Ok(SetChoice { product_id: r.get(0)?, name: r.get(1)?, name_alt: r.get(2)?, sold_out: r.get(3)? });
         for sec in &mut sections {
             sec.items = stmt.query_map([sec.id], choice)?.collect::<rusqlite::Result<_>>()?;
             sec.with_items = with.query_map([sec.id], choice)?.collect::<rusqlite::Result<_>>()?;
@@ -225,14 +227,17 @@ impl Pos {
         }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, price, rate, alt): (String, i64, i64, Option<String>) = tx
+        let (name, price, rate, alt, sold_out): (String, i64, i64, Option<String>, bool) = tx
             .query_row(
-                "SELECT name, price_cents, tax_rate_bp, name_alt FROM products WHERE id = ?1 AND active = 1 AND is_set = 1",
+                "SELECT name, price_cents, tax_rate_bp, name_alt, sold_out FROM products WHERE id = ?1 AND active = 1 AND is_set = 1",
                 [set_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?
             .ok_or_else(|| PosError::Validation("that set menu is not available".into()))?;
+        if sold_out {
+            return invalid(format!("{name} is sold out today"));
+        }
         let order_tax: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
         let rate = order_tax.unwrap_or(rate);
 
@@ -246,8 +251,10 @@ impl Pos {
             }
             let mut counts: Vec<Chosen> = Vec::new();
             for p in mine {
-                if !sec.items.iter().any(|c| c.product_id == p.product_id) {
-                    return invalid(format!("{}: that dish is not in this section", sec.name));
+                match sec.items.iter().find(|c| c.product_id == p.product_id) {
+                    None => return invalid(format!("{}: that dish is not in this section", sec.name)),
+                    Some(c) if c.sold_out => return invalid(format!("{} is sold out today", c.name)),
+                    Some(_) => {}
                 }
                 // A section with "comes with" choices needs one for every dish.
                 let with = match p.with_id {

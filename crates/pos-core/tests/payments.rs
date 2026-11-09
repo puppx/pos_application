@@ -131,3 +131,17 @@ fn shift_cash_up_expects_float_cash_tips_moves_less_refunds() {
     assert!(text.contains("EXPECTED CASH") && text.contains("SHORT"));
     assert_eq!(k.pos.list_shifts(&k.admin, 10).unwrap().len(), 1);
 }
+
+#[test]
+fn sold_out_until_end_of_day() {
+    let mut k = setup();
+    k.pos.set_sold_out(&k.admin, k.curry.id, true).unwrap();
+    assert!(k.pos.get_product(&k.admin, k.curry.id).unwrap().sold_out);
+    let o = k.pos.open_order(&k.admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    let err = k.pos.add_item(&k.admin, o.id, k.curry.id, 1, None, None, &[]).unwrap_err();
+    assert!(err.to_string().contains("sold out"));
+    k.pos.add_item(&k.admin, o.id, k.beer.id, 1, None, None, &[]).unwrap();
+    k.pos.pay_order(&k.admin, o.id, PaymentMethod::Card, 0).unwrap();
+    k.pos.close_day(&k.admin).unwrap();
+    assert!(!k.pos.get_product(&k.admin, k.curry.id).unwrap().sold_out);
+}

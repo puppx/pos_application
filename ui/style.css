@@ -653,3 +653,13 @@ body.kb-open #toast { bottom: calc(var(--kb-h) + 16px); }
 .dish-row { padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
 .dish-row.on { border-color: var(--brand); background: var(--brand-soft); }
 td.short, strong.short { color: var(--danger); }
+
+/* Sold out for today */
+.menu-top { gap: 8px; align-items: stretch; }
+.menu-top .searchbox { flex: 1; }
+.sold-btn { white-space: nowrap; }
+.sold-btn.on { background: var(--danger); border-color: var(--danger); color: #fff; }
+.tile.sold { opacity: .55; background: repeating-linear-gradient(135deg, var(--surface), var(--surface) 8px, var(--surface-2) 8px, var(--surface-2) 16px); }
+.tile.sold .name { text-decoration: line-through; }
+.tag.sold { background: var(--danger); color: #fff; }
+.items.sold-mode .tile { outline: 2px dashed var(--danger); outline-offset: -4px; }

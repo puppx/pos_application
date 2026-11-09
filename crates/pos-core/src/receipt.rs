@@ -390,7 +390,8 @@ impl Pos {
                 "card" => "Card".to_string(),
                 _ => o.channel_name.as_ref().map(|c| format!("Paid by {c}")).unwrap_or_else(|| "Other".into()),
             };
-            payment.push((label, p.tendered_cents));
+            // Cash: what was handed over (change follows); card: the bill part (tip follows).
+            payment.push((label, if p.method == "cash" { p.tendered_cents } else { p.amount_cents }));
             if p.tip_cents > 0 {
                 payment.push(("  Tip".into(), p.tip_cents));
             }

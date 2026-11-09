@@ -125,6 +125,33 @@ Tick **Drink** on an item (Menu list, item editor) or **Drinks (own ticket)** on
 Drinks are never held for the mains: they go with the first send, like starters, and print first on their own **DRINKS** ticket.
 Categories named "Drinks", "Beverages" or "เครื่องดื่ม" start as drinks when upgrading to 0.9.2.
 
+### Split bill and tips
+
+**Finish & Pay** is still one tap for the usual case: **Cash** or **Card** for the whole bill. Under it:
+- **Split bill**: *÷ 2 … ÷ 8* (each person pays their share in turn, cash or card), *Type an amount*, or *Choose dishes* (tap what this person had; the service charge is shared the same way). The order stays open, showing **Left to pay**, until the last part is paid; the receipt then lists every payment.
+- **Add tip**: 5%, 10%, 15% or any amount, on top of the bill. Tips are not sales and not taxed; Reports and the end-of-day summary show them on their own line.
+- A part payment taken by mistake: tap **undo** next to it. An order with part payments cannot be cancelled until they are taken back.
+
+### Shift & cash
+
+Manage → **Shift & cash**: count the drawer and **Open shift** with that float. **Money in / Money out** (with a reason) during the shift. At the end type the cash counted: the POS shows what should be there (float + cash taken + cash tips − change + money in − money out − cash refunds for voids) and whether anything is short or over, and prints the shift report. Card payments and card tips are listed but never count towards the drawer.
+
+### Sold out today
+
+On the order screen tap **Sold out**, then tap the items that have run out (tap again to put one back), then **Done**. Sold-out items are greyed out, cannot be added (also inside set menus) and are back on sale after **Close day**.
+
+### Move dishes and join tables
+
+On a dine-in order tap **Move**, choose a table, then **Whole order** or **Some dishes** (tap the dishes and how many). A table that already has a bill gets the dishes added to it (one bill); the emptied order disappears without counting as cancelled. Dishes already sent stay sent and nothing is reprinted.
+
+### Several kitchen printers
+
+Manage → Kitchen printer → **Other kitchen printers**: add a printer (e.g. *Bar*), choose where it is and tick what it prints: Drinks, Desserts and/or kitchen teams. Those tickets print there; everything else on the main kitchen printer. With no other printers everything works as before. If one printer is offline the others still print and the error names it.
+
+### Kitchen screen
+
+Manage → **Kitchen screen** on a tablet in the kitchen (through the local server): one card per order with the dishes sent and not yet done, oldest first, turning orange after 10 minutes and red after 20. Tap a dish when it is ready, or **Done** for the whole card; **Undo last done** if tapped by mistake. Filter by team, food, drinks or desserts. It refreshes every few seconds and never logs out by itself.
+
 ### Desserts
 
 Tick **Dessert** on an item or **Desserts (own ticket)** on a category. Desserts print last, on their own **DESSERTS** ticket.
@@ -133,7 +160,7 @@ Manage → Drinks & desserts switches the own DRINKS and DESSERTS tickets on or 
 
 ### Manage (settings)
 
-The side bar has only **Tables**, **Orders** and **Manage**. Manage opens on big tiles: *Daily work* (History, Customers, Reports, and for admins Menu, Floor plan, Staff) and, for admins, *Settings*. Every page opened from Manage has a **← Manage** button.
+The side bar has only **Tables**, **Orders** and **Manage**. Manage opens on big tiles: *Daily work* (History, Customers, Reports, Shift & cash, Kitchen screen, and for admins Menu, Floor plan, Staff) and, for admins, *Settings*. Every page opened from Manage has a **← Manage** button.
 
 The settings tiles: Restaurant, Bills & receipts, Kitchen printer, Drinks & desserts, Orders, Kitchen teams, Login & staff, Delivery apps, Screen & devices, Backup & data, About & updates. Tap one to see only its settings; **← Manage** goes back.
 
@@ -364,8 +391,5 @@ ui/                  Touch UI (index.html, app.js, keyboard.js, style.css, fonts
 
 ## Next steps (not built yet)
 
-- Several kitchen printers with routing by category (e.g. drinks to the bar printer)
-- Split bill and partial payments, service charge and tips
 - Delivery status tracking (preparing, out for delivery, delivered) and driver assignment
-- Shifts / cash-up (opening float, counted cash vs expected, report per shift)
 - Code signing for the installer (avoids the Windows SmartScreen warning)

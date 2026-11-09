@@ -684,3 +684,4 @@ td.short, strong.short { color: var(--danger); }
 .kds-name small { font-weight: 500; font-size: 14.5px; color: var(--muted); }
 .kds-name small.kds-note { color: var(--danger); font-weight: 700; }
 .kds-done { margin: 10px; min-height: 52px; font-size: 18px; }
+.kds-item { justify-content: flex-start; }

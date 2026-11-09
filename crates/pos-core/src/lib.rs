@@ -45,7 +45,7 @@ pub use menu::Category;
 pub use menu_tools::{ImportReport, ImportRow};
 pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
-pub use printing::{system_printers, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
+pub use printing::{system_printers, KitchenRoute, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
 pub use orders::{
     ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod,
 };

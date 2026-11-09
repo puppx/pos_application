@@ -390,3 +390,38 @@ fn fixing_a_sent_dish_tells_the_kitchen() {
     // Nothing printable: no job.
     assert!(k.pos.kitchen_change_job(&k.s, o.id, "CANCELLED", &[]).unwrap().is_none());
 }
+
+#[test]
+fn drinks_and_a_team_can_go_to_other_printers() {
+    let mut k = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("kitchen.bin");
+    let bar = dir.path().join("bar.bin");
+    let file = |p: &std::path::Path| PrinterTarget::File { path: p.display().to_string() };
+    k.pos.set_kitchen_printer(&k.s, &PrinterConfig { target: file(&main), copy_delay_secs: 0, app_font: false, ..Default::default() }).unwrap();
+    k.pos.set_drink(&k.s, k.cola.id, true).unwrap();
+    let curry = k.teams.iter().find(|t| t.name == "Curry").unwrap().id;
+    // No name: refused.
+    let bad = KitchenRoute { label: " ".into(), target: file(&bar), width: 42, copies: 1, team_ids: vec![], drinks: true, desserts: false };
+    assert!(k.pos.set_kitchen_routes(&k.s, &[bad]).is_err());
+    k.pos
+        .set_kitchen_routes(&k.s, &[KitchenRoute { label: "Bar".into(), target: file(&bar), width: 42, copies: 1, team_ids: vec![curry], drinks: true, desserts: false }])
+        .unwrap();
+    // Saved as JSON with the Windows printer's own name beside the label.
+    let win = KitchenRoute { label: "Bar".into(), target: PrinterTarget::Windows { name: "EPSON".into() }, width: 42, copies: 1, team_ids: vec![], drinks: true, desserts: false };
+    let back: KitchenRoute = serde_json::from_str(&serde_json::to_string(&win).unwrap()).unwrap();
+    assert_eq!(back, win);
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.green.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&k.s, o.id, k.cola.id, 1, None, None, &[]).unwrap();
+    let items = k.pos.get_order(&k.s, o.id).unwrap().items;
+    let job = k.pos.kitchen_job(&k.s, o.id, &items, false).unwrap().unwrap();
+    job.send().unwrap();
+    let main_text = String::from_utf8_lossy(&std::fs::read(&main).unwrap()).to_string();
+    let bar_text = String::from_utf8_lossy(&std::fs::read(&bar).unwrap()).to_string();
+    assert!(main_text.contains("Steak") && !main_text.contains("Cola") && !main_text.contains("Green curry"));
+    assert!(bar_text.contains("Cola") && bar_text.contains("Green curry") && !bar_text.contains("Steak"));
+    // Both say NEW ORDER (worked out from the whole send).
+    assert!(main_text.contains("NEW ORDER") && bar_text.contains("NEW ORDER"));
+}

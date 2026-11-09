@@ -507,7 +507,7 @@ impl Pos {
             let staff = r.staff_to_escpos(p.width, p.bold);
             match &mut job {
                 Some(j) => j.parts.push(staff),
-                None => job = Some(PrintJob { target: p.target.clone(), parts: vec![staff], gap: std::time::Duration::ZERO }),
+                None => job = Some(PrintJob::new(p.target.clone(), staff)),
             }
         }
         if drawer {

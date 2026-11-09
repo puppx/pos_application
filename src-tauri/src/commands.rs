@@ -712,6 +712,23 @@ commands! {
         Ok(print(Some(job)))
     }
 
+    /// Extra kitchen printers (bar, desserts...) and what each prints.
+    fn get_kitchen_routes(app, t) -> Vec<KitchenRoute> {
+        app.with_session(t, |pos, _| pos.kitchen_routes())
+    }
+
+    fn set_kitchen_routes(app, t, routes: Vec<KitchenRoute>) -> () {
+        app.with_session(t, |pos, s| pos.set_kitchen_routes(s, &routes))
+    }
+
+    fn test_route_printer(app, t, route: KitchenRoute) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| {
+            let cfg = pos.route_config(&route)?;
+            pos.test_print_job(s, &cfg)
+        })?;
+        Ok(print(Some(job)))
+    }
+
     fn list_system_printers(app, t) -> Vec<String> {
         app.with_session(t, |_, s| s.require(Permission::ManageSettings))?;
         Ok(system_printers())

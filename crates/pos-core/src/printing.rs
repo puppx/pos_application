@@ -85,6 +85,31 @@ fn yes() -> bool {
     true
 }
 
+const ROUTES_KEY: &str = "kitchen_routes";
+
+/// Another kitchen printer (bar, dessert station...) and what it prints:
+/// drinks, desserts and/or the dishes of some kitchen teams. Everything
+/// else prints on the main kitchen printer, as before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KitchenRoute {
+    /// What the staff call it, e.g. "Bar" (not `name`: a Windows printer's
+    /// name sits next to it).
+    pub label: String,
+    #[serde(flatten)]
+    pub target: PrinterTarget,
+    #[serde(default = "default_width")]
+    pub width: usize,
+    /// Copies of each ticket on this printer.
+    #[serde(default = "one")]
+    pub copies: u8,
+    #[serde(default)]
+    pub team_ids: Vec<i64>,
+    #[serde(default)]
+    pub drinks: bool,
+    #[serde(default)]
+    pub desserts: bool,
+}
+
 /// Language of item names on a printout. Items without a Thai name always
 /// print in English.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,11 +202,14 @@ pub struct PrintJob {
     pub target: PrinterTarget,
     pub parts: Vec<Vec<u8>>,
     pub gap: Duration,
+    /// The same print for other printers (kitchen tickets routed to a bar or
+    /// dessert printer). Each is sent even if another one fails.
+    pub more: Vec<PrintJob>,
 }
 
 impl PrintJob {
     pub fn new(target: PrinterTarget, bytes: Vec<u8>) -> PrintJob {
-        PrintJob { target, parts: vec![bytes], gap: Duration::ZERO }
+        PrintJob { target, parts: vec![bytes], gap: Duration::ZERO, more: Vec::new() }
     }
 
     /// `copies` of `doc`, the first one preceded by `lead` (e.g. the drawer pulse).
@@ -190,15 +218,27 @@ impl PrintJob {
         first.extend_from_slice(&doc);
         let mut parts = vec![first];
         parts.extend(std::iter::repeat_n(doc, usize::from(copies.max(1)) - 1));
-        PrintJob { target, parts, gap: Duration::from_secs(delay_secs.into()) }
+        PrintJob { target, parts, gap: Duration::from_secs(delay_secs.into()), more: Vec::new() }
     }
 
-    /// Everything the printer receives, in order.
+    /// Everything the printers receive, in order (this printer, then the others).
     pub fn bytes(&self) -> Vec<u8> {
-        self.parts.concat()
+        let mut all = self.parts.concat();
+        for m in &self.more {
+            all.extend(m.bytes());
+        }
+        all
     }
 
-    /// Send every part, waiting `gap` between them.
+    /// Join several jobs (one per printer) into one.
+    pub(crate) fn join(jobs: Vec<PrintJob>) -> Option<PrintJob> {
+        let mut it = jobs.into_iter();
+        let mut first = it.next()?;
+        first.more.extend(it);
+        Some(first)
+    }
+
+    /// Send every part, waiting `gap` between them, then the other printers.
     pub fn send(&self) -> Result<()> {
         for (i, part) in self.parts.iter().enumerate() {
             if i > 0 {
@@ -206,12 +246,34 @@ impl PrintJob {
             }
             send_bytes(&self.target, part)?;
         }
+        for m in &self.more {
+            m.send()?;
+        }
         Ok(())
     }
 
     /// Send the first copy now (its result is returned) and any further
     /// copies on a background thread, so the till does not wait out the delay.
-    pub fn send_in_background(self) -> Result<()> {
+    /// Every printer is tried; their errors are reported together.
+    pub fn send_in_background(mut self) -> Result<()> {
+        let more = std::mem::take(&mut self.more);
+        let mut errors: Vec<String> = Vec::new();
+        if let Err(e) = self.send_one() {
+            errors.push(e.to_string());
+        }
+        for m in more {
+            if let Err(e) = m.send_in_background() {
+                errors.push(e.to_string());
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(PosError::Printer(errors.join("; ")))
+        }
+    }
+
+    fn send_one(self) -> Result<()> {
         let mut parts = self.parts.into_iter();
         if let Some(first) = parts.next() {
             send_bytes(&self.target, &first)?;
@@ -741,6 +803,84 @@ impl Pos {
         Ok(raw.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default())
     }
 
+    /// The other kitchen printers (none = everything on the main one).
+    pub fn kitchen_routes(&self) -> Result<Vec<KitchenRoute>> {
+        Ok(self.setting(ROUTES_KEY)?.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default())
+    }
+
+    pub fn set_kitchen_routes(&self, s: &Session, routes: &[KitchenRoute]) -> Result<()> {
+        s.require(Permission::ManageSettings)?;
+        if routes.len() > 8 {
+            return invalid("up to 8 extra kitchen printers");
+        }
+        for r in routes {
+            if r.label.trim().is_empty() {
+                return invalid("give every printer a name, e.g. Bar");
+            }
+            if r.target == PrinterTarget::None {
+                return invalid(format!("{}: choose the printer", r.label));
+            }
+            self.route_config(r)?.validate()?;
+        }
+        let json = serde_json::to_string(routes).map_err(|e| PosError::Internal(e.to_string()))?;
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [ROUTES_KEY, &json],
+        )?;
+        self.audit(Some(s.user_id), "printer.routes", &json)
+    }
+
+    /// An extra printer's settings: the main kitchen printer's look (names,
+    /// font, size), its own place, paper width and copies.
+    pub fn route_config(&self, r: &KitchenRoute) -> Result<PrinterConfig> {
+        Ok(PrinterConfig {
+            target: r.target.clone(),
+            width: r.width,
+            copies: r.copies,
+            starter_copies: None,
+            mains_copies: None,
+            prep_copies: None,
+            additional_copies: Some(r.copies),
+            ..self.kitchen_printer()?
+        })
+    }
+
+    /// `items` split by the printer that prints them, the main one first.
+    /// Drinks and desserts go to a printer that takes them, other dishes to
+    /// the printer of their team, the rest to the main kitchen printer.
+    pub(crate) fn route_items(&self, items: &[OrderItem]) -> Result<Vec<(PrinterConfig, Vec<OrderItem>)>> {
+        let main = self.kitchen_printer()?;
+        let routes = self.kitchen_routes()?;
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        if routes.is_empty() {
+            return Ok(vec![(main, items.to_vec())]);
+        }
+        let mut groups: Vec<Vec<OrderItem>> = vec![Vec::new(); routes.len() + 1];
+        let mut stmt = self.conn.prepare_cached("SELECT drink, dessert, team_id FROM products WHERE id = ?1")?;
+        for it in items {
+            let (drink, dessert, team): (bool, bool, Option<i64>) =
+                stmt.query_row([it.product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?.unwrap_or((false, false, None));
+            let slot = routes
+                .iter()
+                .position(|r| (drink && r.drinks) || (dessert && r.desserts))
+                .or_else(|| routes.iter().position(|r| !drink && !dessert && team.is_some_and(|t| r.team_ids.contains(&t))))
+                .map_or(0, |i| i + 1);
+            groups[slot].push(it.clone());
+        }
+        drop(stmt);
+        let mut out = Vec::new();
+        for (i, group) in groups.into_iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            let cfg = if i == 0 { main.clone() } else { self.route_config(&routes[i - 1])? };
+            out.push((cfg, group));
+        }
+        Ok(out)
+    }
+
     pub fn set_kitchen_printer(&self, s: &Session, cfg: &PrinterConfig) -> Result<()> {
         s.require(Permission::ManageSettings)?;
         cfg.validate()?;
@@ -883,16 +1023,19 @@ impl Pos {
     /// sent: "CANCELLED" (removed or fewer) or "CHANGED" (a new note), split
     /// like any other ticket so the right team gets it. One copy.
     pub fn kitchen_change_job(&self, s: &Session, order_id: i64, title: &str, items: &[OrderItem]) -> Result<Option<PrintJob>> {
-        let cfg = self.kitchen_printer()?;
         let items = kitchen_only(items);
-        if cfg.target == PrinterTarget::None || items.is_empty() {
-            return Ok(None);
+        let mut jobs = Vec::new();
+        for (cfg, group) in self.route_items(&items)? {
+            if cfg.target == PrinterTarget::None {
+                continue;
+            }
+            let mut base = self.kitchen_ticket(s, order_id, &group, false)?;
+            base.title = title.to_string();
+            base.footer = None;
+            let tickets = self.split_for_kitchen(base, &group)?;
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs));
         }
-        let mut base = self.kitchen_ticket(s, order_id, &items, false)?;
-        base.title = title.to_string();
-        base.footer = None;
-        let tickets = self.split_for_kitchen(base, &items)?;
-        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs)))
+        Ok(PrintJob::join(jobs))
     }
 
     /// Drinks first and desserts last on tickets of their own (each when
@@ -1006,42 +1149,56 @@ impl Pos {
     /// Print job for `items`, or None when no kitchen printer is set up.
     pub fn kitchen_job(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<Option<PrintJob>> {
         let items = &kitchen_only(items);
-        let cfg = self.kitchen_printer()?;
-        if cfg.target == PrinterTarget::None || items.is_empty() {
+        if items.is_empty() {
             return Ok(None);
         }
-        // One ticket per team, printed one after another as a single job.
-        let tickets = self.kitchen_tickets(s, order_id, items, reprint)?;
-        let title = tickets[0].title.as_str();
+        // NEW ORDER / ADDITIONAL... is worked out from the whole send, so
+        // every printer's tickets say the same.
+        let whole = self.kitchen_ticket(s, order_id, items, reprint)?;
+        let title = whole.title.as_str();
         let food = self.drinks_apart(items)?.1;
-        let copies = if reprint {
-            1
-        } else if title == "MAINS AWAY" {
-            cfg.mains_copies.unwrap_or(cfg.copies)
-        } else if title == "ADDITIONAL" {
-            // More ordered later: one copy unless set otherwise.
-            cfg.additional_copies.unwrap_or(1)
-        } else if !food.is_empty() && food.iter().all(|i| i.starter) {
-            // Starters: ahead of the mains, or all the table ordered for now.
-            cfg.starter_copies.unwrap_or(cfg.copies)
-        } else {
-            cfg.copies
-        };
-        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs)))
+        let mut jobs = Vec::new();
+        for (cfg, group) in self.route_items(items)? {
+            if cfg.target == PrinterTarget::None {
+                continue;
+            }
+            // One ticket per team, printed one after another as a single job.
+            let mut base = self.kitchen_ticket(s, order_id, &group, reprint)?;
+            base.title = whole.title.clone();
+            let tickets = self.split_for_kitchen(base, &group)?;
+            let copies = if reprint {
+                1
+            } else if title == "MAINS AWAY" {
+                cfg.mains_copies.unwrap_or(cfg.copies)
+            } else if title == "ADDITIONAL" {
+                // More ordered later: one copy unless set otherwise.
+                cfg.additional_copies.unwrap_or(1)
+            } else if !food.is_empty() && food.iter().all(|i| i.starter) {
+                // Starters: ahead of the mains, or all the table ordered for now.
+                cfg.starter_copies.unwrap_or(cfg.copies)
+            } else {
+                cfg.copies
+            };
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs));
+        }
+        Ok(PrintJob::join(jobs))
     }
 
     /// PREPARE NOW ticket for prepare-ahead dishes that wait for the mains
     /// (from [`Pos::send_prep`]). None when no kitchen printer is set up.
     pub fn prep_job(&self, s: &Session, order_id: i64, items: &[OrderItem]) -> Result<Option<PrintJob>> {
-        let cfg = self.kitchen_printer()?;
-        if cfg.target == PrinterTarget::None || items.is_empty() {
-            return Ok(None);
+        let mut jobs = Vec::new();
+        for (cfg, group) in self.route_items(items)? {
+            if cfg.target == PrinterTarget::None {
+                continue;
+            }
+            let base = self.prep_ticket(s, order_id, &group)?;
+            let names = cfg.names.unwrap_or(PrintNames::Both);
+            let tickets = self.split_by_team(base, &group, names)?;
+            let copies = cfg.prep_copies.unwrap_or(cfg.copies);
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs));
         }
-        let base = self.prep_ticket(s, order_id, items)?;
-        let names = cfg.names.unwrap_or(PrintNames::Both);
-        let tickets = self.split_by_team(base, items, names)?;
-        let copies = cfg.prep_copies.unwrap_or(cfg.copies);
-        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs)))
+        Ok(PrintJob::join(jobs))
     }
 
     /// The PREPARE NOW ticket: like a kitchen ticket, saying the dishes are
@@ -1066,16 +1223,24 @@ impl Pos {
             return invalid("no main courses have been sent to the kitchen yet");
         }
         self.audit(Some(s.user_id), "kitchen.main_course", &order_id.to_string())?;
-        let cfg = self.kitchen_printer()?;
-        if cfg.target == PrinterTarget::None {
-            return Ok(None);
+        let mut jobs = Vec::new();
+        for (cfg, mains) in self.route_items(&mains)? {
+            if cfg.target == PrinterTarget::None {
+                continue;
+            }
+            jobs.push(self.main_course_part(&o, &cfg, &mains)?);
         }
+        Ok(PrintJob::join(jobs))
+    }
+
+    /// One printer's part of the main course call.
+    fn main_course_part(&self, o: &Order, cfg: &PrinterConfig, mains: &[OrderItem]) -> Result<PrintJob> {
         let names = cfg.names.unwrap_or(PrintNames::Both);
-        let base = self.main_course_ticket(&o, &mains)?;
+        let base = self.main_course_ticket(o, mains)?;
         let tickets = if cfg.call_table_only {
             // Just the table, in huge letters: one ticket per team that has a
             // main waiting (headed with the team), or one listing the teams.
-            let groups = self.team_groups(&mains)?;
+            let groups = self.team_groups(mains)?;
             let teams: Vec<String> = groups.iter().filter_map(|g| g.0.as_ref().map(|b| b.split(" / ").next().unwrap_or("").to_string())).collect();
             let split = self.setting("teams_split")?.as_deref() != Some("0");
             let bare = KitchenTicket { items: vec![], ..base };
@@ -1087,10 +1252,10 @@ impl Pos {
                 vec![KitchenTicket { details: vec![format!("FOR: {}", teams.join(", "))], ..bare }]
             }
         } else {
-            self.split_by_team(base, &mains, names)?
+            self.split_by_team(base, mains, names)?
         };
         let copies = cfg.mains_copies.unwrap_or(cfg.copies);
-        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs)))
+        Ok(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, cfg), copies, cfg.copy_delay_secs))
     }
 
     fn main_course_ticket(&self, o: &Order, mains: &[OrderItem]) -> Result<KitchenTicket> {

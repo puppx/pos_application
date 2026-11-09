@@ -2898,7 +2898,7 @@ function platformsCard() {
 /// Connection, paper and copies for one printer (kitchen or receipt).
 /// `names`: [[value, label]...] for "Names on tickets"; the first is the default.
 /// `courses`: also offer copies for starters and mains tickets (kitchen).
-function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
+function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, simple = false) {
   const kind = h('select', {},
     h('option', { value: 'none' }, noneLabel),
     h('option', { value: 'network' }, 'Network printer (IP address)'),
@@ -2939,16 +2939,16 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false) {
   kind.onchange = drawFields;
   drawFields();
   return {
-    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, 'Delay between copies', delay, 'sec'), fields,
+    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, !simple && ['Delay between copies', delay, 'sec']), fields,
       courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Starters ticket copies', starterCopies),
         h('label', { class: 'field' }, 'Mains ticket copies', mainsCopies),
         h('label', { class: 'field' }, 'Prepare ticket copies', prepCopies),
         h('span', { class: 'muted small' }, 'For dine-in courses; empty = same as Copies. An order of only starters uses the starters copies.')),
       courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Additional ticket copies', additionalCopies),
         h('span', { class: 'muted small' }, 'When more is ordered later (ADDITIONAL); empty = 1.')),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
+      !simple && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
         h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
-      h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)'),
+      !simple && h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)'),
       courses && h('label', { class: 'check' }, appFont, ' Print tickets in the app\'s font (the same as the team names); off = the printer\'s own font'),
       courses && h('label', { class: 'check' }, tableOnly, ' "Call mains again" prints only the table, in huge letters (no dishes)'),
       courses && h('label', { class: 'check' }, large, ' Large text for dishes, options and notes (fewer letters per line)')),
@@ -3307,7 +3307,7 @@ async function renderSettings() {
   const cards = {
     shop: () => [restaurantCard(), serviceCard(), menuDefaultsCard()],
     bills: () => [receiptCard(), ticketLabelsCard()],
-    kitchen: () => [kitchenPrinterCard()],
+    kitchen: () => [kitchenPrinterCard(), routesCard(systemPrinters)],
     tickets: () => [splitCard()],
     orders: () => [fixSentCard(), quickNotesCard()],
     teams: () => [teamsCard()],
@@ -3342,6 +3342,54 @@ function renderManageHome() {
     groups.length > 0 && h('div', { class: 'settings-tiles' }, groups.map(([id, ic, title, sub]) =>
       tile(id, ic, title, id === 'about' ? `Version ${state.version}` : sub, open(id))))));
   return Promise.resolve();
+}
+
+/// Settings card: more kitchen printers (bar, desserts...) and what each prints.
+function routesCard(systemPrinters) {
+  const card = h('div', { class: 'card stack' });
+  Promise.all([call('get_kitchen_routes'), call('list_teams').catch(() => [])]).then(([routes, teams]) => {
+    let rows = routes.map((r) => ({ ...r }));
+    const list = h('div', { class: 'stack' });
+    const forms = [];
+    const draw = () => {
+      forms.length = 0;
+      setKids(list, rows.map((r, i) => {
+        const label = h('input', { value: r.label ?? '', placeholder: 'Name, e.g. Bar', style: 'width:160px' });
+        const pf = printerForm({ ...r, kind: r.kind ?? 'network' }, systemPrinters, 'Choose…', [['both', 'English with Thai under it']], false, true);
+        const drinks = h('input', { type: 'checkbox', checked: !!r.drinks });
+        const desserts = h('input', { type: 'checkbox', checked: !!r.desserts });
+        const teamBoxes = teams.map((t) => ({ t, box: h('input', { type: 'checkbox', checked: (r.team_ids ?? []).includes(t.id) }) }));
+        const value = () => {
+          const c = pf.config();
+          return { label: label.value.trim(), kind: c.kind, host: c.host, port: c.port, name: c.name, path: c.path, width: c.width, copies: c.copies,
+            drinks: drinks.checked, desserts: desserts.checked, team_ids: teamBoxes.filter((x) => x.box.checked).map((x) => x.t.id) };
+        };
+        forms.push(value);
+        return h('div', { class: 'card stack route-card' },
+          h('div', { class: 'row' }, label, h('span', { style: 'flex:1' }),
+            h('button', { onclick: act(async () => printResult(await call('test_route_printer', { route: value() }), 'Test ticket sent')) }, 'Print test'),
+            h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); draw(); } }, 'Remove')),
+          pf.el,
+          h('div', { class: 'row' }, h('strong', {}, 'Prints:'),
+            h('label', { class: 'check' }, drinks, ' Drinks'), h('label', { class: 'check' }, desserts, ' Desserts'),
+            teamBoxes.map((x) => h('label', { class: 'check' }, x.box, ` ${x.t.name}`))));
+      }), !rows.length && h('div', { class: 'muted' }, 'No other printers: every kitchen ticket prints on the kitchen printer above.'));
+    };
+    draw();
+    setKids(card, h('h3', {}, 'Other kitchen printers'),
+      h('div', { class: 'muted' }, 'For example a printer at the bar for drinks, or one at the dessert station. Tick what each one prints; everything else prints on the kitchen printer above. ' +
+        'Names, font and large text follow the kitchen printer.'),
+      list,
+      h('div', { class: 'row' },
+        h('button', { onclick: () => { rows = forms.map((f) => f()); rows.push({ label: '', kind: 'network', port: 9100, width: 42, copies: 1, team_ids: [] }); draw(); } }, '+ Printer'),
+        h('button', { class: 'primary', onclick: act(async () => {
+          const routes = forms.map((f) => f());
+          await call('set_kitchen_routes', { routes });
+          rows = routes;
+          toast(routes.length ? `${routes.length} other kitchen printer(s) saved` : 'All tickets print on the kitchen printer');
+        }) }, 'Save printers')));
+  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
+  return card;
 }
 
 /// Settings card: whether drinks and desserts get their own tickets.

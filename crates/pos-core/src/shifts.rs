@@ -57,18 +57,12 @@ pub struct Shift {
     pub moves: Vec<CashMove>,
 }
 
+/// opened by, opened at, float, closed by, closed at, counted, expected, note.
+type ShiftRow = (String, i64, i64, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>);
+
 impl Pos {
     fn load_shift(&self, id: i64) -> Result<Shift> {
-        let (opened_by_name, opened_at, float_cents, closed_by_name, closed_at, counted_cents, stored_expected, note): (
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<String>,
-        ) = self
+        let (opened_by_name, opened_at, float_cents, closed_by_name, closed_at, counted_cents, stored_expected, note): ShiftRow = self
             .conn
             .prepare_cached(
                 "SELECT u.name, s.opened_at, s.float_cents, c.name, s.closed_at, s.counted_cents, s.expected_cents, s.note

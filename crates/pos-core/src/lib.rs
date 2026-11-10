@@ -90,6 +90,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0020_sold_out.sql"),
     include_str!("migrations/0021_kitchen_screen.sql"),
     include_str!("migrations/0022_manager_role.sql"),
+    include_str!("migrations/0023_bill_printed.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

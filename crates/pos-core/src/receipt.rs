@@ -215,7 +215,11 @@ impl Receipt {
         if self.discount_cents != 0 {
             two_col(&mut v, Size::Normal, false, "Discount", &self.money(-self.discount_cents), width, "");
         }
-        two_col(&mut v, Size::Normal, false, if self.tax_incl { "Tax (included)" } else { "Tax" }, &self.money(self.tax_cents), width, "");
+        // The customer's copy shows no tax when it is inside the prices (the
+        // staff copy has it by class); tax added on top is part of the sum.
+        if !self.tax_incl {
+            two_col(&mut v, Size::Normal, false, "Tax", &self.money(self.tax_cents), width, "");
+        }
         if let Some((label, cents)) = &self.service {
             two_col(&mut v, Size::Normal, false, label, &self.money(*cents), width, "");
         }
@@ -473,6 +477,8 @@ impl Pos {
             return invalid("no receipt printer is set up (Settings → Receipt printer)");
         }
         let r = self.receipt(s, order_id)?;
+        // A bill handed over before payment: no second copy at payment.
+        self.conn.execute("UPDATE orders SET bill_printed_at = unixepoch() WHERE id = ?1 AND status = 'open'", [order_id])?;
         Ok(PrintJob::new(cfg.printer.target.clone(), r.to_escpos(cfg.printer.width, cfg.printer.bold)))
     }
 
@@ -499,8 +505,14 @@ impl Pos {
         let p = &cfg.printer;
         // A part payment: only the drawer; the receipt waits for the last part.
         let r = (order.status == "paid" && (cfg.auto_print || cfg.staff_copy)).then(|| self.build_receipt(order, &cfg)).transpose()?;
+        // The customer already has the bill (printed with "Bill"): not again.
+        let bill_given: bool = self
+            .conn
+            .query_row("SELECT bill_printed_at IS NOT NULL FROM orders WHERE id = ?1", [order.id], |r| r.get(0))
+            .optional()?
+            .unwrap_or(false);
         let mut job = match &r {
-            Some(r) if cfg.auto_print => Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs)),
+            Some(r) if cfg.auto_print && !bill_given => Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs)),
             _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec())),
         };
         // The staff copy follows the customer's, as one more part of the job.

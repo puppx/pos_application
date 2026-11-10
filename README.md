@@ -223,6 +223,8 @@ and the header (address, phone, VAT number) and footer lines. Use **Print test r
 and **Test cash drawer** before saving. The drawer must be cabled to the receipt
 printer's drawer (RJ11/DK) port.
 
+If **Bill** was tapped to give the customer their bill before paying, the receipt is not printed again at **Finish & Pay** (the drawer still opens for cash and the staff copy still prints). The customer's bill and receipt show no tax line when the tax is inside the prices; the staff copy shows the tax by class.
+
 ## Try it with demo data
 
 To get a restaurant with floors, tables, a menu and options already set up

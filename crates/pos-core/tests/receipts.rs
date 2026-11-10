@@ -257,3 +257,26 @@ fn order_words_on_tickets_can_be_changed() {
     pos.set_setting(&s, "label_takeaway", "  ").unwrap();
     assert!(pos.receipt(&s, o.id).unwrap().to_text(42).contains("TAKEAWAY"));
 }
+
+#[test]
+fn a_bill_printed_before_payment_is_not_printed_again_and_shows_no_included_tax() {
+    let (mut pos, admin, m) = setup();
+    pos.set_setting(&admin, "prices_include_tax", "1").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let printer = PrinterConfig { target: PrinterTarget::File { path: dir.path().join("r.bin").display().to_string() }, copy_delay_secs: 0, app_font: false, ..Default::default() };
+    pos.set_receipt_settings(&admin, &ReceiptSettings { printer, staff_copy: true, ..Default::default() }).unwrap();
+    // "Bill" before paying: the customer's copy has no tax line.
+    let o = order_everything(&mut pos, &admin, &m);
+    let bill = String::from_utf8_lossy(&pos.receipt_job(&admin, o.id).unwrap().bytes()).to_string();
+    assert!(bill.contains("TOTAL") && !bill.contains("Tax"));
+    // Paying: no second customer copy, only the staff copy (and the drawer).
+    let paid = pos.pay_order(&admin, o.id, PaymentMethod::Cash, 5000).unwrap();
+    let job = pos.payment_print_job(&admin, &paid).unwrap().unwrap();
+    let text = String::from_utf8_lossy(&job.bytes()).to_string();
+    assert_eq!((count(&job.bytes(), &KICK), count(&job.bytes(), &CUT)), (1, 1));
+    assert!(text.contains("STAFF COPY"));
+    // No bill first: the receipt prints at payment as before.
+    let o = order_everything(&mut pos, &admin, &m);
+    let paid = pos.pay_order(&admin, o.id, PaymentMethod::Card, 0).unwrap();
+    assert_eq!(count(&pos.payment_print_job(&admin, &paid).unwrap().unwrap().bytes(), &CUT), 2);
+}

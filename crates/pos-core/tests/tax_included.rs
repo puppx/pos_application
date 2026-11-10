@@ -56,7 +56,8 @@ fn discount_service_and_every_view_agree() {
     assert_eq!(pos.floor_status(&s, floor).unwrap()[0].total_cents, 1980);
 
     let bill = pos.receipt(&s, o.id).unwrap().to_text(42);
-    assert!(bill.contains("Tax (included)") && bill.contains("£3.00") && bill.contains("£19.80"), "{bill}");
+    // The customer's bill shows no tax inside the prices (the staff copy does).
+    assert!(!bill.contains("Tax") && bill.contains("£19.80"), "{bill}");
     assert!(pos.pay_order(&s, o.id, PaymentMethod::Cash, 1979).is_err());
     let paid = pos.pay_order(&s, o.id, PaymentMethod::Cash, 2000).unwrap();
     assert_eq!((paid.tax_cents, paid.total_cents, paid.change_cents), (300, 1980, Some(20)));

@@ -64,10 +64,10 @@ fn setup_only_once_and_pin_login() {
 }
 
 #[test]
-fn pins_are_unique() {
+fn pins_may_be_shared() {
     let (pos, admin) = setup();
-    let err = pos.create_user(&admin, "Dup", Role::Staff, "1111").unwrap_err();
-    assert!(matches!(err, PosError::Conflict(_)));
+    // Staff pick their name first, so a PIN no longer has to be unique.
+    pos.create_user(&admin, "Dup", Role::Staff, "1111").unwrap();
 }
 
 #[test]
@@ -466,4 +466,26 @@ fn a_pin_approves_without_logging_in() {
     assert!(matches!(pos.cancel_order(&s, o.id, ""), Err(PosError::Forbidden)));
     let approver = pos.pin_owner("1111").unwrap();
     pos.cancel_order(&approver, o.id, "").unwrap();
+}
+
+#[test]
+fn two_people_can_share_a_pin_and_pick_their_name() {
+    let (mut pos, admin) = setup();
+    let ann = pos.create_user(&admin, "Ann", Role::Staff, "5555").unwrap();
+    let bob = pos.create_user(&admin, "Bob", Role::Manager, "5555").unwrap();
+    // The login screen lists everyone (names, not PINs).
+    let names: Vec<String> = pos.login_users().unwrap().into_iter().map(|u| u.name).collect();
+    assert_eq!(names, ["Ann", "Bob", "Owner"]);
+    // The PIN alone is not enough when it is shared...
+    assert!(matches!(pos.login("5555"), Err(PosError::Validation(_))));
+    // ...with the name picked it is.
+    let mut t = LoginThrottle::default();
+    assert_eq!(pos.login_as(Some(bob.id), "5555", &mut t).unwrap().role, Role::Manager);
+    assert_eq!(pos.login_as(Some(ann.id), "5555", &mut t).unwrap().user_id, ann.id);
+    // Someone else's PIN with your name: refused.
+    assert!(matches!(pos.login_as(Some(ann.id), "1111", &mut t), Err(PosError::InvalidPin)));
+    // A unique PIN still works on its own.
+    assert_eq!(pos.login("1111").unwrap().user_id, admin.user_id);
+    // Approving with a shared PIN counts as the one allowed the least (staff).
+    assert_eq!(pos.pin_owner("5555").unwrap().role, Role::Staff);
 }

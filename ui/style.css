@@ -734,3 +734,15 @@ button.danger-outline:hover { background: var(--danger-soft); }
 .course-pick button.main { background: var(--held); border-color: var(--held); }
 .course-row { margin-bottom: 6px; }
 .course-row .seg button { min-height: 40px; }
+
+/* Login: pick your name, then the PIN */
+.who-card { width: min(640px, calc(100vw - 48px)); }
+.lock-main:has(.who-card) .lock-stack { width: min(640px, calc(100vw - 48px)); }
+.who-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; width: 100%; max-height: 60vh; overflow: auto; }
+.who { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 16px 8px; min-height: 120px; border-radius: 12px; white-space: normal; }
+.who .avatar, .who-picked .avatar { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: #fff; font-size: 20px; font-weight: 700; }
+.who strong { font-size: 17px; line-height: 1.2; text-align: center; }
+.who small { color: var(--muted); font-weight: 500; }
+.who.last { border-color: var(--brand); box-shadow: var(--focus); }
+.who-picked { display: flex; align-items: center; gap: 12px; }
+.who-picked h2 { margin: 0; }

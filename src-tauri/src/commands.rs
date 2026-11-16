@@ -38,6 +38,7 @@ pub struct Inner {
     /// Wrong-PIN lockout shared by every browser: rotating terminal ids does
     /// not get more guesses, and it never locks out the main till.
     network_throttle: LoginThrottle,
+    local_throttle: LoginThrottle,
 }
 
 pub struct App {
@@ -47,7 +48,7 @@ pub struct App {
 
 impl App {
     pub fn new(pos: Pos, backup_dir: PathBuf) -> App {
-        App { inner: Mutex::new(Inner { pos, logins: HashMap::new(), network_throttle: LoginThrottle::default() }), backup_dir }
+        App { inner: Mutex::new(Inner { pos, logins: HashMap::new(), network_throttle: LoginThrottle::default(), local_throttle: LoginThrottle::default() }), backup_dir }
     }
 
     pub fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -107,6 +108,8 @@ pub struct AppStatus {
     plan_height: i64,
     /// True in a browser (no updates, server controls or local backups UI).
     remote: bool,
+    /// Log in as soon as the picked user's PIN is complete (setting on).
+    auto_pin_on: bool,
     /// Log in as soon as this many digits are typed (no OK needed).
     auto_pin: Option<usize>,
 }
@@ -310,7 +313,14 @@ commands! {
             plan_height: PLAN_HEIGHT,
             remote: t != LOCAL,
             auto_pin: g.pos.auto_login_length()?,
+            auto_pin_on: g.pos.pin_auto_login()?,
         })
+    }
+
+    /// Who can log in, for the login screen (pick a name, then the PIN).
+    fn login_users(app, t) -> Vec<LoginUser> {
+        let _ = t;
+        app.lock().pos.login_users()
     }
 
     fn setup_admin(app, t, name: String, pin: String) -> Session {
@@ -320,10 +330,18 @@ commands! {
         Ok(s)
     }
 
-    fn login(app, t, pin: String) -> Session {
+    /// `user_id`: the name picked on the login screen (PINs may be shared).
+    fn login(app, t, pin: String, user_id: Option<i64>) -> Session {
         let mut g = app.lock();
         let inner = &mut *g;
-        let s = if t == LOCAL { inner.pos.login(&pin)? } else { inner.pos.login_with(&pin, &mut inner.network_throttle)? };
+        let s = if t == LOCAL {
+            let mut throttle = std::mem::take(&mut inner.local_throttle);
+            let r = inner.pos.login_as(user_id, &pin, &mut throttle);
+            inner.local_throttle = throttle;
+            r?
+        } else {
+            inner.pos.login_as(user_id, &pin, &mut inner.network_throttle)?
+        };
         g.sign_in(t, &s);
         Ok(s)
     }

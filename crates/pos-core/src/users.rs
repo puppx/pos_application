@@ -1,7 +1,7 @@
 use rusqlite::{params, OptionalExtension, Row};
 use serde::Serialize;
 
-use crate::error::{invalid, map_unique};
+use crate::error::invalid;
 use crate::{Permission, Pos, PosError, Result, Role, Session};
 
 #[derive(Debug, Clone, Serialize)]
@@ -14,7 +14,6 @@ pub struct User {
     pub last_login_at: Option<i64>,
 }
 
-const PIN_TAKEN: &str = "that PIN is already in use, choose another";
 const COLS: &str = "id, name, role, active, created_at, last_login_at";
 
 fn user_from_row(r: &Row) -> rusqlite::Result<User> {
@@ -66,8 +65,7 @@ impl Pos {
             .execute(
                 "INSERT INTO users (name, role, pin_hash, pin_len) VALUES (?1, ?2, ?3, ?4)",
                 params![name, role.as_str(), hash, pin.len()],
-            )
-            .map_err(|e| map_unique(e, PIN_TAKEN))?;
+            )?;
         let id = self.conn.last_insert_rowid();
         self.audit(Some(s.user_id), "user.create", &format!("{id} {name} {}", role.as_str()))?;
         self.get_user(s, id)
@@ -114,8 +112,7 @@ impl Pos {
         let hash = self.hash_pin(new_pin)?;
         let changed = self
             .conn
-            .execute("UPDATE users SET pin_hash = ?2, pin_len = ?3 WHERE id = ?1", params![id, hash, new_pin.len()])
-            .map_err(|e| map_unique(e, PIN_TAKEN))?;
+            .execute("UPDATE users SET pin_hash = ?2, pin_len = ?3 WHERE id = ?1", params![id, hash, new_pin.len()])?;
         if changed == 0 {
             return Err(PosError::NotFound);
         }

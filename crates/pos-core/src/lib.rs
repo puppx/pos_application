@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
-pub use auth::LoginThrottle;
+pub use auth::{LoginThrottle, LoginUser};
 pub use channels::{Channel, ChannelInput};
 pub use dayclose::{BusinessDay, DayClose};
 pub use customers::{normalize_postcode, phone_digits, Customer, CustomerInput};
@@ -91,6 +91,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0021_kitchen_screen.sql"),
     include_str!("migrations/0022_manager_role.sql"),
     include_str!("migrations/0023_bill_printed.sql"),
+    include_str!("migrations/0024_shared_pins.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 

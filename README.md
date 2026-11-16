@@ -269,7 +269,7 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 ## Users and security
 
 - On first launch the app asks you to create the first **admin** (name and PIN).
-- PINs are 4–8 digits and identify the user, so each PIN must be unique.
+- To log in, tap your name, then type your PIN (4–8 digits). Two people may use the same PIN. On a keyboard a PIN can still be typed straight away when nobody else uses it. When a shared PIN approves something (e.g. cancelling an order), it counts as the person with the fewest rights.
 - PINs are stored as Argon2id hashes with a per-install salt, never in plain text.
 - After 5 wrong PINs in a row the terminal locks for 30 s. The lock doubles with each further failure, up to 15 min. Devices using the local server share one lock of their own, so wrong PINs typed on the network never lock out the main till.
 - Permissions are checked in Rust on every command, and the user is re-checked against the database each time. A disabled or demoted user loses access immediately.

@@ -110,18 +110,26 @@ impl Pos {
     /// e.g. one shared by every browser on the network, so wrong PINs typed
     /// there cannot lock out the main till (and vice versa).
     pub fn login_with(&mut self, pin: &str, throttle: &mut LoginThrottle) -> Result<Session> {
+        self.login_as(None, pin, throttle)
+    }
+
+    /// Log in as the user picked on the login screen (`user_id`), checking
+    /// their PIN; with no user picked the PIN alone must name one person
+    /// (two people may share a PIN, so then they must pick their name).
+    pub fn login_as(&mut self, user_id: Option<i64>, pin: &str, throttle: &mut LoginThrottle) -> Result<Session> {
         throttle.check(Instant::now())?;
-        let found = match self.hash_pin(pin) {
+        let found: Vec<(i64, String, String)> = match self.hash_pin(pin) {
             Ok(hash) => self
                 .conn
-                .prepare_cached("SELECT id, name, role FROM users WHERE pin_hash = ?1 AND active = 1")?
-                .query_row([hash], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-                })
-                .optional()?,
-            Err(_) => None,
+                .prepare_cached("SELECT id, name, role FROM users WHERE pin_hash = ?1 AND active = 1 AND (?2 IS NULL OR id = ?2)")?
+                .query_map(params![hash, user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?,
+            Err(_) => Vec::new(),
         };
-        let Some((user_id, name, role)) = found else {
+        if found.len() > 1 {
+            return Err(PosError::Validation("tap your name first: more than one person uses that PIN".into()));
+        }
+        let Some((user_id, name, role)) = found.into_iter().next() else {
             throttle.record_failure(Instant::now());
             self.audit(None, "login.failed", "")?;
             return Err(PosError::InvalidPin);
@@ -137,12 +145,17 @@ impl Pos {
 
     /// Who a PIN belongs to, to approve one action (e.g. cancelling an order)
     /// without logging them in. Wrong PINs count towards the lock-out.
+    /// When people share the PIN, it counts as the one allowed the least,
+    /// so a shared PIN never approves more than every owner could.
     pub fn pin_owner(&mut self, pin: &str) -> Result<Session> {
         self.throttle.check(Instant::now())?;
         let found = match self.hash_pin(pin) {
             Ok(hash) => self
                 .conn
-                .prepare_cached("SELECT id, name, role FROM users WHERE pin_hash = ?1 AND active = 1")?
+                .prepare_cached(
+                    "SELECT id, name, role FROM users WHERE pin_hash = ?1 AND active = 1
+                     ORDER BY CASE role WHEN 'staff' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, id LIMIT 1",
+                )?
                 .query_row([hash], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
                 .optional()?,
             Err(_) => None,
@@ -155,6 +168,22 @@ impl Pos {
         self.throttle.record_success();
         let role = Role::parse(&role).ok_or_else(|| PosError::Internal("bad role".into()))?;
         Ok(Session { user_id, name, role })
+    }
+
+    /// The people who can log in, for the login screen (name first, then
+    /// PIN). `pin_len` lets the screen log in as soon as the PIN is typed.
+    pub fn login_users(&self) -> Result<Vec<LoginUser>> {
+        let mut stmt = self.conn.prepare_cached("SELECT id, name, role, pin_len FROM users WHERE active = 1 ORDER BY name COLLATE NOCASE")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(LoginUser { id: r.get(0)?, name: r.get(1)?, role: Role::parse(&r.get::<_, String>(2)?).unwrap_or(Role::Staff), pin_len: r.get(3)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Log in without pressing OK once the PIN is complete (setting
+    /// `pin_auto_login`, on unless "0").
+    pub fn pin_auto_login(&self) -> Result<bool> {
+        Ok(self.setting("pin_auto_login")?.as_deref() != Some("0"))
     }
 
     /// How many digits make a PIN, for logging in without pressing OK: the
@@ -189,6 +218,16 @@ impl Pos {
         let role = Role::parse(&role).ok_or_else(|| PosError::Internal("bad role".into()))?;
         Ok(Session { user_id: s.user_id, name, role })
     }
+}
+
+/// Someone on the login screen.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LoginUser {
+    pub id: i64,
+    pub name: String,
+    pub role: Role,
+    /// Digits in their PIN, once they have logged in once.
+    pub pin_len: Option<i64>,
 }
 
 #[cfg(test)]

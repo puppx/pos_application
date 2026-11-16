@@ -295,11 +295,17 @@ function renderSetup() {
   name.focus();
 }
 
+/// Log in: tap your name, then type your PIN (two people may share a PIN).
+/// Typing a PIN straight away on a keyboard still works when it is unique.
 function renderLogin() {
   let pin = '';
+  let user = null;
+  let users = [];
+  let autoOn = true;
   const dots = h('div', { class: 'pindots' });
+  const main = h('div', { class: 'lock-stack' });
   const show = (err = false) => {
-    setKids(dots, ...Array.from({ length: Math.max(4, pin.length) }, (_, i) => h('span', { class: i < pin.length ? 'on' : '' })));
+    setKids(dots, ...Array.from({ length: Math.max(user?.pin_len ?? 4, pin.length) }, (_, i) => h('span', { class: i < pin.length ? 'on' : '' })));
     dots.classList.toggle('shake', err);
   };
   const submit = act(async () => {
@@ -307,42 +313,67 @@ function renderLogin() {
     pin = '';
     show();
     try {
-      state.session = await call('login', { pin: p });
+      state.session = await call('login', { pin: p, userId: user?.id ?? null });
     } catch (e) {
       show(true);
       throw e;
     }
+    try { localStorage.setItem('pos.lastUser', String(state.session.user_id)); } catch {}
     document.removeEventListener('keydown', onKey);
     renderShell();
   });
-  // Log in as soon as a full PIN is typed, when Settings allow it.
-  let autoLen = null;
-  invoke('app_status').then((st) => (autoLen = st.auto_pin)).catch(() => {});
   const press = (k) => {
     if (k === 'C') pin = '';
     else if (k === 'OK') return submit();
     else if (pin.length < 8) pin += k;
     show();
-    if (autoLen && pin.length === autoLen) submit();
+    // Log in as soon as the picked person's PIN is complete, when Settings allow it.
+    if (autoOn && user?.pin_len && pin.length === user.pin_len) submit();
   };
   const onKey = (e) => {
-    if (/^\d$/.test(e.key)) press(e.key);
+    if (/^\d$/.test(e.key)) { if (!user && users.length) pinStep(null); press(e.key); }
     else if (e.key === 'Backspace') { pin = pin.slice(0, -1); show(); }
     else if (e.key === 'Enter') press('OK');
-    else if (e.key === 'Escape') press('C');
+    else if (e.key === 'Escape') { if (pin) press('C'); else if (users.length) pickStep(); }
   };
   document.removeEventListener('keydown', state.pinKeys);
   state.pinKeys = onKey;
   document.addEventListener('keydown', onKey);
-  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'OK'];
-  show();
-  lockScreen(h('div', { class: 'lock-stack' },
-    h('div', { class: 'lock-card' },
-      h('h2', {}, 'Enter your PIN'), dots,
-      h('div', { class: 'pinpad' }, keys.map((k) =>
-        h('button', { class: k === 'OK' ? 'go' : k === 'C' ? 'ghost' : '', onclick: () => press(k) }, k)))),
-    // Desktop app only: browsers on other devices just close their tab.
-    TAURI && !state.remote && confirmBtn('Close POS', 'Tap again to close', async () => { await TAURI.invoke('quit_app'); }, 'quit')));
+  const closeBtn = () => TAURI && !state.remote && confirmBtn('Close POS', 'Tap again to close', async () => { await TAURI.invoke('quit_app'); }, 'quit');
+
+  function pickStep() {
+    user = null; pin = '';
+    let last = null;
+    try { last = Number(localStorage.getItem('pos.lastUser')); } catch {}
+    setKids(main,
+      h('div', { class: 'lock-card who-card' },
+        h('h2', {}, 'Who are you?'),
+        h('div', { class: 'who-grid' }, users.map((u) => h('button', { class: `who ${u.id === last ? 'last' : ''}`, onclick: () => pinStep(u) },
+          h('span', { class: 'avatar' }, initials(u.name)), h('strong', {}, u.name),
+          h('small', {}, ROLE_LABEL[u.role] ?? ''))))),
+      closeBtn());
+  }
+  function pinStep(u) {
+    user = u; pin = '';
+    const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'OK'];
+    show();
+    setKids(main,
+      h('div', { class: 'lock-card' },
+        u ? h('div', { class: 'who-picked' },
+          h('span', { class: 'avatar' }, initials(u.name)), h('h2', {}, u.name)) : h('h2', {}, 'Enter your PIN'),
+        dots,
+        h('div', { class: 'pinpad' }, keys.map((k) =>
+          h('button', { class: k === 'OK' ? 'go' : k === 'C' ? 'ghost' : '', onclick: () => press(k) }, k))),
+        users.length > 0 && h('button', { class: 'ghost', onclick: pickStep }, icon('back', 18), 'Not you? Pick another name')),
+      closeBtn());
+  }
+  lockScreen(main);
+  invoke('app_status').then((st) => (autoOn = st.auto_pin_on !== false)).catch(() => {});
+  invoke('login_users').then((list) => {
+    users = list;
+    if (users.length) pickStep(); else pinStep(null);
+  }).catch(() => pinStep(null));
+  pinStep(null);
 }
 
 // ---------- shell ----------

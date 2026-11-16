@@ -117,3 +117,33 @@ fn default_tax_fills_items_left_at_zero() {
     assert_eq!(pos.untaxed_items(&s).unwrap(), 0);
     assert_eq!(pos.get_order(&s, o.id).unwrap().items[0].tax_rate_bp, 0);
 }
+
+#[test]
+fn sub_categories_one_level_and_kept_in_backups() {
+    let mut pos = Pos::open_in_memory().unwrap();
+    let s = pos.setup_first_admin("Owner", "1111").unwrap();
+    let food = pos.create_category(&s, "Food", None, 1).unwrap();
+    let noodles = pos.create_category(&s, "Noodles", None, 2).unwrap();
+    let soups = pos.create_category(&s, "Soups", None, 3).unwrap();
+    let n = pos.set_category_parent(&s, noodles.id, Some(food.id)).unwrap();
+    assert_eq!(n.parent_id, Some(food.id));
+    pos.set_category_parent(&s, soups.id, Some(food.id)).unwrap();
+    // One level: no sub under a sub, and a main with subs cannot move under another.
+    assert!(pos.set_category_parent(&s, soups.id, Some(noodles.id)).is_err());
+    let drinks = pos.create_category(&s, "Drinks", None, 4).unwrap();
+    assert!(pos.set_category_parent(&s, food.id, Some(drinks.id)).is_err());
+    assert!(pos.set_category_parent(&s, food.id, Some(food.id)).is_err());
+    // Kept in a menu backup and restored.
+    let backup = pos.export_menu(&s).unwrap();
+    pos.import_menu(&s, &backup).unwrap();
+    let cats = pos.list_categories(&s, false).unwrap();
+    let id = |n: &str| cats.iter().find(|c| c.name == n).unwrap().id;
+    let parent = |n: &str| cats.iter().find(|c| c.name == n).unwrap().parent_id;
+    assert_eq!((parent("Noodles"), parent("Soups"), parent("Food")), (Some(id("Food")), Some(id("Food")), None));
+    // Deleting the main category makes its subs main categories.
+    pos.delete_category(&s, id("Food")).unwrap();
+    assert!(pos.list_categories(&s, false).unwrap().iter().all(|c| c.parent_id.is_none()));
+    // Back to a main category.
+    let soups = pos.list_categories(&s, false).unwrap().into_iter().find(|c| c.name == "Soups").unwrap();
+    assert_eq!(pos.set_category_parent(&s, soups.id, None).unwrap().parent_id, None);
+}

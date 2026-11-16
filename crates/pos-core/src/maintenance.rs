@@ -75,6 +75,9 @@ pub struct MenuCategory {
     /// Desserts (v0.10.5+): items here get their own DESSERTS ticket.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dessert: bool,
+    /// The main category's `key` in this file, for a sub-category (v0.11.5+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +229,7 @@ fn clear_menu(tx: &Transaction) -> Result<usize> {
              AND id NOT IN (SELECT product_id FROM stock_movements)
              AND id NOT IN (SELECT product_id FROM product_variants);
          UPDATE products SET active = 0, deleted = 1, sku = NULL, barcode = NULL, category_id = NULL, updated_at = unixepoch();
+         UPDATE categories SET parent_id = NULL;
          DELETE FROM categories;
          DELETE FROM options WHERE id NOT IN (SELECT option_id FROM order_item_options);
          UPDATE options SET active = 0;
@@ -241,7 +245,7 @@ impl Pos {
         s.require(Permission::ManageMenu)?;
         let categories = self
             .conn
-            .prepare("SELECT c.id, c.name, c.color, c.sort_order, c.tax_rate_bp, c.starter, c.name_alt, c.prep, t.name, c.drink, c.dessert FROM categories c LEFT JOIN teams t ON t.id = c.team_id AND t.active = 1 WHERE c.active = 1 ORDER BY c.sort_order, c.name")?
+            .prepare("SELECT c.id, c.name, c.color, c.sort_order, c.tax_rate_bp, c.starter, c.name_alt, c.prep, t.name, c.drink, c.dessert, c.parent_id FROM categories c LEFT JOIN teams t ON t.id = c.team_id AND t.active = 1 WHERE c.active = 1 ORDER BY c.sort_order, c.name")?
             .query_map([], |r| {
                 Ok(MenuCategory {
                     key: r.get(0)?,
@@ -255,6 +259,7 @@ impl Pos {
                     team: r.get(8)?,
                     drink: r.get(9)?,
                     dessert: r.get(10)?,
+                    parent: r.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -408,6 +413,14 @@ impl Pos {
             )
             .map_err(|e| crate::error::map_unique(e, &format!("the category \"{name}\" appears twice")))?;
             cats.insert(c.key, tx.last_insert_rowid());
+        }
+        // Sub-categories, once every category exists.
+        for c in &backup.categories {
+            if let (Some(p), Some(&id)) = (c.parent, cats.get(&c.key)) {
+                if let Some(&parent) = cats.get(&p).filter(|&&pid| pid != id) {
+                    tx.execute("UPDATE categories SET parent_id = ?2 WHERE id = ?1", params![id, parent])?;
+                }
+            }
         }
         let mut groups = HashMap::new();
         for (i, g) in backup.option_groups.iter().enumerate() {

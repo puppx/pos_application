@@ -763,18 +763,38 @@ async function renderOrder() {
     for (const el of [name, price, note]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(e); });
   } }, '+ Other dish');
   const grid = h('div', { class: 'items' });
+  const subBar = h('div', { class: 'subcats', hidden: true });
   const picker = h('div', { class: 'stack picker', hidden: true });
   const catColor = Object.fromEntries(state.cats.map((c) => [c.id, c.color]));
   const drawMenu = () => {
+    // Main categories on the left; a main category's sub-categories as chips above the items.
+    const known = new Set(state.cats.map((c) => c.id));
+    const mains = state.cats.filter((c) => !c.parent_id || !known.has(c.parent_id));
+    const subsOf = (id) => state.cats.filter((c) => c.parent_id === id);
+    if (state.catId != null && !mains.some((c) => c.id === state.catId)) {
+      // A sub-category picked before: open its main category on it.
+      const sub = state.cats.find((c) => c.id === state.catId);
+      state.subId = sub?.id ?? null;
+      state.catId = sub?.parent_id ?? null;
+    }
     setKids(cats, 
-      h('button', { class: state.catId == null ? 'on' : '', style: catStyle('#5c574a'), onclick: () => { state.catId = null; search.value = ''; drawMenu(); } },
+      h('button', { class: state.catId == null ? 'on' : '', style: catStyle('#5c574a'), onclick: () => { state.catId = null; state.subId = null; search.value = ''; drawMenu(); } },
         h('span', { class: 'dot' }), 'All items'),
-      ...state.cats.map((c) => h('button', {
+      ...mains.map((c) => h('button', {
         class: state.catId === c.id ? 'on' : '', style: catStyle(c.color),
-        onclick: () => { state.catId = c.id; search.value = ''; closePicker(); drawMenu(); },
-      }, h('span', { class: 'dot' }), c.name)));
+        onclick: () => { state.catId = c.id; state.subId = null; search.value = ''; closePicker(); drawMenu(); },
+      }, h('span', { class: 'dot' }), c.name, subsOf(c.id).length > 0 && h('span', { class: 'has-subs' }, '›'))));
+    const subs = state.catId != null ? subsOf(state.catId) : [];
+    if (state.subId != null && !subs.some((c) => c.id === state.subId)) state.subId = null;
     const q = search.value.trim().toLowerCase();
-    const list = state.menu.filter((p) => q ? matches(p, q) : state.catId == null || p.category_id === state.catId);
+    subBar.hidden = q !== '' || !subs.length;
+    const mainCat = state.cats.find((c) => c.id === state.catId);
+    setKids(subBar, subs.length > 0 && [
+      h('button', { class: state.subId == null ? 'on' : '', style: catStyle(mainCat?.color), onclick: () => { state.subId = null; drawMenu(); } }, `All ${mainCat?.name ?? ''}`),
+      ...subs.map((c) => h('button', { class: state.subId === c.id ? 'on' : '', style: catStyle(c.color || mainCat?.color), onclick: () => { state.subId = c.id; drawMenu(); } }, c.name)),
+    ]);
+    const shown = state.catId == null ? null : new Set(state.subId != null ? [state.subId] : [state.catId, ...subs.map((c) => c.id)]);
+    const list = state.menu.filter((p) => q ? matches(p, q) : shown == null || shown.has(p.category_id));
     soldBtn.classList.toggle('on', soldMode);
     soldBtn.textContent = soldMode ? 'Done' : 'Sold out';
     grid.classList.toggle('sold-mode', soldMode);
@@ -1310,7 +1330,7 @@ async function renderOrder() {
   call('menu').then((m) => { state.menu = m; drawMenu(); }).catch(() => {});
   layout = h('div', { class: 'order' },
     h('div', { class: 'cats-col' }, cats),
-    h('div', { class: 'menu' }, h('div', { class: 'row nowrap menu-top' }, h('div', { class: 'searchbox' }, icon('search', 20), search), otherBtn, soldBtn), grid, picker),
+    h('div', { class: 'menu' }, h('div', { class: 'row nowrap menu-top' }, h('div', { class: 'searchbox' }, icon('search', 20), search), otherBtn, soldBtn), subBar, grid, picker),
     h('div', { class: 'ticket' },
       head, lines, extra,
       h('div', { class: 'ticket-foot' },
@@ -1839,6 +1859,10 @@ async function renderMenuAdmin() {
   for (const v of allVariants) (variantsOf[v.product_id] ??= []).push(v);
   const activeGroups = groups.filter((g) => g.active);
   const catById = Object.fromEntries(cats.map((c) => [c.id, c]));
+  // Main categories, each followed by its sub-categories (one level).
+  const isMain = (c) => !c.parent_id || !catById[c.parent_id];
+  const catTree = cats.filter(isMain).flatMap((m) => [m, ...cats.filter((c) => c.parent_id === m.id)]);
+  const catLabel = (c) => (isMain(c) ? c.name : `${catById[c.parent_id].name} › ${c.name}`);
   // What a new item in category `id` starts with.
   const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep, team: catById[id]?.team_id ?? null, drink: !!catById[id]?.drink, dessert: !!catById[id]?.dessert });
   const form = popupHost();
@@ -1944,6 +1968,13 @@ async function renderMenuAdmin() {
     const dessert = h('input', { type: 'checkbox', checked: c ? c.dessert : /dessert|sweet|ของหวาน/i.test(c?.name ?? '') });
     const team = teamSelect(c?.team_id, 'No team');
     const moveItems = h('input', { type: 'checkbox', checked: true });
+    // Under a main category (a sub-category), or a main category itself.
+    const hasSubs = !!c && cats.some((x) => x.parent_id === c.id);
+    const parent = h('select', { disabled: hasSubs, title: hasSubs ? 'It has sub-categories, so it stays a main category' : '' },
+      h('option', { value: '' }, '— None: a main category —'),
+      cats.filter((x) => isMain(x) && x.active && x.id !== c?.id).map((x) => h('option', { value: x.id }, x.name)));
+    parent.value = c?.parent_id ?? (state.newSubOf ?? '');
+    state.newSubOf = null;
     const save = act(async () => {
       fieldErr(name); fieldErr(tax);
       if (!name.value.trim()) return fieldErr(name, 'Type a name');
@@ -1961,6 +1992,8 @@ async function renderMenuAdmin() {
       // Drinks: the items already here follow the category.
       if (drink.checked !== !!c?.drink) await call('set_category_drink', { id: saved.id, drink: drink.checked, moveItems: true });
       if (dessert.checked !== !!c?.dessert) await call('set_category_dessert', { id: saved.id, dessert: dessert.checked, moveItems: true });
+      const parentId = parent.value ? Number(parent.value) : null;
+      if (parentId !== (c?.parent_id ?? null)) await call('set_category_parent', { id: saved.id, parentId });
       const teamId = team.value ? Number(team.value) : null;
       if (teamId !== (c?.team_id ?? null) || (teamId != null && moveItems.checked)) {
         await call('set_category_team', { id: saved.id, teamId, moveItems: moveItems.checked });
@@ -1979,6 +2012,10 @@ async function renderMenuAdmin() {
         h('label', { class: 'check' }, prep, ' Items here are prepared ahead'),
         h('label', { class: 'check', title: 'Sent straight away and printed on their own DRINKS ticket' }, drink, ' Drinks (own ticket)'),
         h('label', { class: 'check', title: 'Printed on their own DESSERTS ticket' }, dessert, ' Desserts (own ticket)')),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Main category', parent),
+        h('span', { class: 'muted small' }, hasSubs ? 'It has sub-categories, so it stays a main category.'
+          : 'Pick one to make this a sub-category: on the order screen it shows as a button after you tap the main category.'),
+        c && isMain(c) && h('button', { onclick: () => { state.newSubOf = c.id; editCategory(null); } }, '+ Sub-category here')),
       teams.length > 0 && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Kitchen team', team),
         h('label', { class: 'check' }, moveItems, ' Also move the items already here to this team'),
         h('span', { class: 'muted small' }, 'Each team gets its own ticket with its name as a big header.')),
@@ -2045,7 +2082,7 @@ async function renderMenuAdmin() {
     const f = {
       name: h('input', { value: p?.name ?? '', placeholder: 'Item name', 'data-f': 'name' }),
       alt: h('input', { value: p?.name_alt ?? '', placeholder: 'Thai name (optional), e.g. ผัดไทย', lang: 'th', 'data-f': 'alt' }),
-      cat: h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name))),
+      cat: h('select', {}, h('option', { value: '' }, 'No category'), catTree.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, catLabel(c)))),
       price: h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', style: 'width:110px', 'data-f': 'price' }),
       tax: h('input', { value: pct(p ? p.tax_rate_bp : d0.tax), inputmode: 'decimal', style: 'width:80px', 'data-f': 'tax' }),
       cost: h('input', { value: p ? money(p.cost_cents) : '0', inputmode: 'decimal', style: 'width:100px', 'data-f': 'cost' }),
@@ -2466,19 +2503,20 @@ async function renderMenuAdmin() {
   // ---- 8: category tabs + drag to reorder categories ----
   const drawTabs = () => setKids(tabs,
     h('button', { class: state.menuTab === 'all' ? 'on' : '', onclick: () => { state.menuTab = 'all'; drawTabs(); loadProducts(); } }, 'All'),
-    cats.filter((c) => c.active).map((c) => h('button', { class: state.menuTab === c.id ? 'on' : '', style: catStyle(c.color),
-      onclick: () => { state.menuTab = c.id; search.value = ''; drawTabs(); loadProducts(); } }, h('span', { class: 'dot' }), c.name)),
+    catTree.filter((c) => c.active).map((c) => h('button', { class: `${state.menuTab === c.id ? 'on' : ''} ${isMain(c) ? '' : 'sub-tab'}`, style: catStyle(c.color),
+      onclick: () => { state.menuTab = c.id; search.value = ''; drawTabs(); loadProducts(); } }, h('span', { class: 'dot' }), isMain(c) ? c.name : `↳ ${c.name}`)),
     h('button', { class: state.menuTab === 'none' ? 'on' : '', onclick: () => { state.menuTab = 'none'; drawTabs(); loadProducts(); } }, 'No category'));
   drawTabs();
   let searchTimer;
   search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadProducts, 150); });
   showInactive.onchange = loadProducts;
 
-  const catChips = h('div', { class: 'row cat-chips' }, cats.map((c) => h('button', {
+  const catChips = h('div', { class: 'row cat-chips' }, catTree.map((c) => h('button', {
     'data-id': c.id, style: `border-left:6px solid ${c.color || '#d9dce1'}${c.active ? '' : ';opacity:.5'}`,
     onclick: (e) => { if (!e.target.closest('.grip') && !e.currentTarget.dataset.dragged) editCategory(c); },
     title: [c.tax_rate_bp != null ? `tax ${pct(c.tax_rate_bp)}%` : '', c.starter ? 'starters' : ''].filter(Boolean).join(' · '),
-  }, h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'), c.name, c.starter ? h('small', { class: 'muted' }, ' starters') : '')));
+  }, h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'), isMain(c) ? c.name : h('span', {}, h('span', { class: 'muted' }, '↳ '), c.name),
+    c.starter ? h('small', { class: 'muted' }, ' starters') : '')));
   sortable(catChips, { item: 'button[data-id]', handle: '.grip', axis: 'x', onDrop: act(async (ids) => {
     await call('reorder_categories', { ids });
     state.menu = null;

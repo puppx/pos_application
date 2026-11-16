@@ -990,6 +990,11 @@ commands! {
         app.with_session(t, |pos, s| pos.delete_product(s, id))
     }
 
+    /// Make a category a sub-category of `parent_id` (or a main one: null).
+    fn set_category_parent(app, t, id: i64, parent_id: Option<i64>) -> Category {
+        app.with_session(t, |pos, s| pos.set_category_parent(s, id, parent_id))
+    }
+
     fn delete_category(app, t, id: i64) -> () {
         app.with_session(t, |pos, s| pos.delete_category(s, id))
     }

@@ -188,7 +188,7 @@ fn upgrades_a_v0_1_0_database() {
     assert_eq!(pos.setting("store_name").unwrap().as_deref(), Some("Old Shop"));
     let conn = rusqlite::Connection::open(&path).unwrap();
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     let (name, channel): (String, Option<i64>) = conn
         .query_row("SELECT customer_name, channel_id FROM orders WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();
@@ -223,6 +223,7 @@ fn old_paid_orders_get_their_payment_on_upgrade() {
             "DROP TABLE payments; DROP TABLE cash_moves; DROP TABLE shifts;
              ALTER TABLE orders DROP COLUMN tip_cents;
              ALTER TABLE orders DROP COLUMN bill_printed_at;
+             ALTER TABLE categories DROP COLUMN parent_id;
              ALTER TABLE products DROP COLUMN sold_out;
              ALTER TABLE order_items DROP COLUMN kitchen_done_at;
              PRAGMA user_version = 17;",

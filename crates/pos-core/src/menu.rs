@@ -26,6 +26,8 @@ pub struct Category {
     pub drink: bool,
     /// New items here are desserts (see `set_category_dessert`).
     pub dessert: bool,
+    /// The main category this is a sub-category of; None = a main category.
+    pub parent_id: Option<i64>,
 }
 
 const NAME_TAKEN: &str = "a category with that name already exists";
@@ -44,6 +46,7 @@ fn category_from_row(r: &Row) -> rusqlite::Result<Category> {
         team_id: r.get(9)?,
         drink: r.get(10)?,
         dessert: r.get(11)?,
+        parent_id: r.get(12)?,
     })
 }
 
@@ -66,7 +69,7 @@ impl Pos {
     pub fn list_categories(&self, s: &Session, include_inactive: bool) -> Result<Vec<Category>> {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert FROM categories
+            "SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert, parent_id FROM categories
              WHERE ?1 OR active = 1 ORDER BY sort_order, name",
         )?;
         let rows = stmt.query_map([include_inactive], category_from_row)?;
@@ -114,7 +117,7 @@ impl Pos {
 
     fn get_category(&self, id: i64) -> Result<Category> {
         self.conn
-            .prepare_cached("SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert FROM categories WHERE id = ?1")?
+            .prepare_cached("SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert, parent_id FROM categories WHERE id = ?1")?
             .query_row([id], category_from_row)
             .optional()?
             .ok_or(PosError::NotFound)
@@ -133,6 +136,32 @@ impl Pos {
         Ok(())
     }
 
+    /// Put a category under a main category (a sub-category), or make it a
+    /// main category again (None). One level only: a main category with
+    /// sub-categories cannot go under another, and a sub-category cannot
+    /// have its own.
+    pub fn set_category_parent(&self, s: &Session, id: i64, parent: Option<i64>) -> Result<Category> {
+        s.require(Permission::ManageMenu)?;
+        self.get_category(id)?;
+        if let Some(p) = parent {
+            if p == id {
+                return invalid("a category cannot be under itself");
+            }
+            let main = self.get_category(p)?;
+            if main.parent_id.is_some() {
+                return invalid(format!("{} is a sub-category itself: choose a main category", main.name));
+            }
+            let has_subs: bool =
+                self.conn.query_row("SELECT EXISTS (SELECT 1 FROM categories WHERE parent_id = ?1)", [id], |r| r.get(0))?;
+            if has_subs {
+                return invalid("this category has sub-categories, so it cannot go under another one");
+            }
+        }
+        self.conn.execute("UPDATE categories SET parent_id = ?2 WHERE id = ?1", params![id, parent])?;
+        self.audit(Some(s.user_id), "category.parent", &format!("{id} {parent:?}"))?;
+        self.get_category(id)
+    }
+
     /// Delete a category; its items stay on the menu without a category.
     pub fn delete_category(&mut self, s: &Session, id: i64) -> Result<()> {
         s.require(Permission::ManageMenu)?;
@@ -143,6 +172,8 @@ impl Pos {
             .optional()?
             .ok_or(PosError::NotFound)?;
         tx.execute("UPDATE products SET category_id = NULL, updated_at = unixepoch() WHERE category_id = ?1", [id])?;
+        // Its sub-categories become main categories.
+        tx.execute("UPDATE categories SET parent_id = NULL WHERE parent_id = ?1", [id])?;
         tx.execute("DELETE FROM categories WHERE id = ?1", [id])?;
         tx.execute(
             "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'category.delete', ?2)",

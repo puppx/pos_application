@@ -125,6 +125,10 @@ A team is *where* a ticket prints; the Starter / Prep ticks on an item are still
 **Call mains again** prints just the table in huge white-on-black letters and "MAIN COURSE" under it, without the dishes (the mains are already in the kitchen).
 Manage → Kitchen printer → "Call mains again prints only the table" turns the dishes back on.
 
+### Sub-categories
+
+A category can sit under a main category (one level), e.g. **Food** › Burgers, Pizza, Sides. In Menu, tap a category and choose its **Main category** (or tap a main category, then **+ Sub-category here**). On the order screen the left column shows the main categories (with a ›); tapping one shows its sub-categories as buttons above the items, with **All …** for everything in it. Deleting a main category makes its sub-categories main categories again. Menu backups keep the sub-categories.
+
 ### Drinks
 
 Tick **Drink** on an item (Menu list, item editor) or **Drinks (own ticket)** on a category (its items follow; new items in it start as drinks).

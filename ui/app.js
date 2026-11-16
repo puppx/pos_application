@@ -348,9 +348,10 @@ function renderLogin() {
     setKids(main,
       h('div', { class: 'lock-card who-card' },
         h('h2', {}, 'Who are you?'),
-        h('div', { class: 'who-grid' }, users.map((u) => h('button', { class: `who ${u.id === last ? 'last' : ''}`, onclick: () => pinStep(u) },
+        h('div', { class: 'who-grid' }, users.map((u) => h('button', { class: `who-tile ${u.id === last ? 'last' : ''}`, onclick: () => pinStep(u) },
           h('span', { class: 'avatar' }, initials(u.name)), h('strong', {}, u.name),
-          h('small', {}, ROLE_LABEL[u.role] ?? ''))))),
+          h('small', {}, ROLE_LABEL[u.role] ?? ''),
+          u.id === last && h('span', { class: 'last-tag' }, 'Last here'))))),
       closeBtn());
   }
   function pinStep(u) {

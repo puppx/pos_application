@@ -739,10 +739,15 @@ button.danger-outline:hover { background: var(--danger-soft); }
 .who-card { width: min(640px, calc(100vw - 48px)); }
 .lock-main:has(.who-card) .lock-stack { width: min(640px, calc(100vw - 48px)); }
 .who-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; width: 100%; max-height: 60vh; overflow: auto; }
-.who { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 16px 8px; min-height: 120px; border-radius: 12px; white-space: normal; }
-.who .avatar, .who-picked .avatar { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: #fff; font-size: 20px; font-weight: 700; }
-.who strong { font-size: 17px; line-height: 1.2; text-align: center; }
-.who small { color: var(--muted); font-weight: 500; }
-.who.last { border-color: var(--brand); box-shadow: var(--focus); }
+.who-tile { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 8px 16px; min-height: 130px;
+  border: 1px solid var(--line-2); border-radius: 12px; background: var(--surface); color: var(--ink); white-space: normal; }
+.who-tile:hover { border-color: var(--ink-2); background: var(--surface-2); }
+.who-tile .avatar, .who-picked .avatar { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: #fff; font-size: 20px; font-weight: 700; }
+.who-tile strong { font-size: 17px; line-height: 1.2; text-align: center; }
+.who-tile small { color: var(--muted); font-weight: 500; }
+/* The person who logged in last on this device: one calm highlight. */
+.who-tile.last { border: 2px solid var(--brand); background: var(--brand-soft); padding: 17px 7px 15px; }
+.who-tile.last .avatar { background: var(--brand); }
+.who-tile .last-tag { position: absolute; top: 6px; right: 6px; font-size: 11px; font-weight: 700; color: var(--brand); }
 .who-picked { display: flex; align-items: center; gap: 12px; }
 .who-picked h2 { margin: 0; }

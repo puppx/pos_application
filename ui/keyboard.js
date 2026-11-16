@@ -259,11 +259,22 @@
     const el = eligible(e.target);
     if (el) { if (S.el !== el || !S.visible) show(el); }
   }, true);
+  // A tap elsewhere closes it only once that tap is over: closing on the
+  // press would shrink the page under the finger, so the tap (e.g. on Save)
+  // would land on something else or nowhere and be lost.
+  let hideAfterTap = false;
   document.addEventListener('pointerdown', (e) => {
     if (!S.visible) return;
     if (e.target instanceof Element && (e.target.closest('#osk') || eligible(e.target) || e.target.closest('label'))) return;
-    hide();
+    hideAfterTap = true;
   }, true);
+  const finishTap = () => {
+    if (!hideAfterTap) return;
+    hideAfterTap = false;
+    setTimeout(hide, 0);
+  };
+  document.addEventListener('pointerup', finishTap, true);
+  document.addEventListener('pointercancel', finishTap, true);
   // Moving to another field with the keyboard still open (Tab, or a script).
   document.addEventListener('focusin', (e) => {
     if (!S.enabled || !S.visible) return;

@@ -14,6 +14,8 @@ use crate::variants::resolve_variant;
 use crate::{Permission, Pos, PosError, Result, Session};
 
 const MAX_QTY: i64 = 1_000;
+/// The hidden menu entry behind dishes typed on an order ("open items").
+pub const OPEN_ITEM_SKU: &str = "__open_item__";
 pub(crate) const MAX_ITEMS: i64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -868,6 +870,24 @@ impl Pos {
         variant_id: Option<i64>,
         option_ids: &[i64],
     ) -> Result<Order> {
+        self.add_item_as(s, order_id, product_id, qty, note, variant_id, option_ids, None)
+    }
+
+    /// [`Pos::add_item`] choosing the course: `starter` Some(false) orders a
+    /// starter dish as a main (and Some(true) any dish as a starter); None
+    /// keeps the menu's setting.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_item_as(
+        &mut self,
+        s: &Session,
+        order_id: i64,
+        product_id: i64,
+        qty: i64,
+        note: Option<&str>,
+        variant_id: Option<i64>,
+        option_ids: &[i64],
+        starter: Option<bool>,
+    ) -> Result<Order> {
         s.require(Permission::Sell)?;
         if !(1..=MAX_QTY).contains(&qty) {
             return invalid(format!("quantity must be between 1 and {MAX_QTY}"));
@@ -875,7 +895,7 @@ impl Pos {
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, base, rate, starter, alt, prep, sold_out): (String, i64, i64, bool, Option<String>, bool, bool) = tx
+        let (name, base, rate, starter_default, alt, prep, sold_out): (String, i64, i64, bool, Option<String>, bool, bool) = tx
             .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep, sold_out FROM products WHERE id = ?1 AND active = 1 AND is_set = 0")?
             .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
             .optional()?
@@ -883,6 +903,7 @@ impl Pos {
         if sold_out {
             return invalid(format!("{name} is sold out today"));
         }
+        let starter = starter.unwrap_or(starter_default);
         // A tax rate chosen for the whole order applies to new lines too.
         let order_tax: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
         let rate = order_tax.unwrap_or(rate);
@@ -913,10 +934,10 @@ impl Pos {
                     "SELECT id FROM order_items
                      WHERE order_id = ?1 AND product_id = ?2 AND sent_at IS NULL AND note IS NULL
                        AND parent_id IS NULL AND is_set = 0 AND discount_cents = 0 AND unit_price_cents = ?3 AND qty + ?4 <= ?5
-                       AND variant_id IS ?6
+                       AND variant_id IS ?6 AND starter = ?7
                      ORDER BY id DESC",
                 )?
-                .query_map(params![order_id, product_id, price, qty, MAX_QTY, variant_id], |r| r.get(0))?
+                .query_map(params![order_id, product_id, price, qty, MAX_QTY, variant_id, starter], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             for id in candidates {
                 if line_option_ids(&tx, id)? == wanted {
@@ -946,6 +967,83 @@ impl Pos {
                 ins.execute(params![item_id, o.option_id, o.group_name, o.name, o.price_cents, o.name_alt])?;
             }
         }
+        tx.commit()?;
+        self.get_order(s, order_id)
+    }
+
+    /// Make a line not yet sent a starter or a main course.
+    pub fn set_item_course(&mut self, s: &Session, item_id: i64, starter: bool) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        let order_id = self.order_of_item(item_id)?;
+        require_open(&self.conn, order_id)?;
+        let n = self.conn.execute(
+            "UPDATE order_items SET starter = ?2, held = 0 WHERE id = ?1 AND sent_at IS NULL AND parent_id IS NULL AND is_set = 0",
+            params![item_id, starter],
+        )?;
+        if n == 0 {
+            return invalid("only a dish not yet sent to the kitchen can change course");
+        }
+        self.get_order(s, order_id)
+    }
+
+    /// A dish that is not on the menu ("open item"): its name and price are
+    /// typed on the order. It is taxed at the menu's main rate (or the
+    /// order's rate) and prints on the general kitchen ticket.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_open_item(
+        &mut self,
+        s: &Session,
+        order_id: i64,
+        name: &str,
+        price_cents: i64,
+        qty: i64,
+        note: Option<&str>,
+        starter: bool,
+    ) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 60 {
+            return invalid("type the dish's name (up to 60 characters)");
+        }
+        if !(0..=10_000_000).contains(&price_cents) {
+            return invalid("enter the price");
+        }
+        if !(1..=MAX_QTY).contains(&qty) {
+            return invalid(format!("quantity must be between 1 and {MAX_QTY}"));
+        }
+        let note = opt_text(&note.map(str::to_string), 100, "note")?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        require_open(&tx, order_id)?;
+        let default_bp: i64 = tx
+            .query_row("SELECT value FROM settings WHERE key = 'default_tax_bp'", [], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        // One hidden menu entry stands behind every open item.
+        let product: i64 = match tx
+            .query_row("SELECT id FROM products WHERE sku = ?1", [OPEN_ITEM_SKU], |r| r.get(0))
+            .optional()?
+        {
+            Some(id) => id,
+            None => {
+                tx.execute(
+                    "INSERT INTO products (sku, name, price_cents, tax_rate_bp, active, set_only) VALUES (?1, 'Open item', 0, ?2, 1, 1)",
+                    params![OPEN_ITEM_SKU, default_bp],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        let order_tax: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+        let lines: i64 = tx.query_row("SELECT COUNT(*) FROM order_items WHERE order_id = ?1", [order_id], |r| r.get(0))?;
+        if lines >= MAX_ITEMS {
+            return invalid("this order has too many lines");
+        }
+        tx.execute(
+            "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, starter)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![order_id, product, name, price_cents, order_tax.unwrap_or(default_bp), qty, note, s.user_id, starter],
+        )?;
+        audit_tx(&tx, s.user_id, "order.open_item", &format!("order {order_id} {name} {price_cents}"))?;
         tx.commit()?;
         self.get_order(s, order_id)
     }

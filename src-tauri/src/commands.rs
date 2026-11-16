@@ -514,9 +514,20 @@ commands! {
         app.with_session(t, |pos, s| pos.move_order(s, id, table_id))
     }
 
-    fn add_item(app, t, order_id: i64, product_id: i64, qty: i64, note: Option<String>, variant_id: Option<i64>, option_ids: Option<Vec<i64>>) -> Order {
+    /// `starter`: order a starter as a main (false) or any dish as a starter
+    /// (true); left out = the menu's setting.
+    fn add_item(app, t, order_id: i64, product_id: i64, qty: i64, note: Option<String>, variant_id: Option<i64>, option_ids: Option<Vec<i64>>, starter: Option<bool>) -> Order {
         let option_ids = option_ids.unwrap_or_default();
-        app.with_session(t, |pos, s| pos.add_item(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids))
+        app.with_session(t, |pos, s| pos.add_item_as(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids, starter))
+    }
+
+    fn set_item_course(app, t, item_id: i64, starter: bool) -> Order {
+        app.with_session(t, |pos, s| pos.set_item_course(s, item_id, starter))
+    }
+
+    /// A dish not on the menu: name and price typed on the order.
+    fn add_open_item(app, t, order_id: i64, name: String, price_cents: i64, qty: Option<i64>, note: Option<String>, starter: Option<bool>) -> Order {
+        app.with_session(t, |pos, s| pos.add_open_item(s, order_id, &name, price_cents, qty.unwrap_or(1), note.as_deref(), starter.unwrap_or(false)))
     }
 
     /// A change to a dish already sent tells the kitchen: fewer or removed

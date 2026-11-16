@@ -71,6 +71,12 @@ Rust, so the UI can change without touching them.
 3. **Finish & Pay**, then Cash or Card. A table becomes free as soon as its order is paid.
 4. At closing time an admin uses **Reports → Close day & print summary**.
 
+**Starter or main course?** On a dine-in order, tapping a starter asks **Starter** or **Main course** (Manage → Orders → *Starter or main course* switches the question off). A dish not yet sent can be changed later: tap ✎ on it, then Starter or Main course.
+
+**A dish not on the menu:** tap **+ Other dish** above the menu, type its name and price (and how many, starter or main, a note). It is taxed at the main tax rate and prints on the kitchen ticket like any dish.
+
+**Copies of kitchen tickets (dine-in):** *Starters ticket copies* for starters sent first (or a table that orders only starters for now); *Mains ticket copies* for "Call mains" and for the first mains sent after the starters, also when the mains were ordered later; *Additional ticket copies* for more dishes after the mains (1 unless set).
+
 **Wrong dish sent?** Tap ✎ on it: **−** or **Remove** prints a **CANCELLED** ticket for the kitchen, a new note prints a **CHANGED** ticket, and **Print again** prints just that dish again. Then add the right dish and send it as usual.
 Staff can do this by default; Manage → Orders → **Staff can take off or reduce dishes already sent** keeps it to admins.
 

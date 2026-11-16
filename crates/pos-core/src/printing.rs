@@ -915,11 +915,17 @@ impl Pos {
             details.push(format!("NOTE: {n}"));
         }
         let waiting = o.items.iter().filter(|i| i.held && i.sent_at.is_none()).map(|i| i.qty).sum::<i64>();
+        // Dine-in: the first mains after the starters went alone are the main
+        // course, even when they were ordered later (not ADDITIONAL).
+        let mains = |i: &&OrderItem| !i.starter && !i.is_set;
+        let first_mains = o.order_type == OrderType::DineIn
+            && items.iter().filter(mains).any(|i| !self.is_drink(i.product_id))
+            && !o.items.iter().filter(mains).any(|i| i.sent_at.is_some() && !items.iter().any(|x| x.id == i.id) && !self.is_drink(i.product_id));
         let title = if reprint {
             "REPRINT"
         } else if first_round {
             "NEW ORDER"
-        } else if items.iter().any(|i| i.held) {
+        } else if items.iter().any(|i| i.held) || first_mains {
             "MAINS AWAY"
         } else {
             "ADDITIONAL"
@@ -1092,6 +1098,12 @@ impl Pos {
                 (n, None) => n.to_string(),
             }
         })
+    }
+
+    fn is_drink(&self, product_id: i64) -> bool {
+        self.conn
+            .query_row("SELECT drink FROM products WHERE id = ?1", [product_id], |r| r.get(0))
+            .unwrap_or(false)
     }
 
     /// `items` split into (drinks, everything else), looked up on the menu now.

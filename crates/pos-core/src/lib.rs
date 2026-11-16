@@ -49,7 +49,7 @@ pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInpu
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
 pub use printing::{system_printers, KitchenRoute, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
 pub use orders::{
-    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod,
+    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, OPEN_ITEM_SKU,
 };
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
@@ -145,7 +145,7 @@ impl Pos {
 
     pub fn set_setting(&self, s: &Session, key: &str, value: &str) -> Result<()> {
         // Managers may change the kitchen settings; the rest is for admins.
-        const KITCHEN: &[&str] = &["drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes"];
+        const KITCHEN: &[&str] = &["drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes", "starter_choice"];
         s.require(if KITCHEN.contains(&key) { Permission::KitchenSettings } else { Permission::ManageSettings })?;
         if key.starts_with('_') {
             return error::invalid("reserved setting key");

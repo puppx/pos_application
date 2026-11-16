@@ -252,8 +252,15 @@ fn starters_only_and_later_additions_use_their_own_copies() {
     pos.add_item(&s, o.id, m.soup.id, 1, None, None, &[]).unwrap();
     let sent = pos.send_to_kitchen(&s, o.id).unwrap();
     assert_eq!(pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap().parts.len(), 2);
-    // The mains come later: an ADDITIONAL ticket, one copy.
+    // The mains come later: the main course, with the mains copies (unset = Copies).
     pos.add_item(&s, o.id, m.burger.id, 1, None, None, &[]).unwrap();
+    let sent = pos.send_to_kitchen(&s, o.id).unwrap();
+    assert_eq!(pos.kitchen_ticket(&s, o.id, &sent, false).unwrap().title, "MAINS AWAY");
+    assert_eq!(pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap().parts.len(), 4);
+    pos.set_kitchen_printer(&s, &printer(4, Some(2), Some(3))).unwrap();
+    assert_eq!(pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap().parts.len(), 3);
+    // More after the mains: ADDITIONAL, one copy...
+    pos.add_item(&s, o.id, m.burger.id, 1, Some("extra"), None, &[]).unwrap();
     let sent = pos.send_to_kitchen(&s, o.id).unwrap();
     assert_eq!(pos.kitchen_ticket(&s, o.id, &sent, false).unwrap().title, "ADDITIONAL");
     assert_eq!(pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap().parts.len(), 1);
@@ -265,4 +272,44 @@ fn starters_only_and_later_additions_use_their_own_copies() {
     pos.add_item(&s, o2.id, m.burger.id, 1, None, None, &[]).unwrap();
     let sent = pos.send_to_kitchen(&s, o2.id).unwrap();
     assert_eq!(pos.kitchen_job(&s, o2.id, &sent, false).unwrap().unwrap().parts.len(), 4);
+}
+
+#[test]
+fn a_starter_can_be_ordered_as_a_main_and_change_course() {
+    let (mut pos, s, m, table) = setup();
+    let o = pos.open_order(&s, &dine_in(table)).unwrap();
+    // Soup as a starter and soup as a main: two lines, not merged.
+    pos.add_item_as(&s, o.id, m.soup.id, 1, None, None, &[], Some(true)).unwrap();
+    let o = pos.add_item_as(&s, o.id, m.soup.id, 1, None, None, &[], Some(false)).unwrap();
+    assert_eq!(o.items.len(), 2);
+    assert_eq!((o.items[0].starter, o.items[1].starter), (true, false));
+    // The starter goes first; the soup as a main waits with the mains.
+    let sent = pos.send_to_kitchen(&s, o.id).unwrap();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].starter);
+    // A dish not yet sent changes course; one already sent cannot.
+    let main_soup = pos.get_order(&s, o.id).unwrap().items[1].id;
+    let o = pos.set_item_course(&s, main_soup, true).unwrap();
+    assert!(o.items[1].starter && !o.items[1].held);
+    assert!(pos.set_item_course(&s, o.items[0].id, false).is_err());
+}
+
+#[test]
+fn a_dish_not_on_the_menu_can_be_added() {
+    let (mut pos, s, _m, table) = setup();
+    pos.set_setting(&s, "default_tax_bp", "1000").unwrap();
+    let o = pos.open_order(&s, &dine_in(table)).unwrap();
+    assert!(pos.add_open_item(&s, o.id, "  ", 100, 1, None, false).is_err());
+    let o = pos.add_open_item(&s, o.id, "Extra rice", 150, 2, Some("small bowl"), false).unwrap();
+    let it = &o.items[0];
+    assert_eq!((it.name.as_str(), it.unit_price_cents, it.qty, it.tax_rate_bp, it.note.as_deref()), ("Extra rice", 150, 2, 1000, Some("small bowl")));
+    assert_eq!(o.subtotal_cents, 300);
+    // Another one reuses the same hidden menu entry, which is not on the order screen.
+    let o = pos.add_open_item(&s, o.id, "Chilli sauce", 50, 1, None, false).unwrap();
+    assert_eq!(o.items[0].product_id, o.items[1].product_id);
+    assert!(!pos.menu(&s).unwrap().iter().any(|p| p.id == o.items[0].product_id));
+    // It prints on the kitchen ticket like any dish.
+    let sent = pos.send_to_kitchen(&s, o.id).unwrap();
+    let text: String = pos.kitchen_tickets(&s, o.id, &sent, false).unwrap().iter().map(|t| t.to_text(42)).collect();
+    assert!(text.contains("Extra rice") && text.contains("small bowl"), "{text}");
 }

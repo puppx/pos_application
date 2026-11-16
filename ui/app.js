@@ -652,6 +652,7 @@ async function loadMenu() {
       call('list_variants', { productId: null }), call('get_service_settings'),
       call('get_setting', { key: QUICK_NOTES_KEY }), call('get_setting', { key: 'default_tax_bp' }),
     ]);
+    state.starterChoice = (await call('get_setting', { key: 'starter_choice' }).catch(() => null)) !== '0';
     state.service = service;
     state.quickNotes = quickNotes(notes);
     state.defaultTax = Math.max(0, parseInt(tax ?? '0', 10) || 0);
@@ -701,6 +702,34 @@ async function renderOrder() {
     toast(p.sold_out ? `${p.name}: sold out today` : `${p.name}: back on sale`);
   });
   const cats = h('div', { class: 'cats' });
+  // A dish that is not on the menu: type its name and price.
+  const otherBtn = h('button', { class: 'sold-btn', title: 'Add a dish that is not on the menu', onclick: () => {
+    const name = h('input', { placeholder: 'Dish name, e.g. Extra rice', style: 'flex:1' });
+    const price = h('input', { inputmode: 'decimal', placeholder: '0.00', style: 'width:130px' });
+    const note = h('input', { placeholder: 'Note for the kitchen (optional)', style: 'flex:1' });
+    let qty = 1, course = false;
+    const qtyEl = h('span', { class: 'big' }, '1');
+    const courseRow = h('div', { class: 'seg' });
+    const drawCourse = () => setKids(courseRow, [[true, 'Starter'], [false, 'Main course']].map(([v, l]) =>
+      h('button', { class: course === v ? 'on' : '', onclick: () => { course = v; drawCourse(); } }, l)));
+    drawCourse();
+    const add = act(async () => {
+      if (!name.value.trim()) return toast('Type the dish name', true);
+      let cents;
+      try { cents = parseMoney(price.value || '0'); } catch { return toast('Enter a price like 2 or 2.50', true); }
+      order = await call('add_open_item', { orderId, name: name.value, priceCents: cents, qty, note: note.value.trim() || null, starter: course });
+      closeModal(); draw(); toast(`${name.value.trim()} added`);
+    });
+    showModal(h('h3', {}, 'Other dish (not on the menu)'),
+      h('div', { class: 'row' }, name), h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Price'), price,
+        h('span', { class: 'grow' }), h('span', { class: 'muted' }, 'Qty'),
+        h('div', { class: 'stepper' }, h('button', { onclick: () => { qty = Math.max(1, qty - 1); qtyEl.textContent = qty; } }, '−'), qtyEl,
+          h('button', { onclick: () => { qty = Math.min(99, qty + 1); qtyEl.textContent = qty; } }, '+'))),
+      order.order_type === 'dine_in' && courseRow,
+      h('div', { class: 'row' }, note),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: add }, 'Add to order'), h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Cancel')));
+    for (const el of [name, price, note]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(e); });
+  } }, '+ Other dish');
   const grid = h('div', { class: 'items' });
   const picker = h('div', { class: 'stack picker', hidden: true });
   const catColor = Object.fromEntries(state.cats.map((c) => [c.id, c.color]));
@@ -758,21 +787,35 @@ async function renderOrder() {
   const extra = h('div');
   let editing = null;
 
-  async function addItem(productId, optionIds = [], variantId = null) {
-    order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds });
+  // `course`: true = starter, false = main, null = as on the menu.
+  async function addItem(productId, optionIds = [], variantId = null, course = null) {
+    order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds, starter: course });
     draw();
   }
   // Tap on a menu item: add it straight away, or ask for its options first.
+  // A starter on a dine-in order first asks "Starter or Main?" (Settings → Orders).
   function choose(p) {
     return act(async () => {
       if (p.is_set) return openSetPicker(p);
       const groups = (state.itemGroups[p.id] || []).filter((g) => g.options.length);
       const variants = state.itemVariants[p.id] || [];
-      if (!groups.length && !variants.length) return addItem(p.id);
-      openPicker(p, groups, variants);
+      const next = async (course) => {
+        if (!groups.length && !variants.length) { await addItem(p.id, [], null, course); closePicker(); return; }
+        openPicker(p, groups, variants, course);
+      };
+      if (p.starter && order.order_type === 'dine_in' && state.starterChoice) {
+        setKids(picker, h('h3', {}, p.name), h('div', { class: 'muted' }, 'Serve it as:'),
+          h('div', { class: 'course-pick' },
+            h('button', { class: 'primary', onclick: act(() => next(true)) }, 'Starter', h('small', {}, 'goes first')),
+            h('button', { class: 'primary main', onclick: act(() => next(false)) }, 'Main course', h('small', {}, 'with the mains'))),
+          h('div', { class: 'row' }, h('button', { onclick: closePicker }, 'Cancel')));
+        [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
+        return;
+      }
+      await next(null);
     });
   }
-  function openPicker(p, groups, variants = []) {
+  function openPicker(p, groups, variants = [], course = null) {
     const chosen = new Map(groups.map((g) => [g.id, new Set()]));
     let variant = null;
     const body = h('div', { class: 'stack' });
@@ -807,14 +850,14 @@ async function renderOrder() {
       if (variants.length && !variant) return toast(`Choose which ${p.name}`, true);
       const missing = groups.find((g) => chosen.get(g.id).size < g.min_select);
       if (missing) return toast(`${missing.name}: ${groupRule(missing)}`, true);
-      await addItem(p.id, groups.flatMap((g) => [...chosen.get(g.id)]), variant?.id ?? null);
+      await addItem(p.id, groups.flatMap((g) => [...chosen.get(g.id)]), variant?.id ?? null, course);
       closePicker();
     });
     // With only choices (no option groups), one tap on a choice adds it.
     if (!groups.length) {
       setKids(picker, h('h3', {}, p.name),
         h('div', { class: 'opts' }, variants.map((v) => h('button', {
-          onclick: act(async () => { await addItem(p.id, [], v.id); closePicker(); }),
+          onclick: act(async () => { await addItem(p.id, [], v.id, course); closePicker(); }),
         }, v.name, h('small', {}, money(v.price_cents))))),
         h('div', { class: 'row' }, h('button', { onclick: closePicker }, 'Cancel')));
       [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
@@ -1012,16 +1055,25 @@ async function renderOrder() {
       };
       note.addEventListener('input', drawChips);
       drawChips();
+      const saveLine = h('button', { class: 'primary', onclick: act(async () => {
+        const newNote = note.value.trim() || null;
+        await setLine(it, { note: newNote, discount_cents: disc.value ? parseMoney(disc.value) : 0 });
+        editing = null; draw();
+        if (sent && newNote !== (it.note ?? null)) toast('Note changed · CHANGED ticket sent to the kitchen');
+        else if (newNote !== (it.note ?? null)) toast(newNote ? `Note saved: “${newNote}”` : 'Note removed');
+      }) }, 'Save');
+      // Enter (or Done on the on-screen keyboard) saves too.
+      for (const el of [note, disc]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveLine.click(); });
       return [row, h('tr', {}, h('td', { colspan: 4 },
         sent && h('div', { class: 'muted small sent-hint' }, 'Already in the kitchen. Fix it here: − or Remove prints a CANCELLED ticket, a new note prints a CHANGED ticket. ' +
           'Then add the right dish and send it as usual.'),
-        chips, h('div', { class: 'row' }, note, disc,
-        h('button', { class: 'primary', onclick: act(async () => {
-          const newNote = note.value.trim() || null;
-          await setLine(it, { note: newNote, discount_cents: disc.value ? parseMoney(disc.value) : 0 });
-          editing = null; draw();
-          if (sent && newNote !== (it.note ?? null)) toast('Note changed · CHANGED ticket sent to the kitchen');
-        }) }, 'Save'),
+        // Starter or main course, while it has not gone to the kitchen.
+        !sent && !it.is_set && order.order_type === 'dine_in' && h('div', { class: 'row course-row' }, h('span', { class: 'muted small' }, 'Serve as'),
+          h('div', { class: 'seg' }, [[true, 'Starter'], [false, 'Main course']].map(([v, l]) => h('button', {
+            class: !!it.starter === v ? 'on' : '',
+            onclick: act(async () => { if (!!it.starter === v) return; order = await call('set_item_course', { itemId: it.id, starter: v }); draw(); toast(`${it.name}: ${l.toLowerCase()}`); }),
+          }, l)))),
+        chips, h('div', { class: 'row' }, note, disc, saveLine,
         sent && h('button', { title: 'Print this dish on a kitchen ticket again', onclick: act(async () =>
           reportPrint(await call('reprint_kitchen_items', { orderId, itemIds: [it.id] }), `${it.name} printed again`, true)) }, 'Print again'),
         h('button', { class: 'danger', onclick: act(async () => {
@@ -1226,7 +1278,7 @@ async function renderOrder() {
   call('menu').then((m) => { state.menu = m; drawMenu(); }).catch(() => {});
   layout = h('div', { class: 'order' },
     h('div', { class: 'cats-col' }, cats),
-    h('div', { class: 'menu' }, h('div', { class: 'row nowrap menu-top' }, h('div', { class: 'searchbox' }, icon('search', 20), search), soldBtn), grid, picker),
+    h('div', { class: 'menu' }, h('div', { class: 'row nowrap menu-top' }, h('div', { class: 'searchbox' }, icon('search', 20), search), otherBtn, soldBtn), grid, picker),
     h('div', { class: 'ticket' },
       head, lines, extra,
       h('div', { class: 'ticket-foot' },
@@ -1783,7 +1835,8 @@ async function renderMenuAdmin() {
 
   // ---- the list ----
   const loadProducts = act(async () => {
-    let products = await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 });
+    // Not the hidden entry behind "Other dish" on orders.
+    let products = (await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 })).filter((x) => x.sku !== '__open_item__');
     state.menuShown = products;
     const q = search.value.trim().toLowerCase();
     if (q) products = products.filter((p) => matches(p, q));
@@ -2484,15 +2537,25 @@ async function renderPlan() {
   plan.classList.add('edit');
   const panel = h('div', { class: 'stack' });
   const saveBtn = h('button', { class: 'primary', onclick: act(save) });
+  // A second Save inside the table's card, next to its fields, so it can be
+  // reached while the on-screen keyboard covers the bottom of the screen.
+  const saveNear = h('button', { class: 'primary', onclick: act(save) });
   const setDirty = (d) => {
     state.planDirty = d;
-    saveBtn.textContent = d ? 'Save layout •' : 'Saved';
-    saveBtn.disabled = !d;
+    for (const b of [saveBtn, saveNear]) {
+      b.textContent = d ? 'Save layout •' : 'Saved';
+      b.disabled = !d;
+    }
   };
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const snap = (v) => Math.round(v / SNAP) * SNAP;
 
   function draw() {
+    drawTables();
+    drawPanel();
+  }
+  // Only the tables on the plan (the side panel and its fields stay as they are).
+  function drawTables() {
     setKids(plan, ...tables.map((t) => {
       const el = tableEl(t, t === sel ? 'sel' : '');
       el.append(h('b', {}, t.name));
@@ -2520,7 +2583,6 @@ async function renderPlan() {
       });
       return el;
     }));
-    drawPanel();
   }
 
   function nextName() {
@@ -2553,23 +2615,29 @@ async function renderPlan() {
       shape.value = t.shape;
       const w = h('input', { type: 'number', value: t.w, step: SNAP, min: 30, max: 400, style: 'width:80px' });
       const hh = h('input', { type: 'number', value: t.h, step: SNAP, min: 30, max: 400, style: 'width:80px' });
+      const title = h('h3', {}, `Table ${t.name}`);
+      // Applied as soon as something is typed or picked, so Save can be
+      // tapped straight away (no Enter needed on the on-screen keyboard).
       const apply = () => {
         t.name = name.value.trim() || t.name;
         t.shape = shape.value;
-        t.w = clamp(snap(Number(w.value) || t.w), 30, 400);
-        t.h = clamp(snap(Number(hh.value) || t.h), 30, 400);
+        const size = (el, old) => { const v = Number(el.value); return v >= 30 ? clamp(snap(v), 30, 400) : old; };
+        t.w = size(w, t.w);
+        t.h = size(hh, t.h);
         t.x = clamp(t.x, 0, PW - t.w);
         t.y = clamp(t.y, 0, PH - t.h);
+        title.textContent = `Table ${t.name}`;
         setDirty(true);
-        draw();
+        drawTables();
       };
-      [name, shape, w, hh].forEach((el) => el.addEventListener('change', apply));
+      [name, w, hh].forEach((el) => el.addEventListener('input', apply));
+      shape.addEventListener('change', apply);
       kids.push(h('div', { class: 'card stack' },
-        h('h3', {}, `Table ${t.name}`),
+        title,
         h('div', { class: 'row' }, 'Name', name),
         h('div', { class: 'row' }, 'Shape', shape),
         h('div', { class: 'row' }, 'Width', w, 'Depth', hh),
-        h('div', { class: 'row' },
+        h('div', { class: 'row' }, saveNear,
           h('button', { onclick: () => { const c = { ...t, id: null, name: nextName(), ...freeSpot(t.w, t.h) }; tables.push(c); sel = c; setDirty(true); draw(); } }, 'Duplicate'),
           h('button', { class: 'danger', onclick: () => { tables = tables.filter((x) => x !== t); sel = null; setDirty(true); draw(); } }, 'Remove table'))));
     }
@@ -3012,9 +3080,10 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
       courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Starters ticket copies', starterCopies),
         h('label', { class: 'field' }, 'Mains ticket copies', mainsCopies),
         h('label', { class: 'field' }, 'Prepare ticket copies', prepCopies),
-        h('span', { class: 'muted small' }, 'For dine-in courses; empty = same as Copies. An order of only starters uses the starters copies.')),
+        h('span', { class: 'muted small' }, 'Dine-in. Starters: when starters are sent first, or the table orders only starters for now. ' +
+          'Mains: "Call mains", and the first mains sent after the starters (also when the mains were ordered later). Empty = same as Copies.')),
       courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Additional ticket copies', additionalCopies),
-        h('span', { class: 'muted small' }, 'When more is ordered later (ADDITIONAL); empty = 1.')),
+        h('span', { class: 'muted small' }, 'More dishes ordered after the mains went (ADDITIONAL); empty = 1.')),
       !simple && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
         h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
       !simple && h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)'),
@@ -3396,7 +3465,7 @@ async function renderSettings() {
     bills: () => [receiptCard(), ticketLabelsCard()],
     kitchen: () => [kitchenPrinterCard(), routesCard(systemPrinters)],
     tickets: () => [splitCard()],
-    orders: () => [isAdmin() && fixSentCard(), quickNotesCard()],
+    orders: () => [courseCard(), isAdmin() && fixSentCard(), quickNotesCard()],
     teams: () => [teamsCard()],
     login: () => [autoLogoutCard()],
     delivery: () => [platformsCard()],
@@ -3494,6 +3563,15 @@ function splitCard() {
     settingSwitch('desserts_split', 'Print desserts on their own DESSERTS ticket', 'Desserts on their own ticket', 'Desserts print with the food'),
     h('div', { class: 'muted' }, 'Which items are drinks or desserts: Menu → tick "Drink" or "Dessert" on the item, or tap a category and tick "Drinks" / "Desserts" for all of it. ' +
       'Off = they print on the normal ticket with the rest. Drinks still go to the kitchen straight away.'));
+}
+
+/// Settings card: ask "Starter or Main?" when a starter is tapped.
+function courseCard() {
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Starter or main course'),
+    settingSwitch('starter_choice', 'When a starter is tapped on a dine-in order, ask "Starter or Main course?"',
+      'Starters ask Starter or Main', 'Starters are added as starters'),
+    h('div', { class: 'muted' }, 'Main course: the dish waits and goes with the mains. A dish not yet sent can also be changed later: tap ✎ on it, then Starter or Main course.'));
 }
 
 /// Settings card: who may fix a dish that was already sent.

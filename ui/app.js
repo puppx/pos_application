@@ -4127,9 +4127,16 @@ async function renderSettings() {
         await call('set_receipt_settings', { settings: receiptSettings() });
         toast('Receipt settings saved');
       }) }, 'Save receipt settings')));
+  // Product name, version and credits: shown to everyone who can open About.
+  const creditsCard = () => h('div', { class: 'card about-credits' },
+    h('div', { class: 'about-head' },
+      h('h3', { class: 'about-name' }, 'Limehouse POS'),
+      state.version && h('span', { class: 'chip info' }, `Version ${state.version}`)),
+    h('div', { class: 'about-by' }, 'Developed by ', h('strong', {}, 'Pheeraphat Bunliang')),
+    h('div', { class: 'muted small' }, 'Designed and developed with AI-assisted programming.'),
+    h('div', { class: 'about-copy muted small' }, '\u00a9 2026 Pheeraphat Bunliang. All rights reserved.'));
   const aboutCard = () => h('div', { class: 'card stack' },
-    h('h3', {}, 'About'),
-    h('div', {}, `POS version ${state.version}`),
+    h('h3', {}, 'Updates'),
     state.remote
       ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
       : [h('div', { class: 'muted' }, 'The app checks for updates when it starts and every few hours. Installing one takes about a minute: ' +
@@ -4191,7 +4198,7 @@ async function renderSettings() {
     // Full screen and the local server are this PC's own (not on a phone or tablet).
     screen: () => [buttonSizeCard(), !state.remote && displayCard(), !state.remote && serverCard()],
     data: () => [backupCard(), menuBackupCard(), resetCard()],
-    about: () => [aboutCard()],
+    about: () => [creditsCard(), aboutCard()],
   };
   const group = { id: tab[0], icon: tab[1], title: tab[2], cards: cards[tab[0]] };
   drawTitle(group.title, 'Manage');

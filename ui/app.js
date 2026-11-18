@@ -168,7 +168,23 @@ function parseSignedMoney(s) {
 const signed = (c) => (c > 0 ? '+' : c < 0 ? '-' : '') + money(Math.abs(c));
 const pct = (bp) => (bp / 100).toString();
 const fmtTime = (t) => new Date(t * 1000).toLocaleString();
-const ago = (t) => `${Math.max(0, Math.floor((Date.now() / 1000 - t) / 60))} min`;
+/// Minutes as a short age: "12 min", "2 h 10 m", "1 d 19 h".
+function ageText(mins) {
+  if (mins < 60) return `${mins} min`;
+  if (mins < 1440) return `${Math.floor(mins / 60)} h ${mins % 60} m`;
+  return `${Math.floor(mins / 1440)} d ${Math.floor((mins % 1440) / 60)} h`;
+}
+const ago = (t) => ageText(Math.max(0, Math.floor((Date.now() / 1000 - t) / 60)));
+/// A time for headers: "today 09:00", "yesterday 23:10" or "18 Nov 09:00" (in the device's own style).
+function friendlyTime(t) {
+  const d = new Date(t * 1000);
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(new Date()) - day(d)) / 86400000);
+  if (diff === 0) return `today ${hm}`;
+  if (diff === 1) return `yesterday ${hm}`;
+  return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${hm}`;
+}
 const today = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -198,7 +214,7 @@ async function drawBusinessDay() {
 const where = (o) => o.order_type === 'dine_in'
   ? `${o.table_name}${o.floor_name ? ' · ' + o.floor_name : ''}`
   : [o.channel_name && `${o.channel_name}${o.external_ref ? ' ' + o.external_ref : ''}`, o.customer_name]
-    .filter(Boolean).join(' · ') || '—';
+    .filter(Boolean).join(' · ');
 const addressText = (c) => [c.address_line1, c.address_line2, c.town, c.postcode].filter(Boolean).join(', ');
 
 let toastTimer;
@@ -324,15 +340,16 @@ function renderLogin() {
   });
   const press = (k) => {
     if (k === 'C') pin = '';
+    else if (k === '⌫') pin = pin.slice(0, -1);
     else if (k === 'OK') return submit();
     else if (pin.length < 8) pin += k;
     show();
     // Log in as soon as the picked person's PIN is complete, when Settings allow it.
-    if (autoOn && user?.pin_len && pin.length === user.pin_len) submit();
+    if (/^\d$/.test(k) && autoOn && user?.pin_len && pin.length === user.pin_len) submit();
   };
   const onKey = (e) => {
     if (/^\d$/.test(e.key)) { if (!user && users.length) pinStep(null); press(e.key); }
-    else if (e.key === 'Backspace') { pin = pin.slice(0, -1); show(); }
+    else if (e.key === 'Backspace') press('⌫');
     else if (e.key === 'Enter') press('OK');
     else if (e.key === 'Escape') { if (pin) press('C'); else if (users.length) pickStep(); }
   };
@@ -356,15 +373,24 @@ function renderLogin() {
   }
   function pinStep(u) {
     user = u; pin = '';
-    const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'OK'];
+    const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', 'OK'];
     show();
+    // ⌫ deletes one digit; holding it clears the whole PIN.
+    const backKey = () => {
+      let timer, long = false;
+      const stop = () => clearTimeout(timer);
+      return h('button', { class: 'ghost', title: 'Delete (hold to clear)', 'aria-label': 'Delete',
+        onpointerdown: () => { long = false; stop(); timer = setTimeout(() => { long = true; press('C'); }, 600); },
+        onpointerup: stop, onpointerleave: stop, onpointercancel: stop,
+        onclick: () => { if (long) long = false; else press('⌫'); } }, '⌫');
+    };
     setKids(main,
       h('div', { class: 'lock-card' },
         u ? h('div', { class: 'who-picked' },
           h('span', { class: 'avatar' }, initials(u.name)), h('h2', {}, u.name)) : h('h2', {}, 'Enter your PIN'),
         dots,
-        h('div', { class: 'pinpad' }, keys.map((k) =>
-          h('button', { class: k === 'OK' ? 'go' : k === 'C' ? 'ghost' : '', onclick: () => press(k) }, k))),
+        h('div', { class: 'pinpad' }, keys.map((k) => k === '⌫' ? backKey()
+          : h('button', { class: k === 'OK' ? 'go' : '', onclick: () => press(k) }, k))),
         users.length > 0 && h('button', { class: 'ghost', onclick: pickStep }, icon('back', 18), 'Not you? Pick another name')),
       closeBtn());
   }
@@ -407,7 +433,7 @@ const SETTINGS_GROUPS = [
   ['orders', 'orders', 'Orders', 'Fix dishes already sent, quick notes'],
   ['teams', 'chef', 'Kitchen teams', 'Starter, Main, Curry, Rice…'],
   ['login', 'lock', 'Login & staff', 'Auto logout, PIN'],
-  ['delivery', 'bike', 'Delivery apps', 'Grab, LINE MAN, Foodpanda…'],
+  ['delivery', 'bike', 'Delivery apps', 'Uber Eats, Just Eat, Deliveroo…'],
   ['screen', 'monitor', 'Screen & devices', 'Full screen, phones and tablets'],
   ['data', 'database', 'Backup & data', 'Backups, menu copy, reset'],
   ['about', 'info', 'About & updates', ''],
@@ -485,8 +511,7 @@ function renderShell() {
   document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , , rail]) => rail).map(([id, label]) =>
     h('button', { class: !state.orderId && id === navOn ? 'on' : '', onclick: () => go(id), title: label }, icon(id), h('span', {}, label))));
   const name = VIEWS.find(([id]) => id === state.view)?.[1];
-  const title = state.orderId ? 'Order' : inManage(state.view) ? `Manage › ${name}` : name;
-  document.getElementById('title').replaceChildren(h('span', {}, state.storeName || 'POS'), h('span', { class: 'sep' }, '/'), title);
+  drawTitle(state.orderId ? 'Order' : name, !state.orderId && inManage(state.view) ? 'Manage' : null);
   document.getElementById('who').replaceChildren(h('span', { class: 'avatar' }, initials(state.session.name)),
     h('span', { class: 'who-text' }, h('strong', {}, state.session.name), h('small', {}, ROLE_LABEL[state.session.role] ?? 'Staff')));
   document.getElementById('mode').hidden = !state.remote;
@@ -500,6 +525,12 @@ function renderShell() {
     customers: renderCustomers, shift: renderShift, kitchen: renderKitchen,
   }[state.view];
   view().catch((e) => { if (!e?.handled) toast(String(e?.message ?? e), true); });
+}
+
+/// Top bar title: "Restaurant / Manage › Reports". `crumb` ("Manage") is left out on phones.
+function drawTitle(title, crumb = null) {
+  setKids(document.getElementById('title'), h('span', {}, state.storeName || 'POS'), h('span', { class: 'sep' }, '/'),
+    crumb && h('span', { class: 'crumb' }, `${crumb} ›`), h('span', { class: 'page-name' }, title));
 }
 
 function drawClock() {
@@ -710,6 +741,12 @@ function groupRule(g) {
   if (g.min_select) return `choose ${g.min_select} to ${g.max_select}`;
   return g.max_select === 1 ? 'optional' : `optional, up to ${g.max_select}`;
 }
+/// A required single choice ("choose 1", e.g. a size) starts on its first option,
+/// so a plain order is one tap on Add. Other groups start empty.
+/// A required single choice starts on its no-extra-cost option (else the first),
+/// so one tap adds the usual dish without undercharging for a cheaper size.
+const preselect = (g) => (g.min_select === 1 && g.max_select === 1 && g.options.length
+  ? [(g.options.find((o) => o.price_cents === 0) ?? g.options[0]).id] : []);
 
 async function renderOrder() {
   await loadMenu();
@@ -723,7 +760,7 @@ async function renderOrder() {
   const orderId = order.id;
 
   // --- menu side ---
-  const search = h('input', { type: 'search', placeholder: 'Search menu or scan barcode…' });
+  const search = h('input', { type: 'search', placeholder: 'Search or scan', title: 'Search the menu or scan a barcode' });
   // "Sold out" mode: tapping an item marks it sold out for today (or back on sale).
   let soldMode = false;
   const soldBtn = h('button', { class: 'sold-btn', title: 'Mark items sold out for today', onclick: () => { soldMode = !soldMode; drawMenu(); if (soldMode) toast('Tap the items that are sold out today (tap again to put back). Tap Done when finished.'); } });
@@ -868,7 +905,7 @@ async function renderOrder() {
     });
   }
   function openPicker(p, groups, variants = [], course = null) {
-    const chosen = new Map(groups.map((g) => [g.id, new Set()]));
+    const chosen = new Map(groups.map((g) => [g.id, new Set(preselect(g))]));
     let variant = null;
     const body = h('div', { class: 'stack' });
     const price = h('strong');
@@ -928,19 +965,28 @@ async function renderOrder() {
     const chosen = new Map(sections.map((s) => [s.id, []]));
     const body = h('div', { class: 'stack' });
     const addBtn = h('button', { class: 'primary' }, 'Add to order');
+    // "choose 1" stays grey until Add is tapped with something missing, then turns red; green once done.
+    let tried = false, incomplete = true;
+    // A chosen dish still needs its "comes with", its own choice or a required option.
+    const entryMissing = (s, x) => (s.with_items.length > 0 && x.with_id == null)
+      || ((state.itemVariants[x.product_id] ?? []).length > 0 && x.variant_id == null)
+      || (state.itemGroups[x.product_id] ?? []).some((g) => g.options.length && x.option_ids.filter((id) => g.options.some((o) => o.id === id)).length < g.min_select);
+    const sectionDone = (s) => chosen.get(s.id).length === s.pick && !chosen.get(s.id).some((x) => entryMissing(s, x));
     const redraw = () => {
       setKids(body, sections.map((s) => {
         const mine = chosen.get(s.id);
+        const done = sectionDone(s);
         return h('div', { class: 'stack set-section' },
           h('div', {}, h('strong', {}, s.name), s.name_alt && h('span', { class: 'alt', lang: 'th' }, ' ', s.name_alt), ' ',
-            h('span', { class: mine.length === s.pick ? 'muted' : 'badge warn' }, `choose ${s.pick}${s.pick > 1 ? ` (${mine.length}/${s.pick})` : ''}`),
+            h('span', { class: `badge ${done ? 'ok' : tried ? 'warn' : ''}` }, `${done ? '✓ ' : ''}choose ${s.pick}${s.pick > 1 ? ` (${mine.length}/${s.pick})` : ''}`),
             s.starter && h('span', { class: 'badge' }, 'starter'),
             mine.length > 0 && s.pick > 1 && h('button', { class: 'ghost small-btn', onclick: () => { mine.length = 0; redraw(); } }, 'Clear')),
           h('div', { class: 'opts' }, s.items.map((c) => {
             const n = mine.filter((x) => x.product_id === c.product_id).length;
             if (c.sold_out) return h('button', { class: 'sold', disabled: true, title: 'Sold out today' }, c.name, h('small', {}, 'sold out'));
             return h('button', { class: n ? 'on' : '', onclick: () => {
-              const fresh = { product_id: c.product_id, with_id: null, variant_id: null, option_ids: [] };
+              const fresh = { product_id: c.product_id, with_id: null, variant_id: null,
+                option_ids: (state.itemGroups[c.product_id] ?? []).filter((g) => g.options.length).flatMap(preselect) };
               if (s.pick === 1) mine.splice(0, 1, { ...fresh, with_id: mine[0]?.with_id ?? null });
               else if (mine.length < s.pick) mine.push(fresh);
               else if (n) mine.splice(mine.findIndex((x) => x.product_id === c.product_id), 1);
@@ -950,7 +996,7 @@ async function renderOrder() {
           })),
           // What each chosen dish comes with (rice, noodles...), when the section has it.
           s.with_items.length > 0 && mine.map((entry) => h('div', { class: 'with-row' },
-            h('span', { class: 'with-label' }, `${s.items.find((c) => c.product_id === entry.product_id)?.name ?? ''} with`),
+            h('span', { class: `with-label ${tried && entry.with_id == null ? 'need' : ''}` }, `${s.items.find((c) => c.product_id === entry.product_id)?.name ?? ''} with`),
             h('div', { class: 'opts' }, s.with_items.map((w) => h('button', {
               class: entry.with_id === w.product_id ? 'on' : '',
               onclick: () => { entry.with_id = w.product_id; redraw(); },
@@ -962,10 +1008,10 @@ async function renderOrder() {
             if (!vs.length && !gs.length) return '';
             const dish = s.items.find((c) => c.product_id === entry.product_id)?.name ?? '';
             return h('div', { class: 'stack with-row dish-choices' },
-              vs.length > 0 && h('div', { class: 'row' }, h('span', { class: 'with-label' }, dish), h('div', { class: 'opts' }, vs.map((v) => h('button', {
+              vs.length > 0 && h('div', { class: 'row' }, h('span', { class: `with-label ${tried && entry.variant_id == null ? 'need' : ''}` }, dish), h('div', { class: 'opts' }, vs.map((v) => h('button', {
                 class: entry.variant_id === v.id ? 'on' : '', onclick: () => { entry.variant_id = v.id; redraw(); },
               }, v.name, v.name_alt && h('small', { lang: 'th' }, v.name_alt))))),
-              gs.map((g) => h('div', { class: 'row' }, h('span', { class: 'with-label' }, `${vs.length ? '' : dish + ' · '}${g.name}`, h('small', { class: 'muted' }, ` ${groupRule(g)}`)),
+              gs.map((g) => h('div', { class: 'row' }, h('span', { class: `with-label ${tried && entry.option_ids.filter((id) => g.options.some((o) => o.id === id)).length < g.min_select ? 'need' : ''}` }, `${vs.length ? '' : dish + ' · '}${g.name}`, h('small', { class: 'muted' }, ` ${groupRule(g)}`)),
                 h('div', { class: 'opts' }, g.options.map((o) => {
                   const on = entry.option_ids.includes(o.id);
                   return h('button', { class: on ? 'on' : '', onclick: () => {
@@ -975,21 +1021,21 @@ async function renderOrder() {
                     else if (inGroup.length >= g.max_select) return toast(`${g.name}: up to ${g.max_select}`, true);
                     else entry.option_ids = [...entry.option_ids, o.id];
                     redraw();
-                  } }, o.name, o.price_cents ? h('small', {}, `+${money(o.price_cents)}`) : '');
+                  } }, o.name, o.price_cents ? h('small', {}, signed(o.price_cents)) : '');
                 })))));
           }));
       }));
       const entries = sections.flatMap((s) => chosen.get(s.id));
-      const missing = entries.some((x) => {
-        if ((state.itemVariants[x.product_id] ?? []).length && x.variant_id == null) return true;
-        return (state.itemGroups[x.product_id] ?? []).some((g) => g.options.length && x.option_ids.filter((id) => g.options.some((o) => o.id === id)).length < g.min_select);
-      });
       const extras = entries.reduce((n, x) => n + (state.itemGroups[x.product_id] ?? []).flatMap((g) => g.options).filter((o) => x.option_ids.includes(o.id)).reduce((a, o) => a + o.price_cents, 0), 0);
       addBtn.textContent = extras ? `Add to order · ${money(p.price_cents + extras)}` : 'Add to order';
-      addBtn.disabled = missing || sections.some((s) => chosen.get(s.id).length !== s.pick
-        || (s.with_items.length > 0 && chosen.get(s.id).some((x) => x.with_id == null)));
+      incomplete = !sections.every(sectionDone);
     };
     addBtn.onclick = act(async () => {
+      if (incomplete) {
+        tried = true;
+        redraw();
+        return toast('Finish the parts marked in red first', true);
+      }
       const picks = sections.flatMap((s) => chosen.get(s.id).map((x) => ({ section_id: s.id, product_id: x.product_id, with_id: x.with_id, variant_id: x.variant_id, option_ids: x.option_ids })));
       order = await call('add_set', { orderId, setId: p.id, picks, note: null });
       closePicker();
@@ -1066,8 +1112,9 @@ async function renderOrder() {
           it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
           it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt)));
       }
+      const toggleEdit = () => { editing = editing === it.id ? null : it.id; draw(); };
       const row = h('tr', {},
-        h('td', {}, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
+        h('td', { class: 'line-name', title: 'Note, discount, remove', onclick: toggleEdit }, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
           it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
           it.prep && !sent ? h('span', { class: 'badge prep' }, it.prep_sent_at ? 'preparing' : 'prep ahead') : ''),
@@ -1087,7 +1134,7 @@ async function renderOrder() {
             : setLine(it, { qty: it.qty + 1 }))) }, '+'))),
         h('td', { class: 'num' }, money(it.line_total_cents)),
         h('td', {}, h('button', { class: `icon-btn ${editing === it.id ? 'on' : ''}`, title: 'Note, discount, remove',
-          onclick: () => { editing = editing === it.id ? null : it.id; draw(); } }, '✎')));
+          onclick: toggleEdit }, '✎')));
       if (editing !== it.id) return row;
       const note = h('input', { value: it.note ?? '', placeholder: 'Note (no onions…)' });
       const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: 'Discount', style: 'width:90px' });
@@ -1330,7 +1377,7 @@ async function renderOrder() {
   call('menu').then((m) => { state.menu = m; drawMenu(); }).catch(() => {});
   layout = h('div', { class: 'order' },
     h('div', { class: 'cats-col' }, cats),
-    h('div', { class: 'menu' }, h('div', { class: 'row nowrap menu-top' }, h('div', { class: 'searchbox' }, icon('search', 20), search), otherBtn, soldBtn), subBar, grid, picker),
+    h('div', { class: 'menu' }, h('div', { class: 'row menu-top' }, h('div', { class: 'searchbox' }, icon('search', 20), search), otherBtn, soldBtn), subBar, grid, picker),
     h('div', { class: 'ticket' },
       head, lines, extra,
       h('div', { class: 'ticket-foot' },
@@ -1536,10 +1583,11 @@ async function payDialog(order, pay) {
           if (v === 'other') focus = 'tip'; else if (focus === 'tip') focus = 'cash';
         }),
         cfg.tipsOn && tipMode === 'other' && field('tip', 'Tip', typed.tip || '0.00'),
+        // One clear total; the amount and the tip are listed above it only when there is a tip.
         h('div', { class: 'pay-sum' },
-          h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'To pay now'), h('strong', {}, money(d))),
+          t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'To pay now'), h('strong', {}, money(d))),
           t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'Tip'), h('strong', {}, money(t))),
-          h('div', { class: 'row grand' }, h('span', { style: 'flex:1' }, 'Total to take'), h('strong', {}, money(tg))))),
+          h('div', { class: 'row grand' }, h('span', { style: 'flex:1' }, t > 0 ? 'Total to take' : 'To pay now'), h('strong', {}, money(tg))))),
       h('div', { class: 'pay-right stack' },
         h('div', { class: 'pay-label' }, 'Payment method'),
         h('div', { class: 'seg methods' }, methods.map(([v, label]) => h('button', { class: method === v ? 'on' : '', onclick: () => { method = v; if (v === 'cash') focus = 'cash'; draw(); } }, label))),
@@ -1657,7 +1705,7 @@ function customerEditor({ type = 'delivery', customer = null, search = true, sav
       delivery && suggestions,
       delivery && h('div', { class: 'row' }, f.line2, f.town),
       h('div', { class: 'row' }, f.notes),
-      saveToggle && h('label', {}, save, ' Save / update this customer for next time')),
+      saveToggle && h('label', { class: 'check' }, save, ' Save / update this customer for next time')),
     focus: () => (search ? find : f.name).focus(),
     details: () => ({
       name: f.name.value, phone: f.phone.value || null, address_line1: f.line1.value || null,
@@ -1698,7 +1746,7 @@ async function startCustomerOrder(type, ce, orderNotes) {
 function orderDetail(o, onChange) {
   const reason = h('input', { placeholder: 'Void reason' });
   return h('div', { class: 'card stack' },
-    h('h3', {}, `#${o.id} ${TYPE[o.order_type]} · ${where(o)} — ${o.status}`),
+    h('h3', {}, `#${o.id} ${TYPE[o.order_type]}${where(o) ? ` · ${where(o)}` : ''} — ${o.status}`),
     h('div', { class: 'muted' }, `Opened ${fmtTime(o.opened_at)} by ${o.opened_by_name}` +
       (o.paid_at ? ` · paid ${fmtTime(o.paid_at)}` : '')),
     (o.customer_phone || o.delivery_address) && h('div', { class: 'muted' }, [o.customer_phone, o.delivery_address].filter(Boolean).join(' · ')),
@@ -1771,7 +1819,7 @@ async function renderOrders() {
       openOrder(o.id);
     });
     setKids(form, h('div', { class: 'card stack' }, h('h3', {}, `New ${ch.name} order`),
-      h('div', { class: 'row' }, ref, name), h('label', {}, collects, ' Customer collects (no platform rider)'),
+      h('div', { class: 'row' }, ref, name), h('label', { class: 'check' }, collects, ' Customer collects (no platform rider)'),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: start }, 'Start order'),
         h('button', { onclick: () => setKids(form) }, 'Cancel'))));
     ref.focus();
@@ -1785,7 +1833,7 @@ async function renderOrders() {
       orders.map((o) => h('button', { class: `order-card ${o.unsent_count ? 'unsent' : ''}`, onclick: () => openOrder(o.id) },
         h('div', { class: 'row nowrap' }, h('strong', { class: 'big-id' }, `#${o.id}`), typeChip(o.order_type), h('span', { class: 'spacer' }),
           h('span', { class: 'time' }, ago(o.opened_at))),
-        h('div', { class: 'where' }, where(o)),
+        where(o) && h('div', { class: 'where' }, where(o)),
         o.customer_phone && h('div', { class: 'muted small' }, o.customer_phone),
         h('div', { class: 'row nowrap foot' },
           h('span', { class: 'muted small' }, `${o.item_count} item(s) · ${o.opened_by_name}`), h('span', { class: 'spacer' }),
@@ -1837,7 +1885,7 @@ async function renderHistory() {
   date.onchange = load;
   let shown = [];
   const bulk = () => bulkDelete('Delete orders', shown.filter((o) => o.status !== 'open').map((o) => ({
-    id: o.id, label: `#${o.id} ${TYPE[o.order_type] ?? ''} · ${where(o)}`, sub: `${o.status} · ${money(o.total_cents)}`,
+    id: o.id, label: [`#${o.id} ${TYPE[o.order_type] ?? ''}`, where(o)].filter(Boolean).join(' · '), sub: `${o.status} · ${money(o.total_cents)}`,
   })), (ids) => deleteMany('order', ids, 'order(s)'), async () => { setKids(detail); await load(); });
   screen(h('div', { class: 'page split' },
     h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('label', { class: 'field' }, 'Day', date), h('span', { class: 'grow' }),
@@ -1991,7 +2039,7 @@ async function renderMenuAdmin() {
     const alt = h('input', { value: c?.name_alt ?? '', placeholder: 'Thai name (optional)', lang: 'th', 'data-f': 'calt' });
     const color = h('input', { type: 'color', value: c?.color ?? '#9a9484' });
     const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
-    const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (main default)`, inputmode: 'decimal', style: 'width:150px', 'data-f': 'ctax' });
+    const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `Same as restaurant (${pct(defaultTax)}%)`, inputmode: 'decimal', style: 'width:230px', 'data-f': 'ctax' });
     const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
     const prep = h('input', { type: 'checkbox', checked: c ? c.prep : false });
     const drink = h('input', { type: 'checkbox', checked: c ? c.drink : /drink|beverage|เครื่องดื่ม/i.test(c?.name ?? '') });
@@ -2087,7 +2135,7 @@ async function renderMenuAdmin() {
     });
     setKids(form, h('div', { class: 'card stack' },
       h('h3', {}, g ? `Edit ${g.name}` : 'New option group'),
-      h('div', { class: 'row' }, name, g && h('label', {}, active, ' In use')),
+      h('div', { class: 'row' }, name, g && h('label', { class: 'check' }, active, ' In use')),
       h('div', { class: 'row' }, 'Customer must choose at least', min, 'and at most', max),
       h('div', { class: 'muted' }, 'Sizes: at least 1, at most 1. Extras: at least 0, at most e.g. 5. Prices are added to the item (use -1.00 for a cheaper option). ' +
         'Untick "In use" to hide it for now; Delete removes it from every item (past orders are not affected).'),
@@ -2845,8 +2893,8 @@ function kdsSettings(raw = {}) {
 /// Kitchen screen: one card per order with the dishes still to cook.
 /// Tap a dish when it is done; "Done" clears the whole card. Refreshes by itself.
 async function renderKitchen() {
-  const [teams, cfg] = await Promise.all([call('list_teams').catch(() => []),
-    invoke('get_settings', { keys: KDS_KEYS }).then(kdsSettings).catch(() => kdsSettings())]);
+  const loadCfg = () => invoke('get_settings', { keys: KDS_KEYS }).then(kdsSettings);
+  let [teams, cfg] = await Promise.all([call('list_teams').catch(() => []), loadCfg().catch(() => kdsSettings())]);
   let filter = 'all';
   try { filter = localStorage.getItem('pos.kdsFilter') || 'all'; } catch {}
   let lastDone = null;
@@ -2876,7 +2924,7 @@ async function renderKitchen() {
       const age = mins(o.since);
       const todo = o.items.filter((i) => !i.done).map((i) => i.id);
       return h('div', { class: `kds-card ${age >= cfg.late ? 'late' : age >= cfg.slow ? 'slow' : ''}` },
-        h('div', { class: 'kds-head' }, h('strong', {}, o.heading), h('span', { class: 'kds-age' }, `${age} min`)),
+        h('div', { class: 'kds-head' }, h('strong', {}, o.heading), h('span', { class: 'kds-age' }, ageText(age))),
         (o.customer_name || o.paid) && h('div', { class: 'kds-sub' }, [o.customer_name, o.paid ? 'PAID' : ''].filter(Boolean).join(' · ')),
         h('div', { class: 'kds-items' }, o.items.map((i) => h('button', { class: `kds-item ${i.done ? 'done' : ''}`,
           onclick: i.done ? act(async () => { await call('kitchen_done', { itemIds: [i.id], done: false }); await refresh(); }) : done([i.id]) },
@@ -2892,7 +2940,23 @@ async function renderKitchen() {
   drawBar();
   screen(h('div', { class: 'page kds-page' }, bar, board));
   await refresh();
-  live(refresh, cfg.refresh * 1000);
+  // A tablet left on this screen picks up changed settings (colours, refresh) about once a minute.
+  let ticks = 0;
+  const tick = async () => {
+    if (++ticks % Math.max(1, Math.round(60 / cfg.refresh)) === 0) {
+      const fresh = await loadCfg().catch(() => null);
+      if (!board.isConnected) return;
+      if (fresh) {
+        const restart = fresh.refresh !== cfg.refresh;
+        cfg = fresh;
+        if (restart) { clearInterval(refreshTimer); live(tick, cfg.refresh * 1000); }
+      }
+    }
+    await refresh();
+  };
+  // Left the screen while it was loading: don't start a timer for a screen that is gone.
+  if (!board.isConnected) return;
+  live(tick, cfg.refresh * 1000);
 }
 
 /// Shift & cash: open with a float, money in / out, close by counting.
@@ -2986,7 +3050,8 @@ async function renderReports() {
   const date = h('input', { type: 'date', value: today() });
   const out = h('div');
   const eod = h('div', { class: 'card stack' });
-  const rows = (pairs) => h('table', {}, pairs.map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'num' }, v))));
+  const none = () => h('div', { class: 'muted', style: 'margin-top:6px' }, 'No sales yet');
+  const rows = (pairs) => pairs.length ? h('table', {}, pairs.map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'num' }, v)))) : none();
 
   // End of day: the open business day so far, the close button, past closes.
   const drawEod = async (shown = null) => {
@@ -3013,7 +3078,7 @@ async function renderReports() {
     });
     setKids(eod, 
       h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `End of day · ${dayLabel(day.date)}`),
-        h('span', { class: 'muted' }, `since ${fmtTime(day.since)}`)),
+        h('span', { class: 'muted' }, `since ${friendlyTime(day.since)}`)),
       h('div', { class: 'row' },
         h('span', {}, `${s.order_count} paid orders · `, h('strong', {}, money(s.total_cents))),
         ...s.by_payment.map((g) => h('span', { class: 'badge' }, `${g.key === 'other' ? 'platform' : g.key} ${money(g.total_cents)}`)),
@@ -3051,8 +3116,8 @@ async function renderReports() {
       h('div', { class: 'stack' },
         h('div', { class: 'card' }, h('h3', {}, 'By category (before tax)'),
           rows(s.by_category.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
-        h('div', { class: 'card' }, h('h3', {}, 'Top items'), h('table', {},
-          top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents)))))))));
+        h('div', { class: 'card' }, h('h3', {}, 'Top items'), top.length ? h('table', {},
+          top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents))))) : none()))));
   });
   date.onchange = load;
   screen(h('div', { class: 'page' }, eod, h('div', { class: 'section-title' }, h('h3', {}, 'Sales by calendar day'), h('span', { class: 'spacer' }), date), out));
@@ -3076,7 +3141,7 @@ async function renderCustomers() {
       found.map((c) => h('tr', { class: 'click', onclick: () => edit(c) },
         h('td', {}, c.name), h('td', {}, c.phone ?? ''), h('td', { class: 'muted' }, addressText(c)),
         h('td', { class: 'num' }, c.order_count))))
-      : h('p', { class: 'muted' }, q.value ? 'No customers match.' : 'No saved customers yet. They are added when you take delivery or collection orders, or with + Customer.'));
+      : h('div', { class: 'empty small' }, icon('customers', 36), h('p', {}, q.value ? 'No customers match.' : 'No saved customers yet. They are added when you take delivery or collection orders, or with + Customer.')));
   };
   q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => load().catch(() => {}), 150); });
 
@@ -3183,14 +3248,15 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
   const fields = h('div', { class: 'row' });
   const drawFields = () => setKids(fields, ...{
     none: [],
-    network: ['IP address', host, 'Port', port],
-    windows: ['Printer', winName],
-    file: ['Port or path', path],
+    network: [h('label', { class: 'field' }, 'IP address', host), h('label', { class: 'field' }, 'Port', port)],
+    windows: [h('label', { class: 'field' }, 'Printer', winName)],
+    file: [h('label', { class: 'field' }, 'Port or path', path)],
   }[kind.value]);
   kind.onchange = drawFields;
   drawFields();
   return {
-    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, 'Copies', copies, !simple && ['Delay between copies', delay, 'sec']), fields,
+    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, h('label', { class: 'field' }, 'Copies', copies),
+        !simple && h('label', { class: 'field' }, 'Delay between copies', delay, 'sec')), fields,
       courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Starters ticket copies', starterCopies),
         h('label', { class: 'field' }, 'Mains ticket copies', mainsCopies),
         h('label', { class: 'field' }, 'Prepare ticket copies', prepCopies),
@@ -3521,9 +3587,9 @@ async function renderSettings() {
     h('div', { class: 'muted' }, 'Customer receipts and bills. The cash drawer plugs into this printer. ' +
       'It can be the same printer as the kitchen one.'),
     receipt.el,
-    h('label', {}, autoPrint, ' Print a receipt automatically after payment'),
-    h('label', {}, drawer, ' Open the cash drawer for cash payments'),
-    h('label', {}, staffCopy, ' Also print a staff copy after payment, with the tax by class (net, VAT, gross)'),
+    h('label', { class: 'check' }, autoPrint, ' Print a receipt automatically after payment'),
+    h('label', { class: 'check' }, drawer, ' Open the cash drawer for cash payments'),
+    h('label', { class: 'check' }, staffCopy, ' Also print a staff copy after payment, with the tax by class (net, VAT, gross)'),
     h('div', { class: 'row' }, 'Currency symbol', currency),
     h('label', { class: 'field' }, 'Name at the top of the bill', h('div', { class: 'row' }, shopName)),
     h('label', { class: 'field' }, 'Address, phone, VAT number (under the name, one per line)', header),
@@ -3589,6 +3655,7 @@ async function renderSettings() {
     about: () => [aboutCard()],
   };
   const group = { id: tab[0], icon: tab[1], title: tab[2], cards: cards[tab[0]] };
+  drawTitle(group.title, 'Manage');
   const back = () => { state.settingsTab = null; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
   screen(h('div', { class: 'page settings' },
     h('div', { class: 'settings-head' },
@@ -3608,6 +3675,7 @@ function settingsGroups() {
 /// for admins, every settings area.
 function renderManageHome() {
   state.settingsTab = null;
+  drawTitle('Manage');
   const tile = (id, ic, title, sub, onclick) => h('button', { class: 'settings-tile', 'data-group': id, onclick },
     icon(ic, 40), h('strong', {}, title), sub && h('small', {}, sub));
   const pages = VIEWS.filter(([, , need, rail]) => !rail && canSee(need));

@@ -550,8 +550,13 @@ commands! {
 
     /// A change to a dish already sent tells the kitchen: fewer or removed
     /// prints CANCELLED (with the set's dishes for a set), a new note CHANGED.
-    fn update_item(app, t, item_id: i64, update: ItemUpdate) -> Order {
-        let (order, job) = app.with_session(t, |pos, s| pos.update_item_for_kitchen(s, item_id, &update))?;
+    /// `pin`: a manager's or admin's PIN approving a discount over the staff
+    /// limit (it only approves; nobody is logged in or out).
+    fn update_item(app, t, item_id: i64, update: ItemUpdate, pin: Option<String>) -> Order {
+        let (order, job) = app.with_session(t, |pos, s| {
+            let approver = pin.as_deref().map(|p| pos.pin_owner_for(p, Some(s.user_id))).transpose()?;
+            pos.update_item_for_kitchen_approved(s, approver.as_ref(), item_id, &update)
+        })?;
         // The change is saved either way; a printer problem must not undo it.
         let _ = print(job);
         Ok(order)
@@ -1244,5 +1249,34 @@ mod tests {
         let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
         let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": o["id"], "reason": "" })).unwrap();
         assert_eq!(r, json!({ "attempted": false, "error": null }));
+    }
+
+    #[test]
+    fn a_discount_over_the_staff_limit_is_approved_with_a_manager_pin() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.create_user(&admin, "Mia", Role::Manager, "3333").unwrap();
+        pos.set_setting(&admin, "discount_staff_max_pct", "10").unwrap();
+        let curry = pos
+            .create_product(&admin, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+        let o = dispatch(&app, LOCAL, "add_item", json!({ "orderId": o["id"], "productId": curry.id, "qty": 1 })).unwrap();
+        let item = o["items"][0]["id"].clone();
+        let upd = json!({ "qty": 1, "discount_cents": 300, "note": null });
+        let err = dispatch(&app, LOCAL, "update_item", json!({ "itemId": item, "update": upd })).unwrap_err();
+        assert_eq!(err.to_string(), "a discount over 10% needs a manager PIN");
+        let err = dispatch(&app, LOCAL, "update_item", json!({ "itemId": item, "update": upd, "pin": "9999" })).unwrap_err();
+        assert!(matches!(err, PosError::InvalidPin), "{err}");
+        let o = dispatch(&app, LOCAL, "update_item", json!({ "itemId": item, "update": upd, "pin": "3333" })).unwrap();
+        assert_eq!(o["discount_cents"], 300);
+        // Sam is still the one logged in.
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
     }
 }

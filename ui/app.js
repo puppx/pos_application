@@ -164,6 +164,14 @@ function sortable(container, { item, handle, axis = 'y', onDrop }) {
     window.addEventListener('pointercancel', up);
   });
 }
+/// A discount as typed: an amount ("2.50") or a percentage of `base` cents ("10%").
+function parseDiscount(s, base) {
+  const m = /^\s*(\d+(?:[.,]\d+)?)\s*%\s*$/.exec(String(s));
+  if (!m) return parseMoney(s);
+  const p = Number(m[1].replace(',', '.'));
+  if (p > 100) throw new Error('at most 100%');
+  return Math.round(base * p / 100);
+}
 function parseSignedMoney(s) {
   s = String(s).trim();
   const neg = s.startsWith('-');
@@ -237,7 +245,7 @@ const SETTINGS_WRITES = new Set(['set_setting', 'set_service_settings', 'set_rec
 async function call(cmd, args = {}) {
   try {
     const r = await invoke(cmd, args);
-    if (SETTINGS_WRITES.has(cmd)) state.menu = null;
+    if (SETTINGS_WRITES.has(cmd)) { state.menu = null; loadUiSettings(); }
     return r;
   } catch (e) {
     const msg = String(e?.message ?? e);
@@ -278,6 +286,7 @@ async function start() {
   document.title = st.store_name || 'POS';
   if (st.needs_setup) return renderSetup();
   if (!st.session) return renderLogin();
+  await loadUiSettings();
   renderShell();
 }
 
@@ -345,7 +354,7 @@ function renderLogin() {
     }
     try { localStorage.setItem('pos.lastUser', String(state.session.user_id)); } catch {}
     document.removeEventListener('keydown', onKey);
-    renderShell();
+    await openStartScreen();
   });
   const press = (k) => {
     if (k === 'C') pin = '';
@@ -412,6 +421,53 @@ function renderLogin() {
   pinStep(null);
 }
 
+// ---------- settings the screens read (start screen, order types, sizes…) ----------
+
+/// Settings every screen may need, read once per screen change in one call.
+/// Not set = the defaults in uiSettings(), which are how the app always worked.
+const UI_KEYS = ['auto_logout_minutes', 'auto_logout_warn_secs', 'start_screen', 'show_takeaway', 'show_collection', 'show_delivery',
+  'button_size', 'discount_presets', 'discount_staff_max_pct'];
+const DISCOUNT_PRESETS_DEFAULT = [5, 10, 15, 20];
+const START_SCREENS = [['tables', 'Tables'], ['orders', 'Orders'], ['takeaway', 'New takeaway']];
+function uiSettings(raw = {}) {
+  const whole = (v, lo, hi, def) => { const n = Number(String(v ?? '').trim()); return v != null && String(v).trim() !== '' && Number.isInteger(n) && n >= lo && n <= hi ? n : def; };
+  const presets = raw.discount_presets == null ? DISCOUNT_PRESETS_DEFAULT
+    : String(raw.discount_presets).split(/[,;\s]+/).map((x) => Number(x.replace('%', ''))).filter((n) => Number.isInteger(n) && n >= 1 && n <= 100).slice(0, 8);
+  return {
+    autoLogout: parseAutoLogout(raw.auto_logout_minutes),
+    warnSecs: whole(raw.auto_logout_warn_secs, 0, 120, AUTO_LOGOUT_WARN_DEFAULT),
+    startScreen: START_SCREENS.some(([v]) => v === raw.start_screen) ? raw.start_screen : 'tables',
+    types: { takeaway: raw.show_takeaway !== '0', collection: raw.show_collection !== '0', delivery: raw.show_delivery !== '0' },
+    bigButtons: raw.button_size === 'large',
+    discountPresets: presets,
+    /// Staff need a manager's PIN for more than this percentage off a line; null = no limit.
+    discountLimit: whole(raw.discount_staff_max_pct, 0, 100, null),
+  };
+}
+async function loadUiSettings() {
+  try {
+    state.ui = uiSettings(await invoke('get_settings', { keys: UI_KEYS }));
+    state.autoLogout = state.ui.autoLogout;
+  } catch { state.ui ??= uiSettings(); }
+  document.body.classList.toggle('big-buttons', state.ui.bigButtons);
+}
+/// New orders of `type` can be started (Settings → Orders → Order types). Dine-in always.
+const typeShown = (type) => type === 'dine_in' || (state.ui ?? uiSettings()).types[type] !== false;
+
+/// Right after login: Tables, Orders or a new takeaway order (Settings → Login & staff).
+async function openStartScreen() {
+  await loadUiSettings();
+  const pick = state.ui.startScreen;
+  state.view = pick === 'tables' ? 'floor' : 'orders';
+  if (pick === 'takeaway' && typeShown('takeaway')) {
+    try {
+      const o = await invoke('open_order', { order: { order_type: 'takeaway' } });
+      return openOrder(o.id);
+    } catch (e) { toast(String(e?.message ?? e), true); }
+  }
+  renderShell();
+}
+
 // ---------- shell ----------
 
 /// [id, label, admin only, on the side bar]. The rest open from Manage.
@@ -439,11 +495,11 @@ const SETTINGS_GROUPS = [
   ['bills', 'receipt', 'Bills & receipts', 'Receipt printer, cash drawer, words on bills, tips'],
   ['kitchen', 'printer', 'Kitchen printer', 'Printer, copies, font, kitchen screen'],
   ['tickets', 'cup', 'Drinks & desserts', 'Own tickets on or off'],
-  ['orders', 'orders', 'Orders', 'Fix dishes already sent, quick notes'],
+  ['orders', 'orders', 'Orders', 'Order types, discounts, quick notes'],
   ['teams', 'chef', 'Kitchen teams', 'Starter, Main, Curry, Rice…'],
-  ['login', 'lock', 'Login & staff', 'Auto logout, PIN'],
+  ['login', 'lock', 'Login & staff', 'Start screen, auto logout, PIN'],
   ['delivery', 'bike', 'Delivery apps', 'Uber Eats, Just Eat, Deliveroo…'],
-  ['screen', 'monitor', 'Screen & devices', 'Full screen, phones and tablets'],
+  ['screen', 'monitor', 'Screen & devices', 'Button size, full screen, phones and tablets'],
   ['data', 'database', 'Backup & data', 'Backups, menu copy, reset'],
   ['about', 'info', 'About & updates', ''],
 ];
@@ -509,7 +565,7 @@ function startUpdateChecks() {
 function renderShell() {
   document.body.classList.remove('locked');
   lastActivity = Date.now();
-  loadAutoLogout();
+  loadUiSettings();
   clearInterval(state.clockTimer);
   if (!state.remote) startUpdateChecks();
   if (!VIEWS.some(([id, , need]) => id === state.view && canSee(need))) state.view = 'floor';
@@ -578,6 +634,7 @@ async function dropEmptyOrder(id) {
 
 async function logOut(message = null) {
   closeModal();
+  hideIdleWarn();
   await dropEmptyOrder(state.orderId);
   try { await invoke('logout'); } catch { /* already logged out on the server */ }
   Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null });
@@ -598,41 +655,58 @@ document.getElementById('logout').onclick = act(async () => {
 /// Auto logout); 0 = never. Shared by the till and every browser device.
 const AUTO_LOGOUT_KEY = 'auto_logout_minutes';
 const AUTO_LOGOUT_DEFAULT = 5;
-const AUTO_LOGOUT_WARNING_MS = 30_000;
+/// Seconds of on-screen warning before it logs out (auto_logout_warn_secs); 0 = no warning.
+const AUTO_LOGOUT_WARN_DEFAULT = 30;
 let lastActivity = Date.now();
 let idleWarned = false;
 const parseAutoLogout = (v) => {
   const n = parseInt(v ?? '', 10);
   return Number.isFinite(n) && n >= 0 ? n : AUTO_LOGOUT_DEFAULT;
 };
-async function loadAutoLogout() {
-  try { state.autoLogout = parseAutoLogout(await invoke('get_setting', { key: AUTO_LOGOUT_KEY })); } catch { /* keep the last value */ }
+/// "Logging out in 10 s — tap to stay": covers the screen, so the tap that
+/// keeps you logged in does not also press a button under it.
+function showIdleWarn(secs) {
+  let el = document.getElementById('idle-warn');
+  if (!el) {
+    // preventDefault on the press: the field being typed in keeps its focus.
+    el = h('div', { id: 'idle-warn', role: 'alertdialog', 'aria-live': 'assertive', onclick: hideIdleWarn, onpointerdown: (e) => e.preventDefault(), onmousedown: (e) => e.preventDefault() },
+      h('div', { class: 'idle-card' }, icon('lock', 36), h('strong', {}), h('span', {}, 'Tap anywhere to stay logged in')));
+    document.body.append(el);
+  }
+  el.querySelector('strong').textContent = `Logging out in ${secs} s`;
+  el.hidden = false;
+}
+function hideIdleWarn() {
+  const el = document.getElementById('idle-warn');
+  if (el) el.hidden = true;
 }
 for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
-  document.addEventListener(ev, () => {
+  document.addEventListener(ev, (e) => {
     lastActivity = Date.now();
-    if (idleWarned) { idleWarned = false; document.getElementById('toast').hidden = true; }
+    if (!idleWarned) return;
+    idleWarned = false;
+    // A tap on the warning closes it on its click; anything else closes it now.
+    if (e.type === 'keydown' || !document.getElementById('idle-warn')?.contains(e.target)) hideIdleWarn();
   }, { capture: true, passive: true });
 }
 setInterval(() => {
   const mins = state.autoLogout ?? AUTO_LOGOUT_DEFAULT;
-  if (!state.session || !mins) return;
+  if (!state.session || !mins) { idleWarned = false; return hideIdleWarn(); }
   // Never throw away an unsaved floor plan: wait until it is saved or discarded.
   // The floor plan editor with unsaved changes, and the kitchen screen for staff, stay logged in.
   if (state.planDirty || (state.view === 'kitchen' && !state.orderId && !isAdmin())) { lastActivity = Date.now(); return; }
   const idle = Date.now() - lastActivity;
   const limit = mins * 60_000;
+  // The warning never takes more than half the time.
+  const warn = Math.min((state.ui?.warnSecs ?? AUTO_LOGOUT_WARN_DEFAULT) * 1000, limit / 2);
   if (idle >= limit) {
     idleWarned = false;
+    hideIdleWarn();
     logOut(`Logged out after ${mins} minute${mins === 1 ? '' : 's'} without activity`);
-  } else if (idle >= limit - AUTO_LOGOUT_WARNING_MS && !idleWarned) {
+  } else if (warn && idle >= limit - warn) {
     idleWarned = true;
-    const t = document.getElementById('toast');
-    t.textContent = 'No activity: logging out in 30 seconds. Tap anywhere to stay logged in.';
-    t.className = '';
-    t.hidden = false;
-    clearTimeout(toastTimer);
-  }
+    showIdleWarn(Math.ceil((limit - idle) / 1000));
+  } else if (!idleWarned && idle > 1500) hideIdleWarn();
 }, 1000);
 
 // ---------- floor plan canvas (shared by live view and editor) ----------
@@ -1081,10 +1155,33 @@ async function renderOrder() {
     toast(p.attempted ? `${msg} · ticket printed` : msg);
   }
   async function setLine(it, changes) {
-    order = await call('update_item', {
-      itemId: it.id,
-      update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...changes },
-    });
+    // Fewer of a discounted dish: the discount shrinks with it (the same share off),
+    // so − never gives more off or asks for a manager PIN.
+    if (changes.qty > 0 && changes.qty < it.qty && it.discount_cents && !('discount_cents' in changes)) {
+      changes = { ...changes, discount_cents: Math.floor(it.discount_cents * changes.qty / it.qty) };
+    }
+    const args = { itemId: it.id, update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...changes } };
+    try {
+      order = await invoke('update_item', args);
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      // Over the staff discount limit (Settings → Orders → Discounts): a manager approves with their PIN.
+      if (!/needs a manager/i.test(msg)) {
+        if (msg === 'please log in') start(); else toast(msg, true);
+        const err = new Error(msg); err.handled = true; throw err;
+      }
+      const ok = await pinDialog({
+        title: 'Manager PIN', hint: `${it.name}: ${msg}. A manager or admin enters their PIN to approve it.`, okLabel: 'Approve discount',
+        submit: async (pin) => {
+          try { order = await invoke('update_item', { ...args, pin }); } catch (e2) {
+            const m = String(e2?.message ?? e2);
+            return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
+          }
+        },
+      });
+      if (!ok) { const err = new Error('Discount not approved'); err.handled = true; throw err; }
+      toast('Discount approved');
+    }
     draw();
   }
   async function send(allCourses = false, what = 'Sent') {
@@ -1176,7 +1273,17 @@ async function renderOrder() {
           onclick: toggleEdit }, '✎')));
       if (editing !== it.id) return row;
       const note = h('input', { value: it.note ?? '', placeholder: 'Note (no onions…)' });
-      const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: 'Discount', style: 'width:90px' });
+      const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: 'Discount', title: 'An amount (2.50) or a percentage (10%)', style: 'width:90px' });
+      // Quick discount buttons (Settings → Orders → Discounts): one tap saves the line with that much off.
+      const base = it.unit_price_cents * it.qty;
+      const presets = state.ui?.discountPresets ?? [];
+      const discChips = base > 0 && presets.length > 0 && h('div', { class: 'quick-notes disc-chips' },
+        h('span', { class: 'muted small' }, 'Discount'),
+        presets.map((p) => h('button', {
+          class: it.discount_cents > 0 && it.discount_cents === Math.round(base * p / 100) ? 'on' : '',
+          onclick: () => { disc.value = `${p}%`; saveLine.click(); },
+        }, `−${p}%`)),
+        it.discount_cents > 0 && h('button', { onclick: () => { disc.value = ''; saveLine.click(); } }, 'None'));
       // Quick notes: tap to add to (or take off) the note.
       const chips = h('div', { class: 'quick-notes' });
       const drawChips = () => {
@@ -1195,7 +1302,10 @@ async function renderOrder() {
       drawChips();
       const saveLine = h('button', { class: 'primary', onclick: act(async () => {
         const newNote = note.value.trim() || null;
-        await setLine(it, { note: newNote, discount_cents: disc.value ? parseMoney(disc.value) : 0 });
+        let cents = 0;
+        try { cents = disc.value.trim() ? parseDiscount(disc.value, base) : 0; } catch { return toast('Discount: an amount like 2.50 or a percentage like 10%', true); }
+        await setLine(it, { note: newNote, discount_cents: cents });
+        if (cents !== it.discount_cents) toast(cents ? `${it.name}: −${money(cents)} discount` : `${it.name}: discount removed`);
         editing = null; draw();
         if (sent && newNote !== (it.note ?? null)) toast('Note changed · CHANGED ticket sent to the kitchen');
         else if (newNote !== (it.note ?? null)) toast(newNote ? `Note saved: “${newNote}”` : 'Note removed');
@@ -1211,7 +1321,7 @@ async function renderOrder() {
             class: !!it.starter === v ? 'on' : '',
             onclick: act(async () => { if (!!it.starter === v) return; order = await call('set_item_course', { itemId: it.id, starter: v }); draw(); toast(`${it.name}: ${l.toLowerCase()}`); }),
           }, l)))),
-        chips, h('div', { class: 'row' }, note, disc, saveLine,
+        chips, discChips, h('div', { class: 'row' }, note, disc, saveLine,
         sent && h('button', { title: 'Print this dish on a kitchen ticket again', onclick: act(async () =>
           reportPrint(await call('reprint_kitchen_items', { orderId, itemIds: [it.id] }), `${it.name} printed again`, true)) }, 'Print again'),
         h('button', { class: 'danger', onclick: act(async () => {
@@ -1359,48 +1469,27 @@ async function renderOrder() {
   };
   // Two taps, no reason: the first asks "Tap again", the second cancels.
   // Cancel: a confirm box asking for a PIN (a manager's or admin's once the kitchen has the order).
-  const cancelBtn = () => h('button', { class: 'danger', onclick: () => {
+  const cancelBtn = () => h('button', { class: 'danger', onclick: act(async () => {
     const sent = order.items.some((i) => i.sent_at);
-    let pin = '';
-    const dots = h('div', { class: 'pin-dots' });
-    const err = h('div', { class: 'change short' });
-    const ok = h('button', { class: 'danger paybig' }, 'Cancel order');
-    const drawPin = () => { setKids(dots, ...Array.from({ length: Math.max(4, pin.length) }, (_, i) => h('span', { class: i < pin.length ? 'on' : '' }))); ok.disabled = pin.length < 4; };
-    const key = (k) => { if (k === '⌫') pin = pin.slice(0, -1); else if (k === 'C') pin = ''; else if (pin.length < 8) pin += k; err.textContent = ''; drawPin(); };
-    const go = act(async () => {
-      if (pin.length < 4) return;
-      let r;
-      try {
-        r = await invoke('cancel_order', { orderId, reason: '', pin });
-      } catch (e) {
-        const msg = String(e?.message ?? e);
-        pin = ''; drawPin();
-        err.textContent = /permission/i.test(msg) ? 'This order is already in the kitchen: a manager or admin PIN is needed'
-          : /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
-        return;
-      }
-      closeModal(); closeOrder();
-      // Dishes still cooking get a CANCELLED ticket.
-      if (r?.error) toast(`Order #${order.id} cancelled, but the CANCELLED ticket did not print (${r.error}). Tell the kitchen.`, true);
-      else toast(`Order #${order.id} cancelled` + (r?.attempted ? ' · CANCELLED ticket sent to the kitchen' : ''));
+    let r;
+    const done = await pinDialog({
+      title: `Cancel order #${order.id}?`,
+      hint: sent ? 'The kitchen already has this order. Enter a manager or admin PIN to cancel it.' : 'Enter your PIN to confirm.',
+      okLabel: 'Cancel order', okClass: 'danger paybig', keepLabel: 'Keep the order',
+      submit: async (pin) => {
+        try { r = await invoke('cancel_order', { orderId, reason: '', pin }); } catch (e) {
+          const msg = String(e?.message ?? e);
+          return /permission/i.test(msg) ? 'This order is already in the kitchen: a manager or admin PIN is needed'
+            : /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
+        }
+      },
     });
-    ok.onclick = go;
-    showModal(h('h3', {}, `Cancel order #${order.id}?`),
-      h('div', { class: 'muted' }, sent ? 'The kitchen already has this order. Enter a manager or admin PIN to cancel it.' : 'Enter your PIN to confirm.'),
-      dots, err,
-      h('div', { class: 'keypad' }, ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))),
-      ok, h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Keep the order')));
-    drawPin();
-    document.removeEventListener('keydown', state.modalKeys);
-    document.activeElement?.blur();
-    state.modalKeys = (e) => {
-      if (/^[0-9]$/.test(e.key)) key(e.key);
-      else if (e.key === 'Backspace') key('⌫');
-      else if (e.key === 'Enter') { e.preventDefault(); go(); }
-      else if (e.key === 'Escape') closeModal();
-    };
-    document.addEventListener('keydown', state.modalKeys);
-  } }, 'Cancel');
+    if (!done) return;
+    closeOrder();
+    // Dishes still cooking get a CANCELLED ticket.
+    if (r?.error) toast(`Order #${order.id} cancelled, but the CANCELLED ticket did not print (${r.error}). Tell the kitchen.`, true);
+    else toast(`Order #${order.id} cancelled` + (r?.attempted ? ' · CANCELLED ticket sent to the kitchen' : ''));
+  }) }, 'Cancel');
 
   const head = h('div', { class: 'ticket-head' });
   function header() {
@@ -1460,6 +1549,46 @@ function showModal(...kids) {
   const m = document.getElementById('modal');
   setKids(m, h('div', { class: 'dialog card stack' }, ...kids));
   m.hidden = false;
+}
+
+/// A PIN keypad in a dialog, e.g. a manager approving something on this
+/// till (nobody is logged in or out). `submit(pin)` does the action and
+/// returns nothing when it worked, or a message to show (wrong PIN…).
+/// Resolves true once it worked, false if the dialog was closed.
+function pinDialog({ title, hint, okLabel, okClass = 'primary paybig', keepLabel = 'Cancel', submit }) {
+  return new Promise((resolve) => {
+    let pin = '', busy = false;
+    const dots = h('div', { class: 'pin-dots' });
+    const err = h('div', { class: 'change short' });
+    const ok = h('button', { class: okClass }, okLabel);
+    const drawPin = () => { setKids(dots, ...Array.from({ length: Math.max(4, pin.length) }, (_, i) => h('span', { class: i < pin.length ? 'on' : '' }))); ok.disabled = pin.length < 4; };
+    const key = (k) => { if (k === '⌫') pin = pin.slice(0, -1); else if (k === 'C') pin = ''; else if (pin.length < 8) pin += k; err.textContent = ''; drawPin(); };
+    const go = async () => {
+      if (pin.length < 4 || busy) return;
+      busy = true;
+      let msg;
+      try { msg = await submit(pin); } catch (e) { msg = String(e?.message ?? e); } finally { busy = false; }
+      if (msg) { pin = ''; drawPin(); err.textContent = msg; return; }
+      state.onModalClose = null;
+      closeModal();
+      resolve(true);
+    };
+    ok.onclick = go;
+    showModal(h('h3', {}, title), h('div', { class: 'muted' }, hint), dots, err,
+      h('div', { class: 'keypad' }, ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))),
+      ok, h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, keepLabel)));
+    drawPin();
+    state.onModalClose = () => resolve(false);
+    document.removeEventListener('keydown', state.modalKeys);
+    document.activeElement?.blur();
+    state.modalKeys = (e) => {
+      if (/^[0-9]$/.test(e.key)) key(e.key);
+      else if (e.key === 'Backspace') key('⌫');
+      else if (e.key === 'Enter') { e.preventDefault(); go(); }
+      else if (e.key === 'Escape') closeModal();
+    };
+    document.addEventListener('keydown', state.modalKeys);
+  });
 }
 
 /// Finish & Pay settings (Manage → Bills & receipts → Payments). Not set =
@@ -1898,9 +2027,10 @@ async function renderOrders() {
     h('button', { class: 'new-tile', style: color ? catStyle(color) : '', onclick }, icon(ico, 26), h('span', {}, label));
   screen(h('div', { class: 'page' },
     h('div', { class: 'new-tiles' },
-      newTile('Takeaway', 'bag', newOrder('takeaway')),
-      newTile('Collection', 'walk', newOrder('collection')),
-      newTile('Delivery', 'bike', newOrder('delivery')),
+      // Settings → Orders → Order types can hide the kinds a restaurant never uses.
+      typeShown('takeaway') && newTile('Takeaway', 'bag', newOrder('takeaway')),
+      typeShown('collection') && newTile('Collection', 'walk', newOrder('collection')),
+      typeShown('delivery') && newTile('Delivery', 'bike', newOrder('delivery')),
       channels.map((ch) => newTile(ch.name, 'bike', platformOrder(ch), ch.color || '#374151')),
       newTile('Open drawer', 'drawer', act(async () => printResult(await call('open_drawer'), 'Drawer opened')), '#475569')),
     form, h('div', { class: 'section-title' }, h('h3', {}, 'Open orders'), count), board));
@@ -3227,8 +3357,8 @@ async function renderCustomers() {
       h('h3', {}, c ? c.name : 'New customer'), ce.el,
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: act(async () => { const saved = await ce.commit(true); toast('Saved'); await load(); await edit(saved); }) }, 'Save'),
-        h('button', { onclick: orderFor('delivery') }, 'New delivery order'),
-        h('button', { onclick: orderFor('collection') }, 'New collection order'),
+        typeShown('delivery') && h('button', { onclick: orderFor('delivery') }, 'New delivery order'),
+        typeShown('collection') && h('button', { onclick: orderFor('collection') }, 'New collection order'),
         c && isAdmin() && h('button', { class: 'danger', onclick: act(async () => {
           await call('delete_customer', { id: c.id }); toast('Customer removed'); setKids(panel); await load();
         }) }, 'Delete')),
@@ -3491,6 +3621,79 @@ function quickNotesCard() {
     }) }, 'Save')));
 }
 
+/// Settings card: the screen staff see right after logging in.
+function startScreenCard() {
+  const seg = h('div', { class: 'seg' });
+  const draw = (cur) => setKids(seg, START_SCREENS.map(([v, label]) => h('button', {
+    class: v === cur ? 'on' : '',
+    onclick: act(async () => {
+      await call('set_setting', { key: 'start_screen', value: v });
+      draw(v);
+      toast(`After login: ${label}`);
+    }),
+  }, label)));
+  draw(state.ui?.startScreen ?? 'tables');
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Start screen after login'),
+    seg,
+    h('div', { class: 'muted small' }, 'New takeaway opens a new takeaway order at once; leaving it empty drops it.'));
+}
+
+/// Settings card: hide the new-order buttons for kinds of order a restaurant never takes.
+function orderTypesCard() {
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Order types'),
+    h('div', { class: 'muted small' }, 'Buttons for new orders on the Orders screen. Dine-in (from Tables) always shows; open orders of a hidden type still work.'),
+    settingSwitch('show_takeaway', 'Takeaway', 'Takeaway button shown', 'Takeaway button hidden'),
+    settingSwitch('show_collection', 'Collection', 'Collection button shown', 'Collection button hidden'),
+    settingSwitch('show_delivery', 'Delivery (your own drivers)', 'Delivery button shown', 'Delivery button hidden'));
+}
+
+/// Settings card: quick discount buttons and how much staff may give without a manager.
+function discountCard() {
+  const card = h('div', { class: 'card stack' });
+  invoke('get_settings', { keys: ['discount_presets', 'discount_staff_max_pct'] }).then((raw) => {
+    const c = uiSettings(raw);
+    const presets = h('input', { value: c.discountPresets.join(', '), placeholder: 'e.g. 5, 10, 15, 20', style: 'width:200px' });
+    const limit = numBox(c.discountLimit == null ? '' : String(c.discountLimit), { inputmode: 'numeric', placeholder: 'none' });
+    setKids(card,
+      h('h3', {}, 'Discounts'),
+      h('div', { class: 'muted small' }, 'Tap ✎ on an order line for these buttons. Staff can also type an amount or a percentage, e.g. 10%.'),
+      h('label', { class: 'field' }, 'Buttons', presets, '%'),
+      h('label', { class: 'field' }, 'Staff can give up to', limit, '% without a manager PIN'),
+      h('div', { class: 'muted small' }, 'Empty = no limit. Managers and admins can always give more.'),
+      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
+        const list = presets.value.split(/[,;\s]+/).filter(Boolean).map((x) => Number(x.replace('%', '')));
+        if (list.length > 8 || list.some((n) => !Number.isInteger(n) || n < 1 || n > 100)) return toast('Buttons: up to 8 whole percentages from 1 to 100, e.g. 5, 10, 15', true);
+        const max = limit.value.trim();
+        if (max !== '' && !(Number.isInteger(Number(max)) && Number(max) >= 0 && Number(max) <= 100)) return toast('Limit: a whole percentage from 0 to 100, or empty', true);
+        await call('set_setting', { key: 'discount_presets', value: list.join(',') });
+        await call('set_setting', { key: 'discount_staff_max_pct', value: max });
+        toast((list.length ? `Discount buttons ${list.join(' / ')} %` : 'No discount buttons') + (max !== '' ? ` · over ${max}% needs a manager` : ''));
+      }) }, 'Save discounts')));
+  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
+  return card;
+}
+
+/// Settings card: bigger menu tiles and order buttons, on every device.
+function buttonSizeCard() {
+  const seg = h('div', { class: 'seg' });
+  const draw = (big) => setKids(seg, [[false, 'Normal'], [true, 'Large']].map(([v, label]) => h('button', {
+    class: v === big ? 'on' : '',
+    onclick: act(async () => {
+      await call('set_setting', { key: 'button_size', value: v ? 'large' : 'normal' });
+      document.body.classList.toggle('big-buttons', v);
+      draw(v);
+      toast(`Menu buttons: ${label.toLowerCase()}`);
+    }),
+  }, label)));
+  draw(!!state.ui?.bigButtons);
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Menu button size'),
+    seg,
+    h('div', { class: 'muted small' }, 'Large: bigger menu tiles, categories and order buttons, easier to hit. Fewer tiles fit on the screen. Applies to every device.'));
+}
+
 /// Settings card: log out after a few minutes without activity.
 function autoLogoutCard() {
   const sel = h('select', {},
@@ -3504,11 +3707,22 @@ function autoLogoutCard() {
     state.autoLogout = Number(sel.value);
     toast(state.autoLogout ? `Auto logout after ${sel.selectedOptions[0].textContent} without activity` : 'Auto logout switched off');
   });
+  const warn = h('select', {}, [[0, 'No warning'], [10, '10 seconds'], [20, '20 seconds'], [30, '30 seconds'], [60, '1 minute']]
+    .map(([v, label]) => h('option', { value: v }, label)));
+  const warnNow = state.ui?.warnSecs ?? AUTO_LOGOUT_WARN_DEFAULT;
+  if (![...warn.options].some((o) => Number(o.value) === warnNow)) warn.append(h('option', { value: warnNow }, `${warnNow} seconds`));
+  warn.value = String(warnNow);
+  warn.onchange = act(async () => {
+    await call('set_setting', { key: 'auto_logout_warn_secs', value: warn.value });
+    toast(Number(warn.value) ? `"Logging out in ${warn.value} s" shows before auto logout` : 'Auto logout without a warning');
+  });
   return h('div', { class: 'card stack' },
     h('h3', {}, 'Login and auto logout'),
     h('div', { class: 'muted' }, 'Log out by itself when nobody touches the screen or presses a key for this long, so the next person must enter their own PIN. ' +
-      'A warning shows 30 seconds before. Open orders are kept. Applies to this till and every device using the local server.'),
+      'Open orders are kept. Applies to this till and every device using the local server.'),
     h('label', { class: 'field' }, 'Log out after', sel),
+    h('label', { class: 'field' }, 'Warn before', warn),
+    h('div', { class: 'muted small' }, 'A big "Logging out in … s" covers the screen; any tap or key keeps you logged in.'),
     pinAutoLogin());
 }
 
@@ -3622,12 +3836,15 @@ async function renderSettings() {
   const drawer = h('input', { type: 'checkbox', checked: receiptCfg.drawer_on_cash });
   const shopName = h('input', { value: receiptCfg.shop_name ?? '', placeholder: `${state.storeName || 'Restaurant name'} (the restaurant name above)`, style: 'flex:1' });
   const staffCopy = h('input', { type: 'checkbox', checked: receiptCfg.staff_copy !== false });
+  const taxBreakdown = h('input', { type: 'checkbox', checked: receiptCfg.tax_breakdown === true });
+  const showStaff = h('input', { type: 'checkbox', checked: receiptCfg.show_staff !== false });
   const header = h('textarea', { rows: 3, style: 'width:100%', placeholder: 'Address, phone, VAT number… (one per line)' });
   header.value = receiptCfg.header ?? '';
   const footer = h('input', { value: receiptCfg.footer ?? '', placeholder: 'e.g. Thank you for your visit!', style: 'flex:1' });
   const currency = h('input', { value: receiptCfg.currency ?? '£', style: 'width:60px' });
   const receiptSettings = () => ({
     ...receipt.config(), auto_print: autoPrint.checked, drawer_on_cash: drawer.checked, staff_copy: staffCopy.checked,
+    tax_breakdown: taxBreakdown.checked, show_staff: showStaff.checked,
     shop_name: shopName.value.trim() || null,
     header: header.value.trim() || null, footer: footer.value.trim() || null, currency: currency.value,
   });
@@ -3661,6 +3878,8 @@ async function renderSettings() {
     h('label', { class: 'check' }, autoPrint, ' Print a receipt automatically after payment'),
     h('label', { class: 'check' }, drawer, ' Open the cash drawer for cash payments'),
     h('label', { class: 'check' }, staffCopy, ' Also print a staff copy after payment, with the tax by class (net, VAT, gross)'),
+    h('label', { class: 'check' }, taxBreakdown, ' Show the VAT / tax breakdown on customer bills and receipts'),
+    h('label', { class: 'check' }, showStaff, ' Show "Served by" and the staff name on customer bills and receipts'),
     h('div', { class: 'row' }, 'Currency symbol', currency),
     h('label', { class: 'field' }, 'Name at the top of the bill', h('div', { class: 'row' }, shopName)),
     h('label', { class: 'field' }, 'Address, phone, VAT number (under the name, one per line)', header),
@@ -3717,11 +3936,12 @@ async function renderSettings() {
     bills: () => [receiptCard(), paymentsCard(), ticketLabelsCard()],
     kitchen: () => [isAdmin() && kitchenPrinterCard(), isAdmin() && routesCard(systemPrinters), kdsCard()],
     tickets: () => [splitCard()],
-    orders: () => [courseCard(), isAdmin() && fixSentCard(), quickNotesCard()],
+    orders: () => [isAdmin() && orderTypesCard(), isAdmin() && discountCard(), courseCard(), isAdmin() && fixSentCard(), quickNotesCard()],
     teams: () => [teamsCard()],
-    login: () => [autoLogoutCard()],
+    login: () => [startScreenCard(), autoLogoutCard()],
     delivery: () => [platformsCard()],
-    screen: () => [displayCard(), serverCard()],
+    // Full screen and the local server are this PC's own (not on a phone or tablet).
+    screen: () => [buttonSizeCard(), !state.remote && displayCard(), !state.remote && serverCard()],
     data: () => [backupCard(), menuBackupCard(), resetCard()],
     about: () => [aboutCard()],
   };
@@ -3739,7 +3959,7 @@ async function renderSettings() {
 /// for managers, none for staff.
 function settingsGroups() {
   const kitchen = ['kitchen', 'tickets', 'orders', 'teams'];
-  return SETTINGS_GROUPS.filter(([id]) => (id !== 'screen' || !state.remote) && (isAdmin() || (state.session?.role === 'manager' && kitchen.includes(id))));
+  return SETTINGS_GROUPS.filter(([id]) => isAdmin() || (state.session?.role === 'manager' && kitchen.includes(id)));
 }
 
 /// Manage: big tiles for the other screens (History, Menu, Staff…) and,

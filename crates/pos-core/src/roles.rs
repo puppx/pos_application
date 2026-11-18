@@ -43,6 +43,7 @@ impl Role {
                     | Permission::ManageFloorPlan
                     | Permission::ViewReports
                     | Permission::KitchenSettings
+                    | Permission::AnyDiscount
             ),
             // Staff run the shift: they can see sales reports and close the day.
             Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnOrders | Permission::ViewReports),
@@ -54,6 +55,9 @@ impl Role {
 pub enum Permission {
     /// Open orders, add items, send to kitchen, take payment.
     Sell,
+    /// A discount over the staff limit (Settings, `discount_staff_max_pct`)
+    /// without anyone else's PIN (admins and managers).
+    AnyDiscount,
     ViewOwnOrders,
     ViewAllOrders,
     /// Remove items already sent to the kitchen, cancel such orders, void paid orders.

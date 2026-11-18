@@ -1049,10 +1049,22 @@ impl Pos {
     /// of it that were sent), a new note CHANGED. None when nothing to tell
     /// or no kitchen printer is set up.
     pub fn update_item_for_kitchen(&mut self, s: &Session, item_id: i64, upd: &ItemUpdate) -> Result<(Order, Option<PrintJob>)> {
+        self.update_item_for_kitchen_approved(s, None, item_id, upd)
+    }
+
+    /// [`Pos::update_item_for_kitchen`] with a manager's approval for a
+    /// discount over the staff limit (see [`Pos::update_item_approved`]).
+    pub fn update_item_for_kitchen_approved(
+        &mut self,
+        s: &Session,
+        approver: Option<&Session>,
+        item_id: i64,
+        upd: &ItemUpdate,
+    ) -> Result<(Order, Option<PrintJob>)> {
         let order_id = self.order_of_item(item_id)?;
         let before = self.get_order(s, order_id)?;
         let Some(cur) = before.items.iter().find(|i| i.id == item_id && i.sent_at.is_some()).cloned() else {
-            return Ok((self.update_item(s, item_id, upd)?, None));
+            return Ok((self.update_item_approved(s, approver, item_id, upd)?, None));
         };
         if upd.qty < cur.qty {
             let gone = cur.qty - upd.qty;
@@ -1070,13 +1082,13 @@ impl Pos {
             // line (its name heads its dishes) is still on the order.
             if upd.qty == 0 {
                 let job = self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?;
-                return Ok((self.update_item(s, item_id, upd)?, job));
+                return Ok((self.update_item_approved(s, approver, item_id, upd)?, job));
             }
-            let order = self.update_item(s, item_id, upd)?;
+            let order = self.update_item_approved(s, approver, item_id, upd)?;
             let job = self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?;
             return Ok((order, job));
         }
-        let order = self.update_item(s, item_id, upd)?;
+        let order = self.update_item_approved(s, approver, item_id, upd)?;
         let job = if upd.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) != cur.note.as_deref() {
             let now: Vec<OrderItem> = order.items.iter().filter(|i| i.id == item_id).cloned().collect();
             self.kitchen_change_job(s, order_id, "CHANGED", &now)?

@@ -265,7 +265,7 @@
   let hideAfterTap = false;
   document.addEventListener('pointerdown', (e) => {
     if (!S.visible) return;
-    if (e.target instanceof Element && (e.target.closest('#osk') || eligible(e.target) || e.target.closest('label'))) return;
+    if (e.target instanceof Element && (e.target.closest('#osk') || e.target.closest('#idle-warn') || eligible(e.target) || e.target.closest('label'))) return;
     hideAfterTap = true;
   }, true);
   // Done, OK and the hide key close the keyboard the same way: once the tap

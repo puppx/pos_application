@@ -79,6 +79,14 @@ pub struct ReceiptSettings {
     /// tax broken down by class (net, VAT, gross).
     #[serde(default = "yes")]
     pub staff_copy: bool,
+    /// Customer bills and receipts also list the tax by rate (net, VAT,
+    /// gross) under the total, like the staff copy.
+    #[serde(default)]
+    pub tax_breakdown: bool,
+    /// "Served by <name>" on customer bills and receipts (the staff copy
+    /// always has it).
+    #[serde(default = "yes")]
+    pub show_staff: bool,
 }
 
 impl Default for ReceiptSettings {
@@ -92,6 +100,8 @@ impl Default for ReceiptSettings {
             footer: Some("Thank you!".into()),
             currency: pound(),
             staff_copy: true,
+            tax_breakdown: false,
+            show_staff: true,
         }
     }
 }
@@ -158,6 +168,10 @@ pub struct Receipt {
     pub tax_classes: Vec<TaxClass>,
     /// ("Service charge 12.5%", 3.13), when the order has one.
     pub service: Option<(String, i64)>,
+    /// The customer's copy lists `tax_classes` under the total too.
+    pub tax_breakdown: bool,
+    /// The customer's copy says who served.
+    pub show_staff: bool,
     pub total_cents: i64,
     /// ("Cash", 40.00), ("Change", 5.35)...: what was handed over.
     pub payment: Vec<(String, i64)>,
@@ -222,7 +236,9 @@ impl Receipt {
                 v.push(Line::new(Size::Normal, false, false, t));
             }
         }
-        v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
+        if self.show_staff {
+            v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
+        }
         line(&mut v, '-');
         two_col(&mut v, Size::Normal, true, "ITEM", "AMOUNT", width, "");
         line(&mut v, '-');
@@ -265,6 +281,13 @@ impl Receipt {
             }
             line(&mut v, '-');
         }
+        if self.tax_breakdown && !self.tax_classes.is_empty() {
+            self.tax_table(&mut v, width);
+            if self.tax_incl {
+                v.push(Line::new(Size::Normal, false, true, "Prices include tax"));
+            }
+            line(&mut v, '-');
+        }
         if !self.footer.is_empty() {
             v.push(Line::new(Size::Normal, false, false, ""));
             for f in &self.footer {
@@ -300,22 +323,7 @@ impl Receipt {
             two_col(&mut v, Size::Normal, false, &format!("{} x {}", l.qty, l.name), &self.money(l.amount_cents - l.discount_cents), width, "    ");
         }
         line(&mut v, '=');
-
-        // CLASS | NET | VAT | GROSS, the three amounts sharing what is left.
-        let label_w = 8;
-        let col = width.saturating_sub(label_w) / 3;
-        let row = |a: &str, b: &str, c: &str, d: &str| format!("{a:<label_w$}{b:>col$}{c:>col$}{d:>col$}");
-        v.push(Line::new(Size::Normal, true, false, row("TAX", "NET", "VAT", "GROSS")));
-        line(&mut v, '-');
-        let mut totals = (0, 0, 0);
-        for (i, c) in self.tax_classes.iter().enumerate() {
-            let letter = char::from(b'A' + u8::try_from(i.min(25)).unwrap_or(0));
-            v.push(Line::new(Size::Normal, false, false, row(
-                &format!("{letter} {}%", percent(c.rate_bp)), &self.money(c.net_cents), &self.money(c.vat_cents), &self.money(c.gross_cents))));
-            totals = (totals.0 + c.net_cents, totals.1 + c.vat_cents, totals.2 + c.gross_cents);
-        }
-        line(&mut v, '-');
-        v.push(Line::new(Size::Normal, true, false, row("Total", &self.money(totals.0), &self.money(totals.1), &self.money(totals.2))));
+        self.tax_table(&mut v, width);
         if self.discount_cents != 0 {
             v.push(Line::new(Size::Normal, false, false, "(after discounts)"));
         }
@@ -327,6 +335,51 @@ impl Receipt {
         line(&mut v, '=');
         v.push(Line::new(Size::Normal, false, true, if self.tax_incl { "Prices include tax" } else { "Tax added on top of prices" }));
         v
+    }
+
+    /// TAX | NET | VAT | GROSS, a row per rate and the totals, the three
+    /// amounts sharing what is left of the width.
+    fn tax_table(&self, v: &mut Vec<Line>, width: usize) {
+        let line = |v: &mut Vec<Line>, ch| v.push(Line::new(Size::Normal, false, false, rule(ch, width)));
+        let mut rows: Vec<(String, [i64; 3])> = Vec::new();
+        let mut totals = [0, 0, 0];
+        for (i, c) in self.tax_classes.iter().enumerate() {
+            let letter = char::from(b'A' + u8::try_from(i.min(25)).unwrap_or(0));
+            rows.push((format!("{letter} {}%", percent(c.rate_bp)), [c.net_cents, c.vat_cents, c.gross_cents]));
+            totals = [totals[0] + c.net_cents, totals[1] + c.vat_cents, totals[2] + c.gross_cents];
+        }
+        let all = rows.iter().map(|r| r.1).chain([totals]).flatten().collect::<Vec<_>>();
+        // Usually: an 8-wide label and three equal columns. Big amounts drop
+        // the currency sign, then the columns widen and the label gives way,
+        // so every amount keeps a space before it and the row fits the paper.
+        let mut label_w = 8;
+        let mut col = width.saturating_sub(label_w) / 3;
+        let widest = |sign: bool| all.iter().map(|&c| self.amount(c, sign).chars().count()).max().unwrap_or(0);
+        let sign = widest(true) < col;
+        if !sign {
+            col = col.max(widest(false) + 1);
+            label_w = width.saturating_sub(3 * col).max(5);
+        }
+        let cw = col.saturating_sub(1);
+        let row = |a: &str, b: &str, c: &str, d: &str| {
+            let a: String = a.chars().take(label_w).collect();
+            format!("{a:<label_w$} {b:>cw$} {c:>cw$} {d:>cw$}")
+        };
+        let cells = |r: [i64; 3]| r.map(|c| self.amount(c, sign));
+        v.push(Line::new(Size::Normal, true, false, row("TAX", "NET", "VAT", "GROSS")));
+        line(v, '-');
+        for (label, r) in &rows {
+            let [b, c, d] = cells(*r);
+            v.push(Line::new(Size::Normal, false, false, row(label, &b, &c, &d)));
+        }
+        line(v, '-');
+        let [b, c, d] = cells(totals);
+        v.push(Line::new(Size::Normal, true, false, row("Total", &b, &c, &d)));
+    }
+
+    /// An amount for the tax table, with or without the currency sign.
+    fn amount(&self, cents: i64, sign: bool) -> String {
+        if sign { self.money(cents) } else { money("", cents) }
     }
 
     pub fn staff_to_text(&self, width: usize) -> String {
@@ -512,6 +565,8 @@ impl Pos {
             total_cents: o.total_cents,
             payment,
             staff_payment,
+            tax_breakdown: cfg.tax_breakdown,
+            show_staff: cfg.show_staff,
         })
     }
 
@@ -619,6 +674,8 @@ impl Pos {
             total_cents: 3135,
             payment: vec![("Cash".into(), 4000), ("  Change".into(), 865)],
             staff_payment: vec![("Paid: Cash".into(), 3135), ("  Tendered".into(), 4000), ("  Change".into(), 865)],
+            tax_breakdown: cfg.tax_breakdown,
+            show_staff: cfg.show_staff,
         };
         let p = &cfg.printer;
         Ok(PrintJob::copies(p.target.clone(), &[], r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs))

@@ -151,7 +151,11 @@ impl Pos {
     pub fn business_day(&self, s: &Session) -> Result<BusinessDay> {
         s.require(Permission::Sell)?;
         let date = self.business_date()?;
-        let open_orders = self.conn.query_row("SELECT COUNT(*) FROM orders WHERE status = 'open'", [], |r| r.get(0))?;
+        let open_orders = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM orders WHERE status = 'open' AND NOT ({})", crate::orders::EMPTY_ORDER),
+            [],
+            |r| r.get(0),
+        )?;
         Ok(BusinessDay { date: date.format("%Y-%m-%d").to_string(), since: self.day_start(date)?, open_orders })
     }
 
@@ -161,6 +165,16 @@ impl Pos {
     pub fn close_day(&self, s: &Session) -> Result<DayClose> {
         s.require(Permission::ViewReports)?;
         let tx = self.conn.unchecked_transaction()?;
+        // Orders opened and left with nothing on them (a table tapped, a
+        // till reloaded) are not real orders: cancel them, not block the day.
+        let dropped = tx.execute(
+            &format!("UPDATE orders SET status = 'cancelled', closed_by = ?1, closed_at = unixepoch(), close_reason = 'empty'
+                      WHERE status = 'open' AND {}", crate::orders::EMPTY_ORDER),
+            [s.user_id],
+        )?;
+        if dropped > 0 {
+            crate::orders::audit_tx(&tx, s.user_id, "order.cancel", &format!("{dropped} empty order(s) at day close"))?;
+        }
         let open: i64 = tx.query_row("SELECT COUNT(*) FROM orders WHERE status = 'open'", [], |r| r.get(0))?;
         if open > 0 {
             return invalid(format!(

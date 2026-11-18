@@ -107,6 +107,27 @@
     el.dispatchEvent(new KeyboardEvent('keyup', init));
     hideAfterKey();
   }
+  // The field after this one in the same dialog, pop-up, form or card, for
+  // the Next key (null on the last field, or a field on its own).
+  function nextField(el) {
+    const box = el.closest('#modal') || el.closest('.popup') || el.closest('form') || el.closest('.card') || el.closest('.line-edit');
+    if (!box) return null;
+    const fields = [...box.querySelectorAll('input, textarea')]
+      .filter((f) => eligible(f) === f && f.getClientRects().length > 0 && getComputedStyle(f).visibility !== 'hidden');
+    const i = fields.indexOf(el);
+    return i >= 0 ? fields[i + 1] ?? null : null;
+  }
+  function goNext() {
+    const next = S.el && nextField(S.el);
+    if (!next) return;
+    target(next); // before focus, so the OS keyboard stays away
+    next.focus();
+    if (typeof next.selectionStart === 'number' && next.type !== 'number') {
+      try { next.setSelectionRange(next.value.length, next.value.length); } catch { /* not every type has a caret */ }
+    }
+    draw();
+    setTimeout(() => next.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 60);
+  }
   function typeKey(ch) {
     insert(ch);
     if (S.shift === 1) { S.shift = 0; draw(); }
@@ -183,7 +204,10 @@
     for (const c of '789') digit(c);
     add(ICON_BACK, 'fn', backspace, { html: true, repeat: true, title: 'Backspace' });
     for (const c of '456') digit(c);
-    add('OK', 'done', enter, { style: 'grid-row: 2 / span 2' });
+    // More fields after this one: Next above OK, each half of the tall key.
+    const next = nextField(el);
+    if (next) add('Next', 'next', goNext, { title: 'Next field', style: 'grid-row: 2' });
+    add('OK', 'done', enter, { style: next ? 'grid-row: 3' : 'grid-row: 2 / span 2' });
     for (const c of '123') digit(c);
     if (allowsDot(el)) add('.', '', () => insert('.')); else g.append(document.createElement('span'));
     digit('0');
@@ -210,6 +234,7 @@
       r.append(key('', 'space', () => insert(' '), { title: 'Space' }));
       r.append(key(',', '', () => typeKey(',')));
       r.append(key('.', '', () => typeKey('.')));
+      if (nextField(S.el)) { r.classList.add('has-next'); r.append(key('Next', 'next', goNext, { title: 'Next field' })); }
       r.append(key(S.el.tagName === 'TEXTAREA' ? '⏎' : 'Done', 'done', enter));
       box.append(r);
     }

@@ -1062,6 +1062,8 @@ impl Pos {
         upd: &ItemUpdate,
     ) -> Result<(Order, Option<PrintJob>)> {
         let order_id = self.order_of_item(item_id)?;
+        // Closed first: a closed order may be hidden from this user.
+        crate::orders::require_open(&self.conn, order_id)?;
         let before = self.get_order(s, order_id)?;
         let Some(cur) = before.items.iter().find(|i| i.id == item_id && i.sent_at.is_some()).cloned() else {
             return Ok((self.update_item_approved(s, approver, item_id, upd)?, None));

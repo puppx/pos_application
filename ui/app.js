@@ -197,10 +197,8 @@ function friendlyTime(t) {
   if (diff === 1) return `yesterday ${hm}`;
   return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${hm}`;
 }
-const today = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const today = () => isoDate(new Date());
 function dayRange(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   return [new Date(y, m - 1, d).getTime() / 1000, new Date(y, m - 1, d + 1).getTime() / 1000];
@@ -242,6 +240,32 @@ function toast(msg, err = false) {
 /// Saving a setting can change the order screen ("Starter or Main?", tax,
 /// service charge…): the next order screen loads the menu and settings again.
 const SETTINGS_WRITES = new Set(['set_setting', 'set_service_settings', 'set_receipt_settings']);
+/// The server's answer for anything done to an order that is no longer open (orders.rs `require_open`).
+const ORDER_CLOSED = 'this order is already closed';
+/// True when `msg` (from a call made on the order screen) means the order on
+/// screen is gone: paid, cancelled, or merged into another bill on another till.
+function isDeadOrder(msg, args = {}, cmd = null) {
+  if (!state.orderOpen || state.orderId == null) return false;
+  if (msg === ORDER_CLOSED) return true;
+  // Joined onto another bill or emptied by a move: the order no longer exists.
+  return msg === 'not found' && (args.orderId === state.orderId || (cmd === 'get_order' && args.id === state.orderId));
+}
+/// "No permission" for the order on screen: a closed order is hidden from
+/// staff who did not open or pay it, while an open one never is. Ask again
+/// to tell a dead order from a real refusal.
+async function deniedForDeadOrder(msg, args, cmd) {
+  if (!state.orderOpen || state.orderId == null || !/permission/i.test(msg)) return false;
+  if (args.orderId !== state.orderId && !(cmd === 'get_order' && args.id === state.orderId)) return false;
+  try { return (await invoke('get_order', { id: state.orderId })).status !== 'open'; } catch { return true; }
+}
+/// Leave a dead order instead of failing on every tap.
+function leaveDeadOrder() {
+  toast('This order was closed on another till', true);
+  state.onModalClose = null;
+  closeModal();
+  state.orderEmpty = null;
+  closeOrder();
+}
 async function call(cmd, args = {}) {
   try {
     const r = await invoke(cmd, args);
@@ -250,6 +274,7 @@ async function call(cmd, args = {}) {
   } catch (e) {
     const msg = String(e?.message ?? e);
     if (msg === 'please log in') start();
+    else if (isDeadOrder(msg, args, cmd) || await deniedForDeadOrder(msg, args, cmd)) leaveDeadOrder();
     else toast(msg, true);
     const err = new Error(msg);
     err.handled = true;
@@ -616,6 +641,7 @@ function openOrder(id) {
 function closeOrder() {
   const left = state.orderId;
   state.orderId = null;
+  state.orderOpen = false;
   state.view = state.returnTo;
   dropEmptyOrder(left).finally(renderShell);
 }
@@ -756,9 +782,14 @@ async function renderFloor() {
   }
   const plan = planBox(290);
   const stats = h('div', { class: 'stats' });
+  // The colours the tables use, each with how many tables show it now.
+  const legend = h('div', { class: 'legend' });
   const draw = async () => {
     const tables = await call('floor_status', { floorId: state.floorId });
     const busy = tables.filter((t) => t.order_id);
+    setKids(legend, [['free', 'Free', tables.length - busy.length], ['busy', 'Occupied', busy.length],
+      ['unsent', 'Not sent', busy.filter((t) => t.unsent_count).length], ['held', 'Mains waiting', busy.filter((t) => t.held_count).length]]
+      .map(([cls, label, n]) => h('span', {}, h('i', { class: cls }), label, h('b', {}, n))));
     setKids(stats, 
       h('div', { class: 'stat' }, h('small', {}, 'Occupied'), h('strong', {}, `${busy.length}/${tables.length}`)),
       h('div', { class: 'stat' }, h('small', {}, 'Open bills'), h('strong', {}, money(busy.reduce((n, t) => n + t.total_cents, 0)))),
@@ -788,10 +819,7 @@ async function renderFloor() {
   screen(h('div', { class: 'page' },
     h('div', { class: 'toolbar' },
       segmented(floors.map((f) => [f.id, f.name]), state.floorId, (id) => { state.floorId = id; renderFloor(); }),
-      h('span', { class: 'spacer' }),
-      h('div', { class: 'legend' },
-        h('span', {}, h('i', { class: 'free' }), 'Free'), h('span', {}, h('i', { class: 'busy' }), 'Occupied'),
-        h('span', {}, h('i', { class: 'unsent' }), 'Not sent'), h('span', {}, h('i', { class: 'held' }), 'Mains waiting'))),
+      h('span', { class: 'spacer' }), legend),
     stats, plan));
   await draw();
   live(draw);
@@ -848,7 +876,9 @@ const preselect = (g) => (g.min_select === 1 && g.max_select === 1 && g.options.
 
 async function renderOrder() {
   await loadMenu();
+  state.orderOpen = false;
   let order = await call('get_order', { id: state.orderId });
+  state.orderOpen = order.status === 'open';
   if (order.status !== 'open') {
     app.classList.remove('fill');
     return screen(h('div', { class: 'page narrow' },
@@ -886,6 +916,7 @@ async function renderOrder() {
       let cents;
       try { cents = parseMoney(price.value); } catch { return toast('Enter a price like 2 or 2.50', true); }
       order = await call('add_open_item', { orderId, name: name.value, priceCents: cents, qty, note: note.value.trim() || null, starter: course });
+      editing = null; // a dish added: the totals and Send come back
       closeModal(); draw(); toast(`${name.value.trim()} added`);
     });
     showModal(h('h3', {}, 'Other dish (not on the menu)'),
@@ -978,6 +1009,7 @@ async function renderOrder() {
   // `course`: true = starter, false = main, null = as on the menu.
   async function addItem(productId, optionIds = [], variantId = null, course = null) {
     order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds, starter: course });
+    editing = null; // a dish added: the totals and Send come back
     draw();
   }
   // Tap on a menu item: add it straight away, or ask for its options first.
@@ -1137,6 +1169,7 @@ async function renderOrder() {
       }
       const picks = sections.flatMap((s) => chosen.get(s.id).map((x) => ({ section_id: s.id, product_id: x.product_id, with_id: x.with_id, variant_id: x.variant_id, option_ids: x.option_ids })));
       order = await call('add_set', { orderId, setId: p.id, picks, note: null });
+      editing = null;
       closePicker();
       draw();
     });
@@ -1160,14 +1193,18 @@ async function renderOrder() {
     if (changes.qty > 0 && changes.qty < it.qty && it.discount_cents && !('discount_cents' in changes)) {
       changes = { ...changes, discount_cents: Math.floor(it.discount_cents * changes.qty / it.qty) };
     }
-    const args = { itemId: it.id, update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...changes } };
+    const args = { orderId, itemId: it.id, update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...changes } };
     try {
       order = await invoke('update_item', args);
     } catch (e) {
       const msg = String(e?.message ?? e);
       // Over the staff discount limit (Settings → Orders → Discounts): a manager approves with their PIN.
       if (!/needs a manager/i.test(msg)) {
-        if (msg === 'please log in') start(); else toast(msg, true);
+        if (msg === 'please log in') start();
+        else if (isDeadOrder(msg)) leaveDeadOrder();
+        // The dish is gone (removed or moved on another till): show the order as it is now.
+        else if (msg === 'not found') { toast(`${it.name} was changed on another till`, true); order = await call('get_order', { id: orderId }); draw(); }
+        else toast(msg, true);
         const err = new Error(msg); err.handled = true; throw err;
       }
       const ok = await pinDialog({
@@ -1175,6 +1212,7 @@ async function renderOrder() {
         submit: async (pin) => {
           try { order = await invoke('update_item', { ...args, pin }); } catch (e2) {
             const m = String(e2?.message ?? e2);
+            if (isDeadOrder(m)) { setTimeout(leaveDeadOrder); return 'This order was closed on another till'; }
             return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
           }
         },
@@ -1182,6 +1220,8 @@ async function renderOrder() {
       if (!ok) { const err = new Error('Discount not approved'); err.handled = true; throw err; }
       toast('Discount approved');
     }
+    // The dish now belongs to another bill (its order was joined onto it on another till).
+    if (order.id !== orderId) { leaveDeadOrder(); return; }
     draw();
   }
   async function send(allCourses = false, what = 'Sent') {
@@ -1248,7 +1288,18 @@ async function renderOrder() {
           it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
           it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt)));
       }
-      const toggleEdit = () => { editing = editing === it.id ? null : it.id; draw(); };
+      const toggleEdit = () => {
+        editing = editing === it.id ? null : it.id;
+        draw();
+        // The editor can open below the visible lines (phones, short screens):
+        // scroll the list so all of it shows, but never past its dish's line.
+        const ed = editing != null && lines.querySelector('.line-edit');
+        if (ed) {
+          const box = lines.getBoundingClientRect(), top = ed.previousElementSibling.getBoundingClientRect().top, bottom = ed.getBoundingClientRect().bottom;
+          if (bottom > box.bottom) lines.scrollTop += Math.min(bottom - box.bottom, top - box.top);
+          else if (top < box.top) lines.scrollTop -= box.top - top;
+        }
+      };
       const row = h('tr', {},
         h('td', { class: 'line-name', title: 'Note, discount, remove', onclick: toggleEdit }, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
@@ -1312,7 +1363,7 @@ async function renderOrder() {
       }) }, 'Save');
       // Enter (or Done on the on-screen keyboard) saves too.
       for (const el of [note, disc]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveLine.click(); });
-      return [row, h('tr', {}, h('td', { colspan: 4 },
+      return [row, h('tr', { class: 'line-edit' }, h('td', { colspan: 4 },
         sent && h('div', { class: 'muted small sent-hint' }, 'Already in the kitchen. Fix it here: − or Remove prints a CANCELLED ticket, a new note prints a CHANGED ticket. ' +
           'Then add the right dish and send it as usual.'),
         // Starter or main course, while it has not gone to the kitchen.
@@ -1365,53 +1416,64 @@ async function renderOrder() {
 
   // --- secondary actions: move table, customer details, cancel ---
   // Move: the whole order to another table (joining its bill if busy), or some dishes.
+  // A dialog with every table as a big button, floor by floor: pick one, then Move.
   const showMove = act(async () => {
     const floors = await call('list_floors');
     const statuses = await Promise.all(floors.map((f) => call('floor_status', { floorId: f.id })));
-    const sel = h('select', {}, floors.map((f, i) => h('optgroup', { label: f.name },
-      statuses[i].filter((t) => t.id !== order.table_id).map((t) => h('option', { value: t.id }, t.order_id ? `${t.name} (has a bill: join)` : t.name)))));
-    const goTo = (o, msg) => { toast(msg); state.orderId = o.id; renderShell(); };
-    const whole = act(async () => {
-      const busy = sel.selectedOptions[0]?.textContent.includes('join');
-      const o = await call('merge_into_table', { orderId, tableId: Number(sel.value) });
-      goTo(o, busy ? `Joined onto ${o.table_name}: one bill` : `Moved to ${o.table_name}`);
-    });
-    const some = () => {
-      const pick = new Map();
-      const list = h('div', { class: 'stack dish-pick' });
-      const ok = h('button', { class: 'primary' });
-      const bill = order.items.filter((i) => !i.parent_id);
-      const drawPick = () => {
-        setKids(list, bill.map((it) => {
-          const q = pick.get(it.id) ?? 0;
-          const set = (v) => { v = Math.max(0, Math.min(it.qty, v)); if (v) pick.set(it.id, v); else pick.delete(it.id); drawPick(); };
-          return h('div', { class: `row dish-row ${q ? 'on' : ''}`, onclick: () => set(q < it.qty ? q + 1 : 0) },
-            h('span', { style: 'flex:1' }, it.name),
-            h('div', { class: 'stepper', onclick: (e) => e.stopPropagation() },
-              h('button', { onclick: () => set(q - 1) }, '−'), h('span', {}, `${q}/${it.qty}`), h('button', { onclick: () => set(q + 1) }, '+')));
-        }));
-        ok.textContent = pick.size ? `Move ${[...pick.values()].reduce((a, b) => a + b, 0)} dish(es)` : 'Tap the dishes to move';
-        ok.disabled = !pick.size;
-      };
-      ok.onclick = act(async () => {
-        const all = bill.every((i) => (pick.get(i.id) ?? 0) >= i.qty);
-        const o = await call('move_items', { orderId, tableId: Number(sel.value), items: [...pick.entries()] });
-        if (all) return goTo(o, `Everything moved to ${o.table_name}`);
-        order = await call('get_order', { id: orderId });
-        setKids(extra); draw();
-        toast(`Moved to ${o.table_name} (nothing reprinted)`);
-      });
-      setKids(extra, h('div', { class: 'stack card' }, h('div', { class: 'row' }, 'Move to', sel), list,
-        h('div', { class: 'row' }, ok, h('button', { onclick: () => setKids(extra) }, 'Close'))));
-      drawPick();
+    const bill = order.items.filter((i) => !i.parent_id);
+    const pick = new Map();
+    let target = null, some = false;
+    const goTo = (o, msg) => { closeModal(); toast(msg); state.orderId = o.id; renderShell(); };
+    const mode = h('div', { class: 'seg' });
+    const dishes = h('div', { class: 'stack dish-pick' });
+    const tables = h('div', { class: 'stack move-tables' });
+    const ok = h('button', { class: 'primary' });
+    const drawMove = () => {
+      setKids(mode, [[false, 'Whole order'], [true, 'Some dishes']].map(([v, l]) =>
+        h('button', { class: some === v ? 'on' : '', onclick: () => { some = v; drawMove(); } }, l)));
+      dishes.hidden = !some;
+      setKids(dishes, some && bill.map((it) => {
+        const q = pick.get(it.id) ?? 0;
+        const set = (v) => { v = Math.max(0, Math.min(it.qty, v)); if (v) pick.set(it.id, v); else pick.delete(it.id); drawMove(); };
+        return h('div', { class: `row dish-row ${q ? 'on' : ''}`, onclick: () => set(q < it.qty ? q + 1 : 0) },
+          h('span', { style: 'flex:1' }, it.name),
+          h('div', { class: 'stepper', onclick: (e) => e.stopPropagation() },
+            h('button', { onclick: () => set(q - 1) }, '−'), h('span', {}, `${q}/${it.qty}`), h('button', { onclick: () => set(q + 1) }, '+')));
+      }));
+      const groups = floors.map((f, i) => [f, statuses[i].filter((t) => t.id !== order.table_id)]).filter(([, ts]) => ts.length);
+      setKids(tables, groups.map(([f, ts]) => [
+        groups.length > 1 && h('div', { class: 'pay-label' }, f.name),
+        h('div', { class: 'table-pick' }, ts.map((t) => h('button', {
+          class: `${t.order_id ? 'busy' : ''} ${target?.id === t.id ? 'on' : ''}`,
+          title: t.order_id ? 'Has a bill: the dishes join it' : 'Free table',
+          onclick: () => { target = t; drawMove(); },
+        }, h('b', {}, t.name), h('small', {}, t.order_id ? `bill ${money(t.total_cents)}` : 'free')))),
+      ]));
+      if (!groups.length) tables.append(h('div', { class: 'muted' }, 'There is no other table to move to.'));
+      const n = [...pick.values()].reduce((a, b) => a + b, 0);
+      ok.disabled = !target || (some && !n);
+      ok.textContent = !target ? 'Tap a table' : some && !n ? 'Tap the dishes to move'
+        : some ? `Move ${n} dish(es) to ${target.name}` : target.order_id ? `Join ${target.name}'s bill` : `Move to ${target.name}`;
     };
-    setKids(extra, h('div', { class: 'stack card' },
-      h('div', { class: 'row' }, 'Move to', sel),
-      h('div', { class: 'row' },
-        h('button', { class: 'primary', onclick: whole }, 'Whole order'),
-        h('button', { onclick: some }, 'Some dishes'),
-        h('button', { onclick: () => setKids(extra) }, 'Close')),
-      h('div', { class: 'muted small' }, 'A table that already has a bill: the dishes join that bill. Dishes already sent stay sent.')));
+    ok.onclick = act(async () => {
+      if (!some) {
+        const o = await call('merge_into_table', { orderId, tableId: target.id });
+        // The answer says what happened (the table may have got a bill meanwhile).
+        return goTo(o, o.id !== orderId ? `Joined onto ${o.table_name}: one bill` : `Moved to ${o.table_name}`);
+      }
+      const all = bill.every((i) => (pick.get(i.id) ?? 0) >= i.qty);
+      const o = await call('move_items', { orderId, tableId: target.id, items: [...pick.entries()] });
+      if (all) return goTo(o, `Everything moved to ${o.table_name}`);
+      closeModal();
+      order = await call('get_order', { id: orderId });
+      draw();
+      toast(`Moved to ${o.table_name} (nothing reprinted)`);
+    });
+    drawMove();
+    showModal(h('h3', {}, 'Move to another table'), mode, dishes, tables,
+      h('div', { class: 'muted small' }, 'A table that already has a bill (yellow): the dishes join that bill. Dishes already sent stay sent.'),
+      h('div', { class: 'row' }, ok, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Cancel')));
+    document.querySelector('#modal .dialog')?.classList.add('move-dialog');
   });
   const showDetails = () => {
     const f = customerFields(order.order_type, order);
@@ -1479,6 +1541,7 @@ async function renderOrder() {
       submit: async (pin) => {
         try { r = await invoke('cancel_order', { orderId, reason: '', pin }); } catch (e) {
           const msg = String(e?.message ?? e);
+          if (isDeadOrder(msg, { orderId })) { setTimeout(leaveDeadOrder); return 'This order was closed on another till'; }
           return /permission/i.test(msg) ? 'This order is already in the kitchen: a manager or admin PIN is needed'
             : /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
         }
@@ -2044,17 +2107,43 @@ async function renderHistory() {
   const date = h('input', { type: 'date', value: today() });
   const list = h('div');
   const detail = h('div', { 'data-hint': 'Tap an order to see its details, reprint or void it.' });
+  // Quick dates: one day back from today, or the last 7 days (today included).
+  const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d; };
+  let week = false;
+  const quick = h('div', { class: 'seg quick-dates' });
+  const drawQuick = () => setKids(quick, [['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Last 7 days']].map(([k, label]) => h('button', {
+    class: (k === 'week' ? week : !week && date.value === isoDate(daysAgo(k === 'today' ? 0 : 1))) ? 'on' : '',
+    onclick: () => { week = k === 'week'; date.value = isoDate(daysAgo(k === 'yesterday' ? 1 : 0)); load(); },
+  }, label)));
+  let loads = 0; // a newer tap wins over a slow earlier load
   const load = act(async () => {
-    const [from, to] = dayRange(date.value);
-    const orders = await call('list_orders', { from, to, limit: 500, offset: 0 });
+    drawQuick();
+    if (!date.value) return;
+    const mine = ++loads;
+    const [from, to] = week ? [dayRange(isoDate(daysAgo(6)))[0], dayRange(today())[1]] : dayRange(date.value);
+    // The server sends at most 500 at a time: a busy week takes several pages.
+    const PAGE = 500, MAX = 5000;
+    const orders = [];
+    for (let offset = 0; offset < MAX; offset += PAGE) {
+      const page = await call('list_orders', { from, to, limit: PAGE, offset });
+      if (mine !== loads) return;
+      orders.push(...page);
+      if (page.length < PAGE) break;
+    }
+    // Exactly 5000 is not "more than shown": look one past the end.
+    const more = orders.length >= MAX && (await call('list_orders', { from, to, limit: 1, offset: MAX })).length > 0;
+    if (mine !== loads) return;
     shown = orders;
+    // Several days: the date goes with the time.
+    const opened = (t) => (week ? friendlyTime(t) : new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     setKids(list, h('table', {},
       h('tr', {}, h('th', {}, '#'), h('th', {}, 'Opened'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Total')),
       orders.map((o) => h('tr', { class: 'click', onclick: act(() => show(o.id)) },
-        h('td', {}, h('strong', {}, `#${o.id}`)), h('td', {}, new Date(o.opened_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+        h('td', {}, h('strong', {}, `#${o.id}`)), h('td', {}, opened(o.opened_at)),
         h('td', {}, typeChip(o.order_type)), h('td', {}, where(o)), h('td', {}, h('span', { class: `status s-${o.status}` }, o.status)),
         h('td', { class: 'num' }, money(o.total_cents))))));
-    if (!orders.length) setKids(list, h('div', { class: 'empty small' }, icon('history', 36), h('p', {}, 'No closed orders on this day.')));
+    if (more) list.prepend(h('div', { class: 'badge warn' }, `Showing the latest ${MAX} orders: pick one day to see the rest.`));
+    if (!orders.length) setKids(list, h('div', { class: 'empty small' }, icon('history', 36), h('p', {}, week ? 'No closed orders in the last 7 days.' : 'No closed orders on this day.')));
   });
   async function show(id) {
     setKids(detail, orderDetail(await call('get_order', { id }), async (what) => {
@@ -2063,13 +2152,13 @@ async function renderHistory() {
       await load();
     }));
   }
-  date.onchange = load;
+  date.onchange = (e) => { week = false; load(e); };
   let shown = [];
   const bulk = () => bulkDelete('Delete orders', shown.filter((o) => o.status !== 'open').map((o) => ({
     id: o.id, label: [`#${o.id} ${TYPE[o.order_type] ?? ''}`, where(o)].filter(Boolean).join(' · '), sub: `${o.status} · ${money(o.total_cents)}`,
   })), (ids) => deleteMany('order', ids, 'order(s)'), async () => { setKids(detail); await load(); });
   screen(h('div', { class: 'page split' },
-    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('label', { class: 'field' }, 'Day', date), h('span', { class: 'grow' }),
+    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, quick, h('label', { class: 'field' }, 'Day', date), h('span', { class: 'grow' }),
       isAdmin() && h('button', { class: 'danger-outline', onclick: bulk }, 'Delete several…')), h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, detail)));
   await load();

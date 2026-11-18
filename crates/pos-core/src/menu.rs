@@ -28,7 +28,18 @@ pub struct Category {
     pub dessert: bool,
     /// The main category this is a sub-category of; None = a main category.
     pub parent_id: Option<i64>,
+    /// A sub-category's "off" choices: defaults it does not take from its
+    /// main category (bits [`FLAG_OFF_STARTER`], [`FLAG_OFF_PREP`],
+    /// [`FLAG_OFF_DRINK`], [`FLAG_OFF_DESSERT`]). Its own flag on wins; with
+    /// both clear it takes the main category's. Always 0 for a main category.
+    pub flags_off: i64,
 }
+
+pub const FLAG_OFF_STARTER: i64 = 1;
+pub const FLAG_OFF_PREP: i64 = 2;
+pub const FLAG_OFF_DRINK: i64 = 4;
+pub const FLAG_OFF_DESSERT: i64 = 8;
+pub(crate) const FLAGS_OFF_ALL: i64 = FLAG_OFF_STARTER | FLAG_OFF_PREP | FLAG_OFF_DRINK | FLAG_OFF_DESSERT;
 
 const NAME_TAKEN: &str = "a category with that name already exists";
 
@@ -47,6 +58,7 @@ fn category_from_row(r: &Row) -> rusqlite::Result<Category> {
         drink: r.get(10)?,
         dessert: r.get(11)?,
         parent_id: r.get(12)?,
+        flags_off: r.get(13)?,
     })
 }
 
@@ -69,7 +81,7 @@ impl Pos {
     pub fn list_categories(&self, s: &Session, include_inactive: bool) -> Result<Vec<Category>> {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert, parent_id FROM categories
+            "SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert, parent_id, flags_off FROM categories
              WHERE ?1 OR active = 1 ORDER BY sort_order, name",
         )?;
         let rows = stmt.query_map([include_inactive], category_from_row)?;
@@ -117,7 +129,7 @@ impl Pos {
 
     fn get_category(&self, id: i64) -> Result<Category> {
         self.conn
-            .prepare_cached("SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert, parent_id FROM categories WHERE id = ?1")?
+            .prepare_cached("SELECT id, name, sort_order, color, active, tax_rate_bp, starter, name_alt, prep, team_id, drink, dessert, parent_id, flags_off FROM categories WHERE id = ?1")?
             .query_row([id], category_from_row)
             .optional()?
             .ok_or(PosError::NotFound)
@@ -157,8 +169,29 @@ impl Pos {
                 return invalid("this category has sub-categories, so it cannot go under another one");
             }
         }
-        self.conn.execute("UPDATE categories SET parent_id = ?2 WHERE id = ?1", params![id, parent])?;
+        // A main category has nothing to switch off.
+        self.conn.execute(
+            "UPDATE categories SET parent_id = ?2, flags_off = CASE WHEN ?2 IS NULL THEN 0 ELSE flags_off END WHERE id = ?1",
+            params![id, parent],
+        )?;
         self.audit(Some(s.user_id), "category.parent", &format!("{id} {parent:?}"))?;
+        self.get_category(id)
+    }
+
+    /// A sub-category's "off" choices ([`Category::flags_off`]): which of its
+    /// main category's defaults (starter, prepare ahead, drink, dessert) its
+    /// new items do not get. Only for sub-categories (0 is always allowed).
+    pub fn set_category_flags_off(&self, s: &Session, id: i64, flags_off: i64) -> Result<Category> {
+        s.require(Permission::ManageMenu)?;
+        if !(0..=FLAGS_OFF_ALL).contains(&flags_off) {
+            return invalid("unknown category defaults");
+        }
+        let c = self.get_category(id)?;
+        if flags_off != 0 && c.parent_id.is_none() {
+            return invalid("only a sub-category can switch off its main category's defaults");
+        }
+        self.conn.execute("UPDATE categories SET flags_off = ?2 WHERE id = ?1", params![id, flags_off])?;
+        self.audit(Some(s.user_id), "category.flags_off", &format!("{id} {flags_off}"))?;
         self.get_category(id)
     }
 
@@ -173,7 +206,7 @@ impl Pos {
             .ok_or(PosError::NotFound)?;
         tx.execute("UPDATE products SET category_id = NULL, updated_at = unixepoch() WHERE category_id = ?1", [id])?;
         // Its sub-categories become main categories.
-        tx.execute("UPDATE categories SET parent_id = NULL WHERE parent_id = ?1", [id])?;
+        tx.execute("UPDATE categories SET parent_id = NULL, flags_off = 0 WHERE parent_id = ?1", [id])?;
         tx.execute("DELETE FROM categories WHERE id = ?1", [id])?;
         tx.execute(
             "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'category.delete', ?2)",

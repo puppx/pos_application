@@ -451,7 +451,7 @@ function renderLogin() {
 /// Settings every screen may need, read once per screen change in one call.
 /// Not set = the defaults in uiSettings(), which are how the app always worked.
 const UI_KEYS = ['auto_logout_minutes', 'auto_logout_warn_secs', 'start_screen', 'show_takeaway', 'show_collection', 'show_delivery',
-  'button_size', 'discount_presets', 'discount_staff_max_pct'];
+  'button_size', 'discount_presets', 'discount_staff_max_pct', 'pay_name_cash', 'pay_name_card'];
 const DISCOUNT_PRESETS_DEFAULT = [5, 10, 15, 20];
 const START_SCREENS = [['tables', 'Tables'], ['orders', 'Orders'], ['takeaway', 'New takeaway']];
 function uiSettings(raw = {}) {
@@ -467,7 +467,14 @@ function uiSettings(raw = {}) {
     discountPresets: presets,
     /// Staff need a manager's PIN for more than this percentage off a line; null = no limit.
     discountLimit: whole(raw.discount_staff_max_pct, 0, 100, null),
+    /// What Cash and Card are called on screen (Settings → Payments); stored as "cash" / "card".
+    payNames: { cash: String(raw.pay_name_cash ?? '').trim() || 'Cash', card: String(raw.pay_name_card ?? '').trim() || 'Card' },
   };
+}
+/// A payment method as shown: "cash" / "card" by their names in Settings, "other" as the platform.
+function payName(method, platform = null) {
+  const names = (state.ui ?? uiSettings()).payNames;
+  return method === 'cash' || method === 'card' ? names[method] : method === 'other' ? (platform || 'Other') : method;
 }
 async function loadUiSettings() {
   try {
@@ -828,6 +835,8 @@ async function renderFloor() {
 // ---------- order screen ----------
 
 /// Settings > Quick notes: one per line; tapped onto an order line's note.
+/// A sub-category's "off" bits (categories.flags_off): main-category defaults it does not take.
+const CAT_FLAG_OFF = { starter: 1, prep: 2, drink: 4, dessert: 8 };
 const QUICK_NOTES_KEY = 'quick_notes';
 const DEFAULT_QUICK_NOTES = ['No onions', 'No chilli', 'Extra spicy', 'Mild', 'No ice', 'Allergy: ask staff'];
 function quickNotes(raw) {
@@ -1560,10 +1569,13 @@ async function renderOrder() {
       h('button', { class: 'icon-btn', onclick: closeOrder, title: 'Back' }, icon('back')),
       h('div', { class: 'grow' },
         h('div', { class: 'row nowrap' }, h('strong', { class: 'big-id' }, `#${order.id}`), typeChip(order.order_type), h('span', { class: 'where' }, where(order))),
-        h('div', { class: 'muted small' }, [
+        h('div', { class: 'muted small head-sub' }, [
           order.customer_phone, order.delivery_address, order.notes,
           `opened ${ago(order.opened_at)} ago by ${order.opened_by_name}`,
-        ].filter(Boolean).join(' · ')))));
+        ].filter(Boolean).join(' · '))),
+      // Phones: the ticket fills the screen; this goes back to the menu to add more.
+      h('button', { class: 'to-menu', title: 'Back to the menu to add dishes', onclick: () => { layout.classList.remove('show-ticket'); draw(); } },
+        '+ Add', h('span', { class: 'wide-only' }, ' dishes'))));
   }
   header();
   draw();
@@ -1579,7 +1591,7 @@ async function renderOrder() {
         totals,
         order.order_type === 'dine_in' && h('label', { class: 'switch', title: 'Otherwise starters go first and the rest waits for "Call mains"' },
           allCourses, h('span', {}), 'All courses together'),
-        h('div', { class: 'row nowrap' }, sendBtn, mainsBtn),
+        h('div', { class: 'row nowrap send-row' }, sendBtn, mainsBtn),
         payBtn,
         h('div', { class: 'tools' },
           order.order_type === 'dine_in'
@@ -1656,7 +1668,8 @@ function pinDialog({ title, hint, okLabel, okClass = 'primary paybig', keepLabel
 
 /// Finish & Pay settings (Manage → Bills & receipts → Payments). Not set =
 /// the defaults below, which are how the app always worked.
-const PAY_KEYS = ['tip_presets', 'tips_on', 'cash_quick', 'split_max', 'pay_default_method', 'exact_cash_pays'];
+const PAY_KEYS = ['tip_presets', 'tips_on', 'cash_quick', 'split_max', 'pay_default_method', 'exact_cash_pays', 'pay_name_cash', 'pay_name_card'];
+const PAY_NAME_MAX = 24;
 const PAY_DEFAULTS = { tips: [5, 10, 15], notes: [5, 10, 20, 50, 100], splitMax: 6 };
 /// "5, 10,15" → [5, 10, 15]; null if empty or any part is not a number.
 function numberList(v) {
@@ -1766,7 +1779,7 @@ async function payDialog(order, refresh, pay) {
       if (method === 'cash' && p?.change_cents > 0) {
         showModal(h('div', { class: 'center', style: 'margin:0' },
           h('div', { class: 'muted' }, 'Give change'), h('div', { class: 'huge' }, money(p.change_cents)),
-          h('div', { class: 'muted' }, `Cash ${money(p.tendered_cents)} − ${money(p.amount_cents + p.tip_cents)}`),
+          h('div', { class: 'muted' }, `${payName('cash')} ${money(p.tendered_cents)} − ${money(p.amount_cents + p.tip_cents)}`),
           res.status !== 'paid' && h('div', { class: 'muted' }, `Left to pay: ${money(left())}`),
           h('button', { class: 'primary pay', onclick: next }, res.status === 'paid' ? 'Done' : 'Next payment')));
         setKeys((e) => { if (e.key === 'Enter' || e.key === 'Escape') next(); });
@@ -1780,20 +1793,22 @@ async function payDialog(order, refresh, pay) {
   function draw() {
     if (method !== 'cash' && focus === 'cash') focus = mode === 'amount' ? 'amount' : tipMode === 'other' ? 'tip' : 'cash';
     const d = due(), t = tip(), tg = d + t, c = cash();
-    const methods = [['cash', 'Cash'], ['card', 'Card'], ...(order.channel_id ? [['other', order.channel_name]] : [])];
+    const methods = [['cash', payName('cash')], ['card', payName('card')], ...(order.channel_id ? [['other', order.channel_name]] : [])];
+    // Default names keep the old wording; a renamed method shows its name.
+    const takeCash = payName('cash') === 'Cash' ? 'Take cash' : payName('cash');
     const keypadOn = method === 'cash' || focus === 'amount' || focus === 'tip';
     const quick = [...new Set([...cfg.notes, Math.ceil(tg / 100) * 100, Math.ceil(tg / 500) * 500, Math.ceil(tg / 1000) * 1000]
       .filter((x) => x > tg))].sort((a, b) => a - b).slice(0, 4);
     const enough = method !== 'cash' || (c != null && c >= tg);
     const okLabel = d <= 0 ? (mode === 'dishes' ? 'Tap the dishes this person pays for' : 'Enter an amount')
-      : method === 'cash' ? (c > tg ? `Take cash ${money(tg)} · change ${money(c - tg)}` : `Take cash ${money(tg)}`)
-      : method === 'card' ? `Card payment taken · ${money(tg)}` : `Paid by ${order.channel_name} · ${money(tg)}`;
+      : method === 'cash' ? (c > tg ? `${takeCash} ${money(tg)} · change ${money(c - tg)}` : `${takeCash} ${money(tg)}`)
+      : method === 'card' ? `${payName('card')} payment taken · ${money(tg)}` : `Paid by ${order.channel_name} · ${money(tg)}`;
     showModal(h('div', { class: 'pay-one' },
       h('div', { class: 'pay-left stack' },
         h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `Order #${order.id}`), h('span', { class: 'muted' }, 'Total'), h('span', { class: 'big' }, money(order.total_cents))),
         order.paid_cents > 0 && h('div', { class: 'pay-parts' },
           order.payments.map((p) => h('div', { class: 'row pay-part' },
-            h('span', { style: 'flex:1' }, `✓ ${p.method === 'cash' ? 'Cash' : p.method === 'card' ? 'Card' : 'Other'} ${money(p.amount_cents)}`,
+            h('span', { style: 'flex:1' }, `✓ ${payName(p.method, order.channel_name)} ${money(p.amount_cents)}`,
               p.tip_cents ? h('span', { class: 'muted' }, ` + tip ${money(p.tip_cents)}`) : ''),
             h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(async () => {
               order = await call('remove_payment', { orderId: order.id, paymentId: p.id });
@@ -1833,7 +1848,7 @@ async function payDialog(order, refresh, pay) {
       h('div', { class: 'pay-right stack' },
         h('div', { class: 'pay-label' }, 'Payment method'),
         h('div', { class: 'seg methods' }, methods.map(([v, label]) => h('button', { class: method === v ? 'on' : '', onclick: () => { method = v; if (v === 'cash') focus = 'cash'; draw(); } }, label))),
-        method === 'cash' && field('cash', 'Cash received', typed.cash || `${money(tg)} (exact)`,
+        method === 'cash' && field('cash', `${payName('cash')} received`, typed.cash || `${money(tg)} (exact)`,
           c == null ? 'Enter an amount like 20 or 12.50' : c >= tg ? `Change ${money(c - tg)}` : `Short by ${money(tg - c)}`, c == null || c < tg),
         method === 'cash' && h('div', { class: 'row quick' }, h('button', { onclick: () => { typed.cash = ''; if (!cfg.exactPays || due() > 0) focus = 'cash'; draw(); if (cfg.exactPays) take(); } }, cfg.exactPays ? 'Pay exact' : 'Exact'),
           quick.map((x) => h('button', { onclick: () => { typed.cash = String(x / 100); focus = 'cash'; draw(); } }, money(x)))),
@@ -2002,7 +2017,7 @@ function orderDetail(o, onChange) {
     h('div', {}, `Tax ${o.tax_incl ? 'included ' : ''}${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
       o.tip_cents ? ` · Tip ${money(o.tip_cents)}` : ''),
     o.payments?.length > 0 && h('div', { class: 'muted' }, o.payments.map((p) =>
-      `${p.method} ${money(p.amount_cents)}` + (p.tip_cents ? ` + tip ${money(p.tip_cents)}` : '') +
+      `${payName(p.method, o.channel_name)} ${money(p.amount_cents)}` + (p.tip_cents ? ` + tip ${money(p.tip_cents)}` : '') +
       (p.change_cents ? ` (tendered ${money(p.tendered_cents)}, change ${money(p.change_cents)})` : '') + ` · ${p.paid_by_name}`).join('  |  ')),
     o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
     o.status !== 'cancelled' && h('div', {}, h('button', { onclick: act(async () => {
@@ -2106,21 +2121,49 @@ async function renderOrders() {
 async function renderHistory() {
   const date = h('input', { type: 'date', value: today() });
   const list = h('div');
+  const span = h('div', { class: 'muted small history-span' });
   const detail = h('div', { 'data-hint': 'Tap an order to see its details, reprint or void it.' });
-  // Quick dates: one day back from today, or the last 7 days (today included).
+  // Quick dates follow the business day (header), which runs from the last
+  // day close: "Today" is the open business day, so orders after midnight
+  // before the day is closed are still today. "Yesterday" is the business
+  // day closed last, "Last 7 days" the business days dated in the last week.
+  // The Day picker shows calendar days (midnight to midnight).
+  let mode = 'today'; // today | yesterday | week | day
+  let day = null;
+  const OPEN_END = 4102444800; // 2100: "up to now", whatever this device's clock says
   const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d; };
-  let week = false;
   const quick = h('div', { class: 'seg quick-dates' });
   const drawQuick = () => setKids(quick, [['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Last 7 days']].map(([k, label]) => h('button', {
-    class: (k === 'week' ? week : !week && date.value === isoDate(daysAgo(k === 'today' ? 0 : 1))) ? 'on' : '',
-    onclick: () => { week = k === 'week'; date.value = isoDate(daysAgo(k === 'yesterday' ? 1 : 0)); load(); },
+    class: mode === k ? 'on' : '',
+    onclick: () => { mode = k; load(); },
   }, label)));
   let loads = 0; // a newer tap wins over a slow earlier load
   const load = act(async () => {
     drawQuick();
-    if (!date.value) return;
     const mine = ++loads;
-    const [from, to] = week ? [dayRange(isoDate(daysAgo(6)))[0], dayRange(today())[1]] : dayRange(date.value);
+    if (mode !== 'day') {
+      day = await call('business_day');
+      if (mine !== loads) return;
+    }
+    // Not closed for a long time (or only once, long ago): business days
+    // would mean weeks, so the quick dates fall back to calendar days.
+    const stale = mode !== 'day' && Date.now() / 1000 - day.since > 36 * 3600;
+    if (mode !== 'day') {
+      date.value = stale ? isoDate(daysAgo(mode === 'yesterday' ? 1 : 0))
+        : mode === 'yesterday' ? (day.prev_date ?? isoDate(daysAgo(1))) : day.date;
+    }
+    if (!date.value) return;
+    const [from, to] = stale
+      ? (mode === 'week' ? [dayRange(isoDate(daysAgo(6)))[0], OPEN_END] : mode === 'today' ? [dayRange(date.value)[0], OPEN_END] : dayRange(date.value))
+      : { today: () => [day.since, OPEN_END], yesterday: () => [day.prev_since, day.since],
+        week: () => [day.week_since, OPEN_END], day: () => dayRange(date.value) }[mode]();
+    const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    span.textContent = stale ? `The day has not been closed since ${friendlyTime(day.since)}: showing calendar days (close the day in Reports)` : {
+      today: () => `Business day ${dayLabel(day.date)}: since ${friendlyTime(day.since)}${day.prev_date ? ' (the last day close)' : ''}`,
+      yesterday: () => `Previous business day${day.prev_date ? ` ${dayLabel(day.prev_date)}` : ''}: ${friendlyTime(day.prev_since)} to ${friendlyTime(day.since)}`,
+      week: () => `Last 7 business days: since ${friendlyTime(day.week_since)}`,
+      day: () => `Calendar day ${dayLabel(date.value)}, midnight to midnight`,
+    }[mode]();
     // The server sends at most 500 at a time: a busy week takes several pages.
     const PAGE = 500, MAX = 5000;
     const orders = [];
@@ -2134,8 +2177,10 @@ async function renderHistory() {
     const more = orders.length >= MAX && (await call('list_orders', { from, to, limit: 1, offset: MAX })).length > 0;
     if (mine !== loads) return;
     shown = orders;
-    // Several days: the date goes with the time.
-    const opened = (t) => (week ? friendlyTime(t) : new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    // Orders from more than one calendar day: the date goes with the time.
+    const end = Math.min(to, Date.now() / 1000);
+    const severalDays = mode !== 'day' && new Date(from * 1000).toDateString() !== new Date(end * 1000).toDateString();
+    const opened = (t) => (severalDays ? friendlyTime(t) : hm(t));
     setKids(list, h('table', {},
       h('tr', {}, h('th', {}, '#'), h('th', {}, 'Opened'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Total')),
       orders.map((o) => h('tr', { class: 'click', onclick: act(() => show(o.id)) },
@@ -2143,7 +2188,9 @@ async function renderHistory() {
         h('td', {}, typeChip(o.order_type)), h('td', {}, where(o)), h('td', {}, h('span', { class: `status s-${o.status}` }, o.status)),
         h('td', { class: 'num' }, money(o.total_cents))))));
     if (more) list.prepend(h('div', { class: 'badge warn' }, `Showing the latest ${MAX} orders: pick one day to see the rest.`));
-    if (!orders.length) setKids(list, h('div', { class: 'empty small' }, icon('history', 36), h('p', {}, week ? 'No closed orders in the last 7 days.' : 'No closed orders on this day.')));
+    if (!orders.length) setKids(list, h('div', { class: 'empty small' }, icon('history', 36), h('p', {}, {
+      today: 'No closed orders yet in this business day.', yesterday: 'No closed orders in the previous business day.',
+      week: 'No closed orders in the last 7 days.', day: 'No closed orders on this day.' }[mode])));
   });
   async function show(id) {
     setKids(detail, orderDetail(await call('get_order', { id }), async (what) => {
@@ -2152,14 +2199,14 @@ async function renderHistory() {
       await load();
     }));
   }
-  date.onchange = (e) => { week = false; load(e); };
+  date.onchange = (e) => { mode = 'day'; load(e); };
   let shown = [];
   const bulk = () => bulkDelete('Delete orders', shown.filter((o) => o.status !== 'open').map((o) => ({
     id: o.id, label: [`#${o.id} ${TYPE[o.order_type] ?? ''}`, where(o)].filter(Boolean).join(' · '), sub: `${o.status} · ${money(o.total_cents)}`,
   })), (ids) => deleteMany('order', ids, 'order(s)'), async () => { setKids(detail); await load(); });
   screen(h('div', { class: 'page split' },
     h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, quick, h('label', { class: 'field' }, 'Day', date), h('span', { class: 'grow' }),
-      isAdmin() && h('button', { class: 'danger-outline', onclick: bulk }, 'Delete several…')), h('div', { class: 'panel' }, list)),
+      isAdmin() && h('button', { class: 'danger-outline', onclick: bulk }, 'Delete several…')), span, h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, detail)));
   await load();
 }
@@ -2213,10 +2260,13 @@ async function renderMenuAdmin() {
   const catLabel = (c) => (isMain(c) ? c.name : `${catById[c.parent_id].name} › ${c.name}`);
   // What a new item in category `id` starts with.
   // A sub-category without its own tax or team uses its main category's, then the restaurant's.
+  // Starter, prepare ahead, drink, dessert: a sub-category's own "on" wins, its
+  // "off" (flags_off) turns its main category's off, otherwise it takes the main's.
+  const flagOf = (c, m, key) => !!c?.[key] || (!!m?.[key] && !((c?.flags_off ?? 0) & CAT_FLAG_OFF[key]));
   const defaultsFor = (id) => {
     const c = catById[id], m = catById[c?.parent_id];
     return { tax: c?.tax_rate_bp ?? m?.tax_rate_bp ?? defaultTax, team: c?.team_id ?? m?.team_id ?? null,
-      starter: !!(c?.starter || m?.starter), prep: !!(c?.prep || m?.prep), drink: !!(c?.drink || m?.drink), dessert: !!(c?.dessert || m?.dessert) };
+      starter: flagOf(c, m, 'starter'), prep: flagOf(c, m, 'prep'), drink: flagOf(c, m, 'drink'), dessert: flagOf(c, m, 'dessert') };
   };
   const form = popupHost();
   const list = h('div');
@@ -2315,10 +2365,27 @@ async function renderMenuAdmin() {
     const color = h('input', { type: 'color', value: c?.color ?? '#9a9484' });
     const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
     const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `Same as restaurant (${pct(defaultTax)}%)`, inputmode: 'decimal', style: 'width:230px', 'data-f': 'ctax' });
-    const starter = h('input', { type: 'checkbox', checked: c ? c.starter : /^starter/i.test(c?.name ?? '') });
-    const prep = h('input', { type: 'checkbox', checked: c ? c.prep : false });
-    const drink = h('input', { type: 'checkbox', checked: c ? c.drink : /drink|beverage|เครื่องดื่ม/i.test(c?.name ?? '') });
-    const dessert = h('input', { type: 'checkbox', checked: c ? c.dessert : /dessert|sweet|ของหวาน/i.test(c?.name ?? '') });
+    // Each default: a tick for a main category; for a sub-category "Same as <main>", On or Off.
+    const flagBox = (key, label, title, guess) => {
+      const box = h('input', { type: 'checkbox', checked: c ? c[key] : guess });
+      const pick = h('select', { 'aria-label': label });
+      const wrap = h('span', { class: 'flag-pick' });
+      const sub = () => (parent.value ? catById[Number(parent.value)] : null);
+      const draw = () => {
+        const m = sub();
+        if (!m) return setKids(wrap, h('label', { class: 'check', title }, box, ` ${label}`));
+        const was = pick.value;
+        setKids(pick, h('option', { value: 'inherit' }, `Same as main: ${m[key] ? 'on' : 'off'}`),
+          h('option', { value: 'on' }, 'On'), h('option', { value: 'off' }, 'Off'));
+        pick.value = was || (c?.[key] ? 'on' : (c?.flags_off ?? 0) & CAT_FLAG_OFF[key] ? 'off' : box.checked ? 'on' : 'inherit');
+        setKids(wrap, h('label', { class: 'field', title }, label, pick));
+      };
+      return { el: wrap, draw,
+        own: () => (sub() ? pick.value === 'on' : box.checked),
+        off: () => (sub() && pick.value === 'off' ? CAT_FLAG_OFF[key] : 0),
+        // What new items here get, the main category's default included.
+        effective: () => { const m = sub(); return m ? pick.value === 'on' || (pick.value === 'inherit' && !!m[key]) : box.checked; } };
+    };
     const team = teamSelect(c?.team_id, 'No team');
     const moveItems = h('input', { type: 'checkbox', checked: true });
     // Under a main category (a sub-category), or a main category itself.
@@ -2328,6 +2395,22 @@ async function renderMenuAdmin() {
       cats.filter((x) => isMain(x) && x.active && x.id !== c?.id).map((x) => h('option', { value: x.id }, x.name)));
     parent.value = c?.parent_id ?? (state.newSubOf ?? '');
     state.newSubOf = null;
+    const starter = flagBox('starter', 'Items here are starters', '', /^starter/i.test(c?.name ?? ''));
+    const prep = flagBox('prep', 'Items here are prepared ahead', '', false);
+    const drink = flagBox('drink', 'Drinks (own ticket)', 'Sent straight away and printed on their own DRINKS ticket', /drink|beverage|เครื่องดื่ม/i.test(c?.name ?? ''));
+    const dessert = flagBox('dessert', 'Desserts (own ticket)', 'Printed on their own DESSERTS ticket', /dessert|sweet|ของหวาน/i.test(c?.name ?? ''));
+    const flags = [starter, prep, drink, dessert];
+    const flagsHint = h('div', { class: 'muted small' });
+    const drawFlags = () => {
+      flags.forEach((f) => f.draw());
+      const m = parent.value ? catById[Number(parent.value)] : null;
+      flagsHint.textContent = m ? `"Same as main" follows ${m.name} for new dishes. On or Off here always wins.` : '';
+    };
+    parent.addEventListener('change', drawFlags);
+    drawFlags();
+    // Drinks and desserts: the items already here follow what the category now gives them.
+    const wasDrink = c ? flagOf(c, catById[c.parent_id], 'drink') : false;
+    const wasDessert = c ? flagOf(c, catById[c.parent_id], 'dessert') : false;
     const save = act(async () => {
       fieldErr(name); fieldErr(tax);
       if (!name.value.trim()) return fieldErr(name, 'Type a name');
@@ -2341,12 +2424,17 @@ async function renderMenuAdmin() {
       const saved = c
         ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.checked })
         : await call('create_category', { ...args, sortOrder: cats.length + 1 });
-      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.checked, prep: prep.checked, nameAlt: alt.value.trim() || null });
-      // Drinks: the items already here follow the category.
-      if (drink.checked !== !!c?.drink) await call('set_category_drink', { id: saved.id, drink: drink.checked, moveItems: true });
-      if (dessert.checked !== !!c?.dessert) await call('set_category_dessert', { id: saved.id, dessert: dessert.checked, moveItems: true });
+      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.own(), prep: prep.own(), nameAlt: alt.value.trim() || null });
+      // Drinks and desserts: the items already here follow the category (its main category's included),
+      // then the category keeps its own setting.
+      for (const [f, was, cmd, key] of [[drink, wasDrink, 'set_category_drink', 'drink'], [dessert, wasDessert, 'set_category_dessert', 'dessert']]) {
+        if (f.effective() !== was) await call(cmd, { id: saved.id, [key]: f.effective(), moveItems: true });
+        if (f.own() !== f.effective() || (f.effective() === was && f.own() !== !!c?.[key])) await call(cmd, { id: saved.id, [key]: f.own(), moveItems: false });
+      }
       const parentId = parent.value ? Number(parent.value) : null;
       if (parentId !== (c?.parent_id ?? null)) await call('set_category_parent', { id: saved.id, parentId });
+      const off = flags.reduce((n, f) => n | f.off(), 0);
+      if (off !== (c?.flags_off ?? 0)) await call('set_category_flags_off', { id: saved.id, flagsOff: off });
       const teamId = team.value ? Number(team.value) : null;
       if (teamId !== (c?.team_id ?? null) || (teamId != null && moveItems.checked)) {
         await call('set_category_team', { id: saved.id, teamId, moveItems: moveItems.checked });
@@ -2360,11 +2448,8 @@ async function renderMenuAdmin() {
       h('div', { class: 'row' }, name, h('label', { class: 'field' }, 'Colour', color), c && h('label', { class: 'check' }, active, ' Active')),
       h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, alt, h('div', { class: 'muted small' }, 'Printed next to the heading on kitchen tickets')),
       h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax),
-        h('label', { class: 'check' }, starter, ' Items here are starters'),
-        h('label', { class: 'check' }, prep, ' Items here are prepared ahead'),
-        h('label', { class: 'check', title: 'Sent straight away and printed on their own DRINKS ticket' }, drink, ' Drinks (own ticket)'),
-        h('label', { class: 'check', title: 'Printed on their own DESSERTS ticket' }, dessert, ' Desserts (own ticket)')),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax), flags.map((f) => f.el)),
+      flagsHint,
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Main category', parent),
         h('span', { class: 'muted small' }, hasSubs ? 'It has sub-categories, so it stays a main category.'
           : 'Pick one to make this a sub-category: on the order screen it shows as a button after you tap the main category.'),
@@ -3169,14 +3254,39 @@ async function renderUsers() {
 /// Kitchen screen settings (Manage → Kitchen printer → Kitchen screen; managers
 /// may change them). Not set = the defaults, how the screen always worked.
 /// kds_paid_hours is used by the POS itself (kitchen_board), the rest here.
-const KDS_KEYS = ['kds_slow_mins', 'kds_late_mins', 'kds_refresh_secs', 'kds_paid_hours'];
+const KDS_KEYS = ['kds_slow_mins', 'kds_late_mins', 'kds_refresh_secs', 'kds_paid_hours', 'kds_beep'];
 const KDS_LIMITS = { slow: [1, 240, 10], late: [1, 240, 20], refresh: [2, 30, 4], paid: [0, 24, 6] };
 function kdsSettings(raw = {}) {
   const int = (v, [lo, hi, def]) => { const n = Number(v ?? NaN); return Number.isInteger(n) && n >= lo && n <= hi ? n : def; };
   const c = { slow: int(raw.kds_slow_mins, KDS_LIMITS.slow), late: int(raw.kds_late_mins, KDS_LIMITS.late),
-    refresh: int(raw.kds_refresh_secs, KDS_LIMITS.refresh), paid: int(raw.kds_paid_hours, KDS_LIMITS.paid) };
+    refresh: int(raw.kds_refresh_secs, KDS_LIMITS.refresh), paid: int(raw.kds_paid_hours, KDS_LIMITS.paid), beep: raw.kds_beep === '1' };
   if (c.late <= c.slow) c.late = c.slow + 1;
   return c;
+}
+
+/// Kitchen screen sound: a short two-tone beep made with WebAudio (no sound file).
+/// Browsers only play sound after a tap on the page, so the screen asks for one.
+const kdsAudio = { ctx: null };
+function kdsAudioCtx() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try { kdsAudio.ctx ??= new AC(); } catch { return null; }
+  return kdsAudio.ctx;
+}
+function kdsBeep() {
+  const ctx = kdsAudio.ctx;
+  if (!ctx || ctx.state !== 'running') return false;
+  const t = ctx.currentTime;
+  [[0, 880], [0.2, 1175]].forEach(([d, f]) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t + d);
+    g.gain.exponentialRampToValueAtTime(0.5, t + d + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.17);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t + d); o.stop(t + d + 0.18);
+  });
+  return true;
 }
 
 /// Kitchen screen: one card per order with the dishes still to cook.
@@ -3187,6 +3297,28 @@ async function renderKitchen() {
   let filter = 'all';
   try { filter = localStorage.getItem('pos.kdsFilter') || 'all'; } catch {}
   let lastDone = null;
+  // New tickets beep (Settings → Kitchen screen). Dishes seen so far: anything else is new.
+  let seen = null;
+  const soundBtn = h('button', { class: 'kds-sound', hidden: true, title: 'Browsers play sound only after a tap' }, 'Tap to turn on the sound');
+  const drawSound = () => { soundBtn.hidden = !cfg.beep || kdsAudio.ctx?.state === 'running'; };
+  const armSound = () => {
+    if (!cfg.beep) return;
+    const ctx = kdsAudioCtx();
+    if (!ctx) return;
+    ctx.onstatechange = drawSound;
+    if (ctx.state !== 'running') ctx.resume().then(drawSound).catch(() => {});
+    drawSound();
+  };
+  // On pointerdown: the button hides as soon as the sound is allowed, before a click would land.
+  let tried = 0;
+  const trySound = () => {
+    if (Date.now() - tried < 800) return;
+    tried = Date.now();
+    armSound();
+    setTimeout(() => { if (kdsBeep()) toast('Sound on: the screen beeps when a new ticket arrives'); }, 150);
+  };
+  soundBtn.addEventListener('pointerdown', trySound);
+  soundBtn.onclick = trySound;
   const filters = [['all', 'Everything'], ['food', 'Food'], ...teams.map((t) => [`team:${t.id}`, t.name]), ['drinks', 'Drinks'], ['desserts', 'Desserts']];
   const bar = h('div', { class: 'row kds-bar' });
   const board = h('div', { class: 'kds' });
@@ -3199,6 +3331,7 @@ async function renderKitchen() {
   const drawBar = () => setKids(bar, filters.map(([v, label]) => h('button', { class: filter === v ? 'on' : '', onclick: () => {
     filter = v;
     try { localStorage.setItem('pos.kdsFilter', v); } catch {}
+    seen = null; // another filter: what shows is not new
     drawBar(); refresh();
   } }, label)), h('span', { style: 'flex:1' }), undo, h('button', { onclick: act(toggleFullscreen) }, icon('expand', 18), 'Full screen'));
   const mins = (t) => Math.max(0, Math.floor((Date.now() / 1000 - t) / 60));
@@ -3209,6 +3342,9 @@ async function renderKitchen() {
   });
   async function refresh() {
     const orders = await call('kitchen_board', { filter });
+    const ids = orders.flatMap((o) => o.items.map((i) => i.id));
+    if (seen && cfg.beep && ids.some((id) => !seen.has(id))) kdsBeep();
+    if (!seen || seen.size > 5000) seen = new Set(ids); else ids.forEach((id) => seen.add(id));
     setKids(board, orders.length ? orders.map((o) => {
       const age = mins(o.since);
       const todo = o.items.filter((i) => !i.done).map((i) => i.id);
@@ -3227,7 +3363,11 @@ async function renderKitchen() {
     }) : h('div', { class: 'empty' }, icon('check', 40), h('p', {}, 'Nothing to cook right now')));
   }
   drawBar();
-  screen(h('div', { class: 'page kds-page' }, bar, board));
+  const page = h('div', { class: 'page kds-page' }, bar, soundBtn, board);
+  // Any tap on the screen also allows the sound.
+  page.addEventListener('pointerdown', armSound);
+  screen(page);
+  armSound();
   await refresh();
   // A tablet left on this screen picks up changed settings (colours, refresh) about once a minute.
   let ticks = 0;
@@ -3238,6 +3378,7 @@ async function renderKitchen() {
       if (fresh) {
         const restart = fresh.refresh !== cfg.refresh;
         cfg = fresh;
+        armSound(); drawSound();
         if (restart) { clearInterval(refreshTimer); live(tick, cfg.refresh * 1000); }
       }
     }
@@ -3300,12 +3441,12 @@ async function renderShift(shown = null) {
         h('h3', {}, 'Shift open'),
         h('div', { class: 'muted' }, `Since ${fmtTime(cur.opened_at)} · opened by ${cur.opened_by_name} · ${cur.payment_count} payment(s)`),
         h('table', {},
-          line('Float', cur.float_cents), line('Cash sales', cur.cash_cents),
-          cur.cash_tip_cents ? line('Cash tips', cur.cash_tip_cents) : '',
+          line('Float', cur.float_cents), line(`${payName('cash')} sales`, cur.cash_cents),
+          cur.cash_tip_cents ? line(`${payName('cash')} tips`, cur.cash_tip_cents) : '',
           cur.paid_in_cents ? line('Money in', cur.paid_in_cents) : '', cur.paid_out_cents ? line('Money out', -cur.paid_out_cents) : '',
-          cur.refund_cents ? line('Cash refunds (voids)', -cur.refund_cents) : '',
+          cur.refund_cents ? line(`${payName('cash')} refunds (voids)`, -cur.refund_cents) : '',
           line('Cash that should be in the drawer', cur.expected_cents, 'grand'),
-          line('Card', cur.card_cents), cur.card_tip_cents ? line('Card tips', cur.card_tip_cents) : '',
+          line(payName('card'), cur.card_cents), cur.card_tip_cents ? line(`${payName('card')} tips`, cur.card_tip_cents) : '',
           cur.other_cents ? line('Platforms / other', cur.other_cents) : ''),
         cur.moves.length > 0 && h('div', { class: 'muted small' }, cur.moves.map((m) => `${m.kind === 'in' ? '+' : '−'}${money(m.amount_cents)} ${m.reason ?? ''} (${m.user_name})`).join(' · ')),
         h('div', { class: 'row' }, h('button', { onclick: () => move('in') }, 'Money in'), h('button', { onclick: () => move('out') }, 'Money out')),
@@ -3371,7 +3512,7 @@ async function renderReports() {
         h('span', { class: 'muted' }, `since ${friendlyTime(day.since)}`)),
       h('div', { class: 'row' },
         h('span', {}, `${s.order_count} paid orders · `, h('strong', {}, money(s.total_cents))),
-        ...s.by_payment.map((g) => h('span', { class: 'badge' }, `${g.key === 'other' ? 'platform' : g.key} ${money(g.total_cents)}`)),
+        ...s.by_payment.map((g) => h('span', { class: 'badge' }, `${payName(g.key, 'platform')} ${money(g.total_cents)}`)),
         h('span', { style: 'flex:1' }),
         day.open_orders > 0 && h('span', { class: 'badge warn' }, `${day.open_orders} open order(s): pay or cancel them first`),
         closeBtn),
@@ -3402,7 +3543,7 @@ async function renderReports() {
         h('div', { class: 'card' }, h('h3', {}, 'By platform'),
           rows(s.by_channel.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
         h('div', { class: 'card' }, h('h3', {}, 'By payment'),
-          rows(s.by_payment.map((g) => [g.key === 'other' ? 'other / platform' : g.key, `${g.count} · ${money(g.total_cents)}`])))),
+          rows(s.by_payment.map((g) => [payName(g.key, 'Other / platform'), `${g.count} · ${money(g.total_cents)}`])))),
       h('div', { class: 'stack' },
         h('div', { class: 'card' }, h('h3', {}, 'By category (before tax)'),
           rows(s.by_category.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
@@ -4010,9 +4151,27 @@ async function renderSettings() {
         }, 'danger-outline'))))) : h('div', { class: 'muted' }, 'No backups yet.'));
     };
     load();
+    // How many full backups to keep (setting backups_kept; not set = 14).
+    const [KEEP_MIN, KEEP_MAX, KEEP_DEF] = [3, 90, 14];
+    const keep = numBox('', { inputmode: 'numeric', placeholder: String(KEEP_DEF), 'aria-label': 'Backups kept' });
+    const keepText = h('span', {}, `the last ${KEEP_DEF} are kept`);
+    invoke('get_setting', { key: 'backups_kept' }).then((v) => {
+      const n = Number(v);
+      if (v != null && Number.isInteger(n) && n >= KEEP_MIN && n <= KEEP_MAX) { keep.value = String(n); keepText.textContent = `the last ${n} are kept`; }
+    }).catch(() => {});
     return h('div', { class: 'card stack' },
       h('h3', {}, 'Backup'),
-      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; the last 14 are kept.'),
+      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; ', keepText,
+        '. The copies made before an update or a reset are kept apart (the last 3 of each).'),
+      isAdmin() && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Keep the last', keep, 'backups'),
+        h('button', { onclick: act(async () => {
+          const raw = keep.value.trim(), n = Number(raw);
+          if (raw && (!Number.isInteger(n) || n < KEEP_MIN || n > KEEP_MAX)) return toast(`Backups kept: a whole number from ${KEEP_MIN} to ${KEEP_MAX}`, true);
+          await call('set_setting', { key: 'backups_kept', value: raw });
+          keepText.textContent = `the last ${raw || KEEP_DEF} are kept`;
+          toast(`Keeping the last ${raw || KEEP_DEF} backups. Older ones are deleted at the next backup.`);
+        }) }, 'Save')),
+      isAdmin() && h('div', { class: 'muted small' }, `${KEEP_MIN} to ${KEEP_MAX} (empty = ${KEEP_DEF}). Backups taken before an update or a reset count too. Each backup is a full copy of the database.`),
       h('div', { class: 'row' }, h('button', { onclick: act(async () => { toast('Backup saved: ' + (await call('backup_now'))); await load(); }) }, 'Back up everything now'),
         h('span', { class: 'grow' }),
         isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete backups', files.map((f) => ({ id: f.name, label: fmtTime(f.modified), sub: `${f.name} · ${size(f.size)}` })),
@@ -4129,8 +4288,10 @@ function paymentsCard() {
     const tips = c.tips.map((p) => numBox(String(p), { 'aria-label': 'Tip %' }));
     const notes = h('input', { value: c.notes.map((x) => String(x / 100)).join(', '), placeholder: '5, 10, 20, 50, 100', style: 'width:240px' });
     const split = numBox(String(c.splitMax), { inputmode: 'numeric' });
-    const method = h('select', {}, h('option', { value: 'cash' }, 'Cash'), h('option', { value: 'card' }, 'Card'));
+    const method = h('select', {}, h('option', { value: 'cash' }, payName('cash')), h('option', { value: 'card' }, payName('card')));
     method.value = c.method;
+    const nameBox = (v, def) => h('input', { value: v ?? '', placeholder: def, maxlength: PAY_NAME_MAX, style: 'width:200px' });
+    const cashName = nameBox(raw.pay_name_cash, 'Cash'), cardName = nameBox(raw.pay_name_card, 'Card');
     setKids(card,
       h('h3', {}, 'Payments'),
       h('div', { class: 'muted' }, 'How Finish & Pay looks. Switches save at once; the rest with the Save button.'),
@@ -4141,6 +4302,9 @@ function paymentsCard() {
       h('div', { class: 'muted small' }, 'Note values, separated by commas. The total rounded up is offered too; the four smallest amounts above the total show.'),
       h('label', { class: 'field' }, 'Split evenly: up to', split, 'people (2 to 12)'),
       h('label', { class: 'field' }, 'Payment method when Finish & Pay opens', method),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Call Cash', cashName), h('label', { class: 'field' }, 'Call Card', cardName)),
+      h('div', { class: 'muted small' }, 'How the payment buttons, receipts, History, reports and the shift report name them, e.g. เงินสด or QR / Card. ' +
+        'Empty = Cash and Card. Reports still count them the same way.'),
       settingSwitch('exact_cash_pays', 'Tapping "Exact" takes the cash payment at once (no second tap)',
         '"Exact" takes the payment at once', '"Exact" fills in the amount, then tap Take cash', false),
       h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
@@ -4150,9 +4314,14 @@ function paymentsCard() {
         if (!goodNotes(noteList)) return toast('Enter 1 to 8 cash amounts separated by commas, e.g. 5, 10, 20, 50, 100', true);
         const n = Number(split.value);
         if (!goodSplit(n)) return toast('Split evenly: enter a number of people from 2 to 12', true);
-        const values = { tip_presets: tipList.join(','), cash_quick: noteList.join(','), split_max: String(n), pay_default_method: method.value };
+        const names = [cashName.value.trim(), cardName.value.trim()];
+        if (names.some((x) => x.length > PAY_NAME_MAX)) return toast(`Payment names: up to ${PAY_NAME_MAX} characters`, true);
+        if ((names[0] || 'Cash').toLowerCase() === (names[1] || 'Card').toLowerCase()) return toast('Give Cash and Card different names', true);
+        const values = { tip_presets: tipList.join(','), cash_quick: noteList.join(','), split_max: String(n), pay_default_method: method.value,
+          pay_name_cash: names[0], pay_name_card: names[1] };
         for (const [key, value] of Object.entries(values)) await call('set_setting', { key, value });
-        toast(`Payments saved: tips ${tipList.join(' / ')} %, split up to ${n}, opens on ${method.value === 'card' ? 'Card' : 'Cash'}`);
+        await loadUiSettings();
+        toast(`Payments saved: tips ${tipList.join(' / ')} %, split up to ${n}, opens on ${payName(method.value)}`);
       }) }, 'Save payments')));
   }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
   return card;
@@ -4175,6 +4344,8 @@ function kdsCard() {
       h('label', { class: 'field' }, 'Refresh every', refresh, 'seconds (2 to 30)'),
       h('label', { class: 'field' }, 'Keep paid orders for', paid, 'hours (0 to 24)'),
       h('div', { class: 'muted small' }, '0 hours: a paid order leaves the screen at once, even if dishes are still to cook.'),
+      settingSwitch('kds_beep', 'Beep when a new ticket arrives', 'The kitchen screen beeps for new tickets', 'The kitchen screen is silent', false),
+      h('div', { class: 'muted small' }, 'A short beep on the kitchen screen\'s device. Browsers play sound only after a tap: if the screen shows "Tap to turn on the sound", tap it once.'),
       h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
         const v = { slow: Number(slow.value), late: Number(late.value), refresh: Number(refresh.value), paid: Number(paid.value) };
         const ok = (n, [lo, hi]) => Number.isInteger(n) && n >= lo && n <= hi;

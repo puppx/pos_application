@@ -78,6 +78,13 @@ pub struct MenuCategory {
     /// The main category's `key` in this file, for a sub-category (v0.11.5+).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<i64>,
+    /// A sub-category's "off" defaults (v0.12.1+, see `Category::flags_off`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub flags_off: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,7 +252,7 @@ impl Pos {
         s.require(Permission::ManageMenu)?;
         let categories = self
             .conn
-            .prepare("SELECT c.id, c.name, c.color, c.sort_order, c.tax_rate_bp, c.starter, c.name_alt, c.prep, t.name, c.drink, c.dessert, c.parent_id FROM categories c LEFT JOIN teams t ON t.id = c.team_id AND t.active = 1 WHERE c.active = 1 ORDER BY c.sort_order, c.name")?
+            .prepare("SELECT c.id, c.name, c.color, c.sort_order, c.tax_rate_bp, c.starter, c.name_alt, c.prep, t.name, c.drink, c.dessert, c.parent_id, c.flags_off FROM categories c LEFT JOIN teams t ON t.id = c.team_id AND t.active = 1 WHERE c.active = 1 ORDER BY c.sort_order, c.name")?
             .query_map([], |r| {
                 Ok(MenuCategory {
                     key: r.get(0)?,
@@ -260,6 +267,7 @@ impl Pos {
                     drink: r.get(9)?,
                     dessert: r.get(10)?,
                     parent: r.get(11)?,
+                    flags_off: r.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -418,7 +426,10 @@ impl Pos {
         for c in &backup.categories {
             if let (Some(p), Some(&id)) = (c.parent, cats.get(&c.key)) {
                 if let Some(&parent) = cats.get(&p).filter(|&&pid| pid != id) {
-                    tx.execute("UPDATE categories SET parent_id = ?2 WHERE id = ?1", params![id, parent])?;
+                    tx.execute(
+                        "UPDATE categories SET parent_id = ?2, flags_off = ?3 WHERE id = ?1",
+                        params![id, parent, c.flags_off & crate::menu::FLAGS_OFF_ALL],
+                    )?;
                 }
             }
         }

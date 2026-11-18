@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::error::invalid;
 use crate::printing::{render_escpos, render_text, Line, Size};
 use crate::receipt::{local_time, money, two_col};
-use crate::{Permission, Pos, PosError, PrintJob, PrinterTarget, Result, Session};
+use crate::{PaymentNames, Permission, Pos, PosError, PrintJob, PrinterTarget, Result, Session};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CashMove {
@@ -201,8 +201,9 @@ impl Pos {
         ids.into_iter().map(|id| self.load_shift(id)).collect()
     }
 
-    fn shift_layout(&self, sh: &Shift, currency: &str, width: usize) -> Vec<Line> {
+    fn shift_layout(&self, sh: &Shift, currency: &str, width: usize) -> Result<Vec<Line>> {
         let m = |c: i64| money(currency, c);
+        let PaymentNames { cash, card } = self.payment_names()?;
         let mut v = Vec::new();
         let rule = |v: &mut Vec<Line>, c: char| v.push(Line::new(Size::Normal, false, false, c.to_string().repeat(width)));
         rule(&mut v, '=');
@@ -215,9 +216,9 @@ impl Pos {
         two_col(&mut v, Size::Normal, false, "Payments", &sh.payment_count.to_string(), width, "");
         rule(&mut v, '-');
         two_col(&mut v, Size::Normal, false, "Float", &m(sh.float_cents), width, "");
-        two_col(&mut v, Size::Normal, false, "Cash sales", &m(sh.cash_cents), width, "");
+        two_col(&mut v, Size::Normal, false, &format!("{cash} sales"), &m(sh.cash_cents), width, "");
         if sh.cash_tip_cents != 0 {
-            two_col(&mut v, Size::Normal, false, "Cash tips", &m(sh.cash_tip_cents), width, "");
+            two_col(&mut v, Size::Normal, false, &format!("{cash} tips"), &m(sh.cash_tip_cents), width, "");
         }
         if sh.paid_in_cents != 0 {
             two_col(&mut v, Size::Normal, false, "Paid in", &m(sh.paid_in_cents), width, "");
@@ -226,7 +227,7 @@ impl Pos {
             two_col(&mut v, Size::Normal, false, "Paid out", &m(-sh.paid_out_cents), width, "");
         }
         if sh.refund_cents != 0 {
-            two_col(&mut v, Size::Normal, false, "Cash refunds", &m(-sh.refund_cents), width, "");
+            two_col(&mut v, Size::Normal, false, &format!("{cash} refunds"), &m(-sh.refund_cents), width, "");
         }
         rule(&mut v, '-');
         two_col(&mut v, Size::Tall, true, "EXPECTED CASH", &m(sh.expected_cents), width, "");
@@ -236,9 +237,9 @@ impl Pos {
             two_col(&mut v, Size::Tall, true, label, &m(d), width, "");
         }
         rule(&mut v, '-');
-        two_col(&mut v, Size::Normal, false, "Card", &m(sh.card_cents), width, "");
+        two_col(&mut v, Size::Normal, false, &card, &m(sh.card_cents), width, "");
         if sh.card_tip_cents != 0 {
-            two_col(&mut v, Size::Normal, false, "Card tips", &m(sh.card_tip_cents), width, "");
+            two_col(&mut v, Size::Normal, false, &format!("{card} tips"), &m(sh.card_tip_cents), width, "");
         }
         if sh.other_cents != 0 {
             two_col(&mut v, Size::Normal, false, "Platforms / other", &m(sh.other_cents), width, "");
@@ -251,13 +252,13 @@ impl Pos {
             v.push(Line::new(Size::Normal, false, false, format!("Note: {n}")));
         }
         rule(&mut v, '=');
-        v
+        Ok(v)
     }
 
     /// The shift report as text (Reports screen).
     pub fn shift_text(&self, sh: &Shift) -> Result<String> {
         let cfg = self.receipt_settings()?;
-        Ok(render_text(&self.shift_layout(sh, &cfg.currency, cfg.printer.width), cfg.printer.width))
+        Ok(render_text(&self.shift_layout(sh, &cfg.currency, cfg.printer.width)?, cfg.printer.width))
     }
 
     /// The shift report on the receipt printer, or None if there is none.
@@ -267,7 +268,7 @@ impl Pos {
         if cfg.printer.target == PrinterTarget::None {
             return Ok(None);
         }
-        let bytes = render_escpos(&self.shift_layout(sh, &cfg.currency, cfg.printer.width), cfg.printer.width, cfg.printer.bold);
+        let bytes = render_escpos(&self.shift_layout(sh, &cfg.currency, cfg.printer.width)?, cfg.printer.width, cfg.printer.bold);
         Ok(Some(PrintJob::new(cfg.printer.target, bytes)))
     }
 }

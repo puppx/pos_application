@@ -173,7 +173,7 @@ fn auto_backup(pos: &Pos, dir: &Path) {
         if let Err(e) = pos.backup_unchecked(backup_path(dir)) {
             eprintln!("auto backup failed: {e}");
         }
-        prune_backups(dir);
+        prune_backups(dir, pos.backups_kept().unwrap_or(pos_core::BACKUPS_KEPT_DEFAULT));
     }
 }
 

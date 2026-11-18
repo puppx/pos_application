@@ -490,13 +490,13 @@ impl Pos {
             .query_row([o.paid_by.unwrap_or(o.opened_by)], |r| r.get(0))?;
         let mut payment = Vec::new();
         let mut staff_payment = Vec::new();
+        let names = self.payment_names()?;
         // Each payment (several for a split bill), with its tip and change.
         // A bill printed after a part payment shows what is left to pay.
         for p in &o.payments {
-            let label = match p.method.as_str() {
-                "cash" => "Cash".to_string(),
-                "card" => "Card".to_string(),
-                _ => o.channel_name.as_ref().map(|c| format!("Paid by {c}")).unwrap_or_else(|| "Other".into()),
+            let label = match names.of(&p.method) {
+                Some(n) => n.to_string(),
+                None => o.channel_name.as_ref().map(|c| format!("Paid by {c}")).unwrap_or_else(|| "Other".into()),
             };
             // Cash: what was handed over (change follows); card: the bill part (tip follows).
             payment.push((label.clone(), if p.method == "cash" { p.tendered_cents } else { p.amount_cents }));

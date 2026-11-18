@@ -44,7 +44,7 @@ pub use floors::{DiningTable, Floor, TableLayout, TableShape, TableStatus, PLAN_
 pub use kds::{BoardItem, BoardOrder};
 pub use lan::ServerSettings;
 pub use maintenance::{MenuBackup, MenuCategory, MenuCounts, MenuItem, MenuOptionGroup, MenuPrice, MenuSetSection, MenuTeam, ResetOptions, ResetReport, SalesReset};
-pub use menu::Category;
+pub use menu::{Category, FLAG_OFF_DESSERT, FLAG_OFF_DRINK, FLAG_OFF_PREP, FLAG_OFF_STARTER};
 pub use menu_tools::{ImportReport, ImportRow};
 pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
@@ -55,7 +55,10 @@ pub use orders::{
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
-pub use settings::{discount_presets, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS};
+pub use settings::{
+    discount_presets, PaymentNames, BACKUPS_KEPT_DEFAULT, BACKUPS_KEPT_KEY, BACKUPS_KEPT_RANGE, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS, MAX_PAY_NAME,
+    PAY_NAME_CARD_KEY, PAY_NAME_CASH_KEY,
+};
 pub use shifts::{CashMove, Shift};
 pub use sets::{SetChoice, SetPick, SetSection, SetSectionInput};
 pub use teams::{Team, TeamInput};
@@ -95,6 +98,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0023_bill_printed.sql"),
     include_str!("migrations/0024_shared_pins.sql"),
     include_str!("migrations/0025_sub_categories.sql"),
+    include_str!("migrations/0026_sub_category_off.sql"),
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
@@ -151,7 +155,7 @@ impl Pos {
     pub fn set_setting(&self, s: &Session, key: &str, value: &str) -> Result<()> {
         // Managers may change the kitchen settings; the rest is for admins.
         const KITCHEN: &[&str] = &["drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes", "starter_choice",
-            "kds_slow_mins", "kds_late_mins", "kds_refresh_secs", "kds_paid_hours"];
+            "kds_slow_mins", "kds_late_mins", "kds_refresh_secs", "kds_paid_hours", "kds_beep"];
         s.require(if KITCHEN.contains(&key) { Permission::KitchenSettings } else { Permission::ManageSettings })?;
         if key.starts_with('_') {
             return error::invalid("reserved setting key");

@@ -190,6 +190,13 @@ main { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
 .manage-back { margin-bottom: 12px; }
 .manage-back .back-btn, .settings-head .back-btn { display: inline-flex; align-items: center; gap: 4px; padding-left: 10px; }
 .page.settings-home { gap: 10px; }
+/* About: product name and version, then the credits; the copyright line sits under a rule. */
+.about-credits { display: flex; flex-direction: column; gap: 6px; }
+.about-head { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.about-name { font-size: 24px; font-weight: 800; line-height: 1.2; }
+.about-by { color: var(--ink-2); }
+.about-by strong { color: var(--ink); }
+.about-copy { margin-top: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
 .manage-title { margin: 6px 0 0; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 @media (max-width: 700px) {
   .settings-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

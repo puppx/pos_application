@@ -252,7 +252,8 @@ button.quit:hover { background: var(--danger); border-color: var(--danger); colo
 .stat strong { font-size: 28px; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .stat strong.bad { color: var(--danger); }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 13px; font-weight: 600; }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend b { color: var(--ink); font-variant-numeric: tabular-nums; }
 .legend i { width: 14px; height: 14px; border-radius: 3px; border: 2px solid var(--line-2); background: var(--surface); }
 .legend i.busy { background: var(--sun); border-color: var(--warn); }
 .legend i.unsent { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger); }
@@ -491,10 +492,6 @@ pre.report { background: #fff; border: 1px dashed var(--line-2); border-radius: 
   .lock-card { padding: 24px; gap: 14px; }
   .lock-side { padding: 36px 40px; }
   .lock-side .brand-mark { width: 88px; height: 88px; margin-bottom: 10px; }
-  .osk-key { min-height: 44px; font-size: 19px; }
-  .osk-keys { gap: 5px; }
-  .osk-row { gap: 5px; }
-  .osk-num { grid-auto-rows: 64px; }
 }
 /* Very short (1024 x 600 netbooks, or a laptop with a big taskbar). */
 @media (max-height: 660px) and (min-width: 901px) {
@@ -507,8 +504,6 @@ pre.report { background: #fff; border: 1px dashed var(--line-2); border-radius: 
   .totals .grand td { font-size: 20px; }
   .pinpad { grid-template-columns: repeat(3, 64px); gap: 10px; }
   .pinpad button { height: 64px; font-size: 24px; }
-  .osk-key { min-height: 38px; font-size: 17px; }
-  .osk-num { grid-auto-rows: 54px; }
 }
 /* Narrow laptops and small windows: slimmer columns so the menu keeps 3 tiles a row. */
 @media (max-width: 1180px) and (min-width: 901px) {
@@ -541,14 +536,15 @@ pre.report { background: #fff; border: 1px dashed var(--line-2); border-radius: 
   .who-text, .title span:first-child, .title .sep, .clock, #mode { display: none; }
   .who { border: 0; padding: 0; }
   .title { font-size: 17px; }
-  .legend { display: none; }
+  .legend { display: none; } /* the stat cards below say the same */
   .tbl { border-radius: 6px; border-width: 1.5px; }
   #nav button.on { border-radius: 8px; width: auto; margin-right: 0; background: var(--bg); }
   .tbl b { font-size: 13px; }
   .tbl .amt { font-size: 10.5px; }
   .tbl .time, .tbl .flag { display: none; }
   main { padding: 12px; }
-  .page.split, .plan-editor, .grid2, .lock { grid-template-columns: 1fr; }
+  .page.split, .plan-editor, .grid2, .lock { grid-template-columns: minmax(0, 1fr); }
+  .page.split .panel { overflow-x: auto; } /* a wide table scrolls inside its panel, not the page */
   .lock-side { display: none; }
   .stats { grid-template-columns: repeat(2, 1fr); }
   .order { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; height: 100%; gap: 8px; }
@@ -647,10 +643,23 @@ tr.bad-row td { background: var(--danger-soft); }
 .osk-num .osk-key { font-size: 34px; font-weight: 700; min-height: 0; }
 .osk-num .osk-key.fn { font-size: 24px; }
 .osk-num .osk-key.done { grid-column: 4; font-size: 24px; }
+.osk-key.next { background: var(--ink); color: #fff; border-bottom-color: #000; flex: 2 1 0; font-size: 17px; }
+.osk-row.has-next .osk-key.space { flex: 4 1 0; }
+.osk-num .osk-key.next { grid-column: 4; font-size: 24px; }
 body.kb-open { padding-bottom: var(--kb-h); }
 body.kb-open .popup, body.kb-open #modal { bottom: var(--kb-h); }
 body.kb-open #toast { bottom: calc(var(--kb-h) + 16px); }
 #keyboard.on { background: var(--ink); color: #fff; }
+/* Short screens: smaller keys. These come after the rules above, or they would lose to them. */
+@media (max-height: 820px) and (min-width: 901px) {
+  .osk-key { min-height: 44px; font-size: 19px; }
+  .osk-keys, .osk-row { gap: 5px; }
+  .osk-num { grid-auto-rows: 64px; }
+}
+@media (max-height: 660px) and (min-width: 901px) {
+  .osk-key { font-size: 17px; }
+  .osk-num { grid-auto-rows: 54px; }
+}
 @media (max-width: 700px) { .osk-key { min-height: 44px; font-size: 18px; } .osk-key.fn { font-size: 14px; } }
 
 /* Finish & Pay: split bill, tips */
@@ -666,6 +675,29 @@ body.kb-open #toast { bottom: calc(var(--kb-h) + 16px); }
 .dish-pick { max-height: 46vh; overflow: auto; }
 .dish-row { padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
 .dish-row.on { border-color: var(--brand); background: var(--brand-soft); }
+/* Phones and short tills: while a line is being edited the totals and buttons
+   step aside so the editor fits (they are back after Save, Remove or ✎). */
+@media (max-width: 900px), (max-height: 660px) { .ticket:has(.line-edit) .ticket-foot { display: none; } }
+/* History: Today / Yesterday / Last 7 days, each on one line; the row wraps as a whole. */
+.quick-dates button { flex: none; white-space: nowrap; min-height: 44px; padding: 0 12px; }
+/* Phones: the quick dates get their own row, the day picker the next one. */
+@media (max-width: 600px) {
+  .quick-dates { flex: 1 1 100%; }
+  .quick-dates button { flex: 1 1 0; padding: 0 6px; }
+  .toolbar:has(.quick-dates) .field { flex: 1 1 100%; }
+}
+/* Move to another table: the tables as big buttons; only the lists scroll, the buttons stay in view. */
+.dialog.move-dialog { width: min(680px, 100%); }
+.move-dialog > * { flex-shrink: 0; }
+.move-dialog > .dish-pick { flex-shrink: 1; min-height: 96px; }
+.move-dialog > .move-tables { flex-shrink: 1; min-height: 64px; overflow: auto; gap: 6px; }
+.table-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.table-pick button { min-height: 56px; padding: 4px 6px; flex-direction: column; gap: 0; border-width: 2px; }
+.table-pick button b { font-size: 17px; color: var(--ink); overflow-wrap: anywhere; }
+.table-pick button small { font-size: 12px; font-weight: 600; color: var(--muted); }
+.table-pick button.busy { background: var(--sun); border-color: var(--warn); }
+.table-pick button.on { background: var(--brand-soft); border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand); color: var(--ink-2); }
+.table-pick button.on.busy { background: var(--sun); }
 td.short, strong.short { color: var(--danger); }
 
 /* Sold out for today */

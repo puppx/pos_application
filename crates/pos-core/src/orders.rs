@@ -1057,6 +1057,18 @@ impl Pos {
     }
 
     /// The order a line belongs to.
+    /// Order `order_id` is open and the dish `item_id` is still on it, so a
+    /// till showing an old copy never changes another table's bill. Closed:
+    /// "already closed"; joined away (gone): not found; the dish moved to
+    /// another bill: not found (the till reloads the order).
+    pub fn check_item_on_order(&self, order_id: i64, item_id: i64) -> Result<()> {
+        require_open(&self.conn, order_id)?;
+        if self.order_of_item(item_id)? != order_id {
+            return Err(PosError::NotFound);
+        }
+        Ok(())
+    }
+
     pub fn order_of_item(&self, item_id: i64) -> Result<i64> {
         self.conn
             .query_row("SELECT order_id FROM order_items WHERE id = ?1", [item_id], |r| r.get(0))

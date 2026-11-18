@@ -183,6 +183,19 @@ pub struct Receipt {
 
 /// Left text and right-aligned amount on one line; long text wraps.
 #[allow(clippy::too_many_arguments)]
+/// "Service charge 12.5% (no tax)   £4.06"; on narrow paper "(no tax)"
+/// goes to the next line with the amount rather than being split.
+fn service_no_tax(v: &mut Vec<Line>, label: &str, amount: &str, w: usize) {
+    let left = format!("{label} (no tax)");
+    if left.chars().count() + amount.chars().count() < w {
+        return two_col(v, Size::Normal, false, &left, amount, w, "");
+    }
+    for p in wrap(label, w, "", "") {
+        v.push(Line::new(Size::Normal, false, false, p));
+    }
+    two_col(v, Size::Normal, false, "(no tax)", amount, w, "");
+}
+
 pub(crate) fn two_col(v: &mut Vec<Line>, size: Size, bold: bool, left: &str, right: &str, w: usize, indent: &str) {
     let room = w.saturating_sub(right.chars().count() + 1).max(8);
     let parts = wrap(left, room, "", indent);
@@ -283,6 +296,11 @@ impl Receipt {
         }
         if self.tax_breakdown && !self.tax_classes.is_empty() {
             self.tax_table(&mut v, width);
+            // As on the staff copy: the service charge is outside the table,
+            // so GROSS plus this line is the TOTAL.
+            if let Some((label, cents)) = &self.service {
+                service_no_tax(&mut v, label, &self.money(*cents), width);
+            }
             if self.tax_incl {
                 v.push(Line::new(Size::Normal, false, true, "Prices include tax"));
             }
@@ -328,7 +346,7 @@ impl Receipt {
             v.push(Line::new(Size::Normal, false, false, "(after discounts)"));
         }
         if let Some((label, cents)) = &self.service {
-            two_col(&mut v, Size::Normal, false, &format!("{label} (no tax)"), &self.money(*cents), width, "");
+            service_no_tax(&mut v, label, &self.money(*cents), width);
         }
         line(&mut v, '=');
         two_col(&mut v, Size::Big, true, "TOTAL", &self.money(self.total_cents), width / 2, "");

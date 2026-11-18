@@ -552,8 +552,12 @@ commands! {
     /// prints CANCELLED (with the set's dishes for a set), a new note CHANGED.
     /// `pin`: a manager's or admin's PIN approving a discount over the staff
     /// limit (it only approves; nobody is logged in or out).
-    fn update_item(app, t, item_id: i64, update: ItemUpdate, pin: Option<String>) -> Order {
+    fn update_item(app, t, item_id: i64, update: ItemUpdate, pin: Option<String>, order_id: Option<i64>) -> Order {
         let (order, job) = app.with_session(t, |pos, s| {
+            // The till says which order it shows: the dish must still be on it.
+            if let Some(o) = order_id {
+                pos.check_item_on_order(o, item_id)?;
+            }
             let approver = pin.as_deref().map(|p| pos.pin_owner_for(p, Some(s.user_id))).transpose()?;
             pos.update_item_for_kitchen_approved(s, approver.as_ref(), item_id, &update)
         })?;

@@ -234,7 +234,8 @@ fn calling_mains_again_can_print_only_the_table() {
     let job = pos.main_course_job(&s, o.id).unwrap().unwrap();
     let b = job.bytes();
     assert_eq!(job.parts.len(), 1);
-    assert_eq!(b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count(), 1, "the table as one big bar");
+    // One image (sent in several small bands, each starting GS v 0).
+    assert_eq!(b.windows(7).filter(|w| *w == [0x1B, b'a', 0, 0x1D, b'v', b'0', 0]).count(), 1, "the table as one big bar");
     assert!(String::from_utf8_lossy(&b).contains("MAIN COURSE") && !String::from_utf8_lossy(&b).contains("Burger"));
     // Switched off: the dishes come with it.
     pos.set_kitchen_printer(&s, &printer(1, None, None)).unwrap();

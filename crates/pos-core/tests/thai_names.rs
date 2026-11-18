@@ -102,7 +102,9 @@ fn thai_prints_as_an_image() {
     pos.set_kitchen_printer(&s, &cfg).unwrap();
     let job = pos.kitchen_job(&s, order, &o.items, false).unwrap().unwrap();
     let b = job.bytes();
-    let images = b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count();
+    // An image starts with ESC a 0 then GS v 0 (it is sent in small bands).
+    let count_images = |b: &[u8]| b.windows(7).filter(|w| *w == [0x1B, b'a', 0, 0x1D, b'v', b'0', 0]).count();
+    let images = count_images(&b);
     assert_eq!(images, 1, "the Thai name (no category heading)");
     assert!(b.windows(12).any(|w| w == b"1 x Pad Thai"));
     assert!(!b.windows(3).any(|w| w == "ผ".as_bytes()), "no raw UTF-8 Thai");
@@ -112,7 +114,7 @@ fn thai_prints_as_an_image() {
     pos.set_kitchen_printer(&s, &cfg).unwrap();
     let b = pos.kitchen_job(&s, order, &o.items, false).unwrap().unwrap().bytes();
     assert!(!b.windows(12).any(|w| w == b"1 x Pad Thai"), "the dish is drawn, not sent as text");
-    assert!(b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count() > images);
+    assert!(count_images(&b) > images);
     assert!(b.windows(20).any(|w| w == [b'='; 20]), "rules stay as text");
     assert!(PrinterConfig::default().app_font);
 }

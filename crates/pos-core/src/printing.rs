@@ -1629,7 +1629,13 @@ mod tests {
         assert!(text.contains("2 x Burger\n    เบอร์เกอร์\n   + Large / ใหญ่\n"), "{text}");
         // Thai lines go out as raster images; the rest stays text.
         let b = t.to_escpos(32, true);
-        assert_eq!(b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count(), 2);
+        // Two Thai lines; each image goes out in bands small enough for any printer.
+        let heads: Vec<usize> = (0..b.len().saturating_sub(8)).filter(|&i| b[i..i + 4] == [0x1D, b'v', b'0', 0]).collect();
+        assert!(heads.len() >= 2);
+        for &i in &heads {
+            let (rb, h) = (usize::from(b[i + 4]) | usize::from(b[i + 5]) << 8, usize::from(b[i + 6]) | usize::from(b[i + 7]) << 8);
+            assert!(rb * h <= 2048 && h > 0, "band {rb}x{h}");
+        }
         assert!(b.windows(10).any(|w| w == b"2 x Burger"));
         assert!(!b.windows(3).any(|w| w == "เ".as_bytes()));
     }

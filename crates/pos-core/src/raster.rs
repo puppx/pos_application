@@ -24,6 +24,9 @@ fn face() -> &'static Face<'static> {
 /// Dots per character of the printer's normal font (Font A is 12 x 24).
 pub(crate) const DOTS_PER_CHAR: usize = 12;
 
+/// Largest raster command sent to a printer (bytes of image data).
+const BAND_BYTES: usize = 2048;
+
 /// Font size in dots, chosen to sit well next to the printer's own text.
 fn px(size: Size) -> f32 {
     match size {
@@ -183,13 +186,20 @@ impl Bitmap {
         self.bits[y * self.row_bytes() + x / 8] & (0x80 >> (x % 8)) != 0
     }
 
-    /// GS v 0: print a raster image.
+    /// GS v 0: print a raster image, in bands of at most [`BAND_BYTES`]
+    /// each. Some printers refuse a bigger image and print its bytes as
+    /// text instead (a big Thai table name came out as rows of junk).
     fn escpos(&self) -> Vec<u8> {
         let rb = self.row_bytes();
-        let mut b = Vec::with_capacity(8 + self.bits.len());
-        b.extend_from_slice(&[0x1D, b'v', b'0', 0, (rb & 0xFF) as u8, (rb >> 8) as u8]);
-        b.extend_from_slice(&[(self.height & 0xFF) as u8, (self.height >> 8) as u8]);
-        b.extend_from_slice(&self.bits);
+        let band = (BAND_BYTES / rb.max(1)).max(1);
+        let mut b = Vec::with_capacity(8 * self.height.div_ceil(band) + self.bits.len());
+        for (i, rows) in self.bits.chunks(band * rb).enumerate() {
+            let h = rows.len() / rb.max(1);
+            debug_assert!(i * band + h <= self.height);
+            b.extend_from_slice(&[0x1D, b'v', b'0', 0, (rb & 0xFF) as u8, (rb >> 8) as u8]);
+            b.extend_from_slice(&[(h & 0xFF) as u8, (h >> 8) as u8]);
+            b.extend_from_slice(rows);
+        }
         b
     }
 }
@@ -293,6 +303,27 @@ pub(crate) fn escpos_line(text: &str, size: Size, center: bool, dots: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_images_go_out_in_small_bands() {
+        // A tall banner (the huge table name) at 80 mm: many rows of 72 bytes.
+        let img = banner("\u{1}โต๊ะ 12", 576);
+        assert!(img.bits.len() > BAND_BYTES);
+        let b = img.escpos();
+        let (mut i, mut rows, mut data) = (0, 0, Vec::new());
+        while i < b.len() {
+            assert_eq!(&b[i..i + 4], &[0x1D, b'v', b'0', 0]);
+            let rb = usize::from(b[i + 4]) | usize::from(b[i + 5]) << 8;
+            let h = usize::from(b[i + 6]) | usize::from(b[i + 7]) << 8;
+            assert_eq!(rb, 72);
+            assert!(rb * h <= BAND_BYTES && h > 0);
+            data.extend_from_slice(&b[i + 8..i + 8 + rb * h]);
+            rows += h;
+            i += 8 + rb * h;
+        }
+        // Every row printed once, in order.
+        assert_eq!((rows, data), (img.height, img.bits));
+    }
 
     #[test]
     fn detects_thai() {

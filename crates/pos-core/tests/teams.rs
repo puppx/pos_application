@@ -272,7 +272,8 @@ fn calling_mains_again_with_only_the_table_keeps_the_teams() {
     k.pos.add_item(&k.s, o.id, k.green.id, 1, None, None, &[]).unwrap();
     k.pos.call_mains(&k.s, o.id).unwrap();
     let cuts = |b: &[u8]| b.windows(4).filter(|w| *w == [0x1D, b'V', 66, 0]).count();
-    let bars = |b: &[u8]| b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count();
+    // An image starts with ESC a 0 then GS v 0 (later bands of the same image don't).
+    let bars = |b: &[u8]| b.windows(7).filter(|w| *w == [0x1B, b'a', 0, 0x1D, b'v', b'0', 0]).count();
     // One ticket per team with a main (Main, Curry): its bar and the table's.
     let b = k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes();
     assert_eq!((cuts(&b), bars(&b)), (2, 4));

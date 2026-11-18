@@ -147,7 +147,8 @@ impl Pos {
 
     pub fn set_setting(&self, s: &Session, key: &str, value: &str) -> Result<()> {
         // Managers may change the kitchen settings; the rest is for admins.
-        const KITCHEN: &[&str] = &["drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes", "starter_choice"];
+        const KITCHEN: &[&str] = &["drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes", "starter_choice",
+            "kds_slow_mins", "kds_late_mins", "kds_refresh_secs", "kds_paid_hours"];
         s.require(if KITCHEN.contains(&key) { Permission::KitchenSettings } else { Permission::ManageSettings })?;
         if key.starts_with('_') {
             return error::invalid("reserved setting key");

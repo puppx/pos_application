@@ -143,6 +143,13 @@ Categories named "Drinks", "Beverages" or "เครื่องดื่ม" st
 - **Payment method**: Cash, Card, or the delivery platform for its orders. The keypad types into the highlighted box (cash received, amount or tip); tap a box to type there.
 - A part payment taken by mistake: tap **undo** next to it. An order with part payments cannot be cancelled until they are taken back.
 
+**Payment settings** (admins): Manage → Bills & receipts → **Payments**. Not set = the behaviour above.
+- **Ask for tips** (on): off = no Tip row in Finish & Pay. **Tip buttons**: three percentages (5, 10, 15).
+- **Cash quick buttons**: note values, comma separated (5, 10, 20, 50, 100). The total rounded up is offered too, and the four smallest amounts above the total show.
+- **Split evenly: up to** N people, 2 to 12 (6).
+- **Payment method when Finish & Pay opens**: Cash or Card (Cash).
+- **Tapping "Exact" takes the cash payment at once** (off): the button then reads **Pay exact** and takes the payment with one tap.
+
 ### Shift & cash
 
 Manage → **Shift & cash**: count the drawer and **Open shift** with that float. **Money in / Money out** (with a reason) during the shift. At the end type the cash counted: the POS shows what should be there (float + cash taken + cash tips − change + money in − money out − cash refunds for voids) and whether anything is short or over, and prints the shift report. Card payments and card tips are listed but never count towards the drawer.
@@ -162,6 +169,8 @@ Manage → Kitchen printer → **Other kitchen printers**: add a printer (e.g. *
 ### Kitchen screen
 
 Manage → **Kitchen screen** on a tablet in the kitchen (through the local server): one card per order with the dishes sent and not yet done, oldest first, turning orange after 10 minutes and red after 20. Tap a dish when it is ready, or **Done** for the whole card; **Undo last done** if tapped by mistake. Filter by team, food, drinks or desserts. It refreshes every few seconds and never logs out by itself.
+
+Manage → Kitchen printer → **Kitchen screen** (admins and managers): **Orange after** (10) and **Red after** (20) minutes, **Refresh every** 2 to 30 seconds (4), and **Keep paid orders for** 0 to 24 hours (6): a paid order with dishes still to cook stays on the screen that long; 0 = it leaves at once. Managers see only this card in that group; the printers stay admin only.
 
 ### Desserts
 

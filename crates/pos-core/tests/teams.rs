@@ -459,3 +459,32 @@ fn kitchen_screen_shows_what_is_still_to_do() {
     k.pos.kitchen_done(&k.s, &ids[2..], false).unwrap();
     assert_eq!(k.pos.kitchen_board(&k.s, "all").unwrap().len(), 1);
 }
+
+#[test]
+fn paid_orders_stay_on_the_kitchen_screen_as_long_as_set() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    k.pos.add_item(&k.s, o.id, k.steak.id, 1, None, None, &[]).unwrap();
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    let card = PaymentInput { method: PaymentMethod::Card, amount_cents: None, tendered_cents: 0, tip_cents: 0, items: None };
+    assert_eq!(k.pos.add_payment(&k.s, o.id, &card).unwrap().status, "paid");
+    // Default: paid but not cooked yet, still on the screen (for 6 hours).
+    assert_eq!(k.pos.kds_paid_hours().unwrap(), 6);
+    let board = k.pos.kitchen_board(&k.s, "all").unwrap();
+    assert_eq!(board.len(), 1);
+    assert!(board[0].paid);
+    // 0 hours: paid orders leave the screen at once.
+    k.pos.set_setting(&k.s, "kds_paid_hours", "0").unwrap();
+    assert!(k.pos.kitchen_board(&k.s, "all").unwrap().is_empty());
+    // Out of range or junk: clamped, or back to the default.
+    k.pos.set_setting(&k.s, "kds_paid_hours", "99").unwrap();
+    assert_eq!(k.pos.kds_paid_hours().unwrap(), 24);
+    assert_eq!(k.pos.kitchen_board(&k.s, "all").unwrap().len(), 1);
+    k.pos.set_setting(&k.s, "kds_paid_hours", "abc").unwrap();
+    assert_eq!(k.pos.kds_paid_hours().unwrap(), 6);
+    // Managers may change the kitchen screen settings; staff may not.
+    let m = k.pos.create_user(&k.s, "Mia", Role::Manager, "3333").unwrap();
+    let mgr = k.pos.login_as(Some(m.id), "3333", &mut LoginThrottle::default()).unwrap();
+    k.pos.set_setting(&mgr, "kds_late_mins", "25").unwrap();
+    assert!(k.pos.set_setting(&mgr, "tip_presets", "5,10,20").is_err());
+}

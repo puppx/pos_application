@@ -673,6 +673,10 @@ td.short, strong.short { color: var(--danger); }
 .kds-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--ink); color: #fff; font-size: 20px; }
 .kds-card.slow .kds-head { background: var(--warn); }
 .kds-card.late .kds-head { background: var(--danger); }
+/* Colour swatches in the Kitchen screen settings card. */
+.kds-dot { width: 14px; height: 14px; border-radius: 4px; flex: none; }
+.kds-dot.slow { background: var(--warn); }
+.kds-dot.late { background: var(--danger); }
 .kds-head strong { flex: 1; }
 .kds-age { font-weight: 700; font-size: 16px; }
 .kds-sub { padding: 4px 12px; color: var(--muted); font-weight: 600; }
@@ -704,7 +708,9 @@ td.short, strong.short { color: var(--danger); }
 .pay-field.focus { border: 2px solid var(--brand); box-shadow: var(--focus); }
 .pay-sum { border-top: 1px dashed var(--line-2); padding-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .pay-sum .grand { font-size: 20px; }
-.row.quick button { flex: 1; min-height: 46px; }
+.row.quick button { flex: 1; min-height: 46px; white-space: nowrap; }
+/* Split evenly ÷2…÷12: one line per button, wraps to a second row if needed. */
+.split-n .seg button { white-space: nowrap; padding: 0 9px; }
 .pay-hint { padding: 12px; background: var(--surface-2); border-radius: var(--radius-sm); }
 .pay-ok { min-height: 76px; font-size: 21px; }
 .pay-right .keypad button { min-height: 52px; }

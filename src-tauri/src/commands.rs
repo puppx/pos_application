@@ -1032,6 +1032,17 @@ commands! {
         app.with_session(t, |pos, _| pos.setting(&key))
     }
 
+    /// Several settings in one go (e.g. everything Finish & Pay needs).
+    /// Reserved keys (starting with '_') are never returned.
+    fn get_settings(app, t, keys: Vec<String>) -> HashMap<String, Option<String>> {
+        if keys.len() > 100 {
+            return Err(PosError::Validation("too many settings at once".into()));
+        }
+        app.with_session(t, |pos, _| {
+            keys.into_iter().filter(|k| !k.starts_with('_')).map(|k| Ok((k.clone(), pos.setting(&k)?))).collect()
+        })
+    }
+
     fn set_setting(app, t, key: String, value: String) -> () {
         app.with_session(t, |pos, s| pos.set_setting(s, &key, &value))
     }
@@ -1136,6 +1147,24 @@ mod tests {
         let admin = pos.setup_first_admin("Owner", "1111").unwrap();
         pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
         App::new(pos, std::env::temp_dir())
+    }
+
+    #[test]
+    fn get_settings_returns_many_but_never_reserved_keys() {
+        let app = app();
+        let keys = json!({ "keys": ["tip_presets", "store_name", "_pin_salt", "_lan_server"] });
+        assert!(matches!(dispatch(&app, LOCAL, "get_settings", keys.clone()), Err(PosError::NotLoggedIn)));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "tip_presets", "value": "5,10,20" })).unwrap();
+        // Staff may read them too (Finish & Pay needs them).
+        dispatch(&app, LOCAL, "logout", json!({})).unwrap();
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        let v = dispatch(&app, LOCAL, "get_settings", keys).unwrap();
+        let m = v.as_object().unwrap();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["tip_presets"], "5,10,20");
+        assert!(m["store_name"].is_null() || m["store_name"].is_string());
+        assert!(!m.keys().any(|k| k.starts_with('_')));
     }
 
     #[test]

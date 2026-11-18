@@ -42,6 +42,8 @@ impl Pos {
     pub fn kitchen_board(&self, s: &Session, filter: &str) -> Result<Vec<BoardOrder>> {
         s.require(Permission::Sell)?;
         let team: Option<i64> = filter.strip_prefix("team:").and_then(|t| t.parse().ok());
+        // Paid orders stay on the screen this long (setting `kds_paid_hours`, 0..24, default 6).
+        let paid_secs = self.kds_paid_hours()? * 3600;
         let mut stmt = self.conn.prepare_cached(
             "SELECT i.id, i.order_id, i.qty, i.name, i.name_alt, i.note, i.sent_at, i.with_name, par.name, i.kitchen_done_at IS NOT NULL,
                     p.team_id, p.drink, p.dessert
@@ -50,12 +52,12 @@ impl Pos {
              JOIN products p ON p.id = i.product_id
              LEFT JOIN order_items par ON par.id = i.parent_id
              WHERE i.sent_at IS NOT NULL AND i.is_set = 0
-               AND (o.status = 'open' OR (o.status = 'paid' AND o.paid_at > unixepoch() - 6 * 3600))
+               AND (o.status = 'open' OR (?1 > 0 AND o.status = 'paid' AND o.paid_at > unixepoch() - ?1))
              ORDER BY i.sent_at, i.id",
         )?;
         type Row = (BoardItem, i64, Option<i64>, bool, bool);
         let rows: Vec<Row> = stmt
-            .query_map([], |r| {
+            .query_map([paid_secs], |r| {
                 Ok((
                     BoardItem {
                         id: r.get(0)?,
@@ -119,6 +121,12 @@ impl Pos {
         }
         out.sort_by_key(|o| o.since);
         Ok(out)
+    }
+
+    /// Hours a paid order with dishes still to do stays on the kitchen screen
+    /// (setting `kds_paid_hours`; 0 = it leaves at once; default 6).
+    pub fn kds_paid_hours(&self) -> Result<i64> {
+        Ok(self.setting("kds_paid_hours")?.and_then(|v| v.trim().parse::<i64>().ok()).map_or(6, |h| h.clamp(0, 24)))
     }
 
     /// Mark dishes done (or not done, to undo).

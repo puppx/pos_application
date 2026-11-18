@@ -401,8 +401,8 @@ const MANAGE_SUB = {
 /// Settings areas on the Manage page (admin only); the cards are in renderSettings.
 const SETTINGS_GROUPS = [
   ['shop', 'store', 'Restaurant', 'Name, service charge, tax'],
-  ['bills', 'receipt', 'Bills & receipts', 'Receipt printer, cash drawer, words on bills'],
-  ['kitchen', 'printer', 'Kitchen printer', 'Printer, copies, font'],
+  ['bills', 'receipt', 'Bills & receipts', 'Receipt printer, cash drawer, words on bills, tips'],
+  ['kitchen', 'printer', 'Kitchen printer', 'Printer, copies, font, kitchen screen'],
   ['tickets', 'cup', 'Drinks & desserts', 'Own tickets on or off'],
   ['orders', 'orders', 'Orders', 'Fix dishes already sent, quick notes'],
   ['teams', 'chef', 'Kitchen teams', 'Starter, Main, Curry, Rice…'],
@@ -1031,7 +1031,7 @@ async function renderOrder() {
     if (!order.items.length) return toast('The order is empty', true);
     let sentFirst = false;
     let printError = null;
-    payDialog(order, async (payment) => {
+    await payDialog(order, async (payment) => {
       // Anything not yet sent (mains waiting included) goes to the kitchen with the first payment.
       if (!sentFirst && order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
       sentFirst = true;
@@ -1368,6 +1368,34 @@ function showModal(...kids) {
   m.hidden = false;
 }
 
+/// Finish & Pay settings (Manage → Bills & receipts → Payments). Not set =
+/// the defaults below, which are how the app always worked.
+const PAY_KEYS = ['tip_presets', 'tips_on', 'cash_quick', 'split_max', 'pay_default_method', 'exact_cash_pays'];
+const PAY_DEFAULTS = { tips: [5, 10, 15], notes: [5, 10, 20, 50, 100], splitMax: 6 };
+/// "5, 10,15" → [5, 10, 15]; null if empty or any part is not a number.
+function numberList(v) {
+  const parts = String(v ?? '').split(/[,;\s]+/).filter(Boolean);
+  const nums = parts.map(Number);
+  return parts.length && nums.every(Number.isFinite) ? nums : null;
+}
+/// At most two decimals (12.5 or 0.25, not 0.125).
+const twoDecimals = (x) => Math.abs(x * 100 - Math.round(x * 100)) < 1e-6;
+const goodTips = (l) => l?.length === 3 && l.every((p) => p > 0 && p <= 100 && twoDecimals(p));
+const goodNotes = (l) => l?.length >= 1 && l.length <= 8 && l.every((x) => x > 0 && x <= 1e6 && twoDecimals(x));
+const goodSplit = (n) => Number.isInteger(n) && n >= 2 && n <= 12;
+function paySettings(raw = {}) {
+  const tips = numberList(raw.tip_presets), notes = numberList(raw.cash_quick), n = Number(raw.split_max ?? NaN);
+  return {
+    tips: goodTips(tips) ? tips : PAY_DEFAULTS.tips,
+    tipsOn: raw.tips_on !== '0',
+    /// In cents, smallest first.
+    notes: [...new Set((goodNotes(notes) ? notes : PAY_DEFAULTS.notes).map((x) => Math.round(x * 100)))].sort((a, b) => a - b),
+    splitMax: goodSplit(n) ? n : PAY_DEFAULTS.splitMax,
+    method: raw.pay_default_method === 'card' ? 'card' : 'cash',
+    exactPays: raw.exact_cash_pays === '1',
+  };
+}
+
 /// "Finish & Pay": choose Cash or Card (or the delivery platform); for cash
 /// enter what the customer handed over and see the change. `pay(method,
 /// tenderedCents)` takes the payment and returns the paid order.
@@ -1376,12 +1404,13 @@ function showModal(...kids) {
 /// cash what was handed over. One button takes the payment.
 /// `pay(input)` takes one payment and returns the order (still open after a
 /// part payment).
-function payDialog(order, pay) {
+async function payDialog(order, pay) {
+  const cfg = paySettings(await invoke('get_settings', { keys: PAY_KEYS }).catch(() => ({})));
   let busy = false;
   let mode = 'all'; // all | even | amount | dishes
   let even = { n: 2, done: 0 };
   let tipMode = 0; // 0 | basis points | 'other'
-  let method = 'cash';
+  let method = cfg.method;
   const typed = { cash: '', amount: '', tip: '' };
   let focus = 'cash';
   const pick = new Map();
@@ -1438,7 +1467,8 @@ function payDialog(order, pay) {
       const res = await pay(input);
       const p = res.payments?.[before] ?? res.payments?.at(-1);
       order = res;
-      busy = false;
+      // A fast second tap right after a part payment must not pay the rest too.
+      if (res.status === 'paid') busy = false; else setTimeout(() => { busy = false; }, 700);
       if (mode === 'even') even.done += 1; else mode = 'all';
       if (mode === 'even' && even.done >= even.n) mode = 'all';
       pick.clear();
@@ -1464,7 +1494,7 @@ function payDialog(order, pay) {
     const d = due(), t = tip(), tg = d + t, c = cash();
     const methods = [['cash', 'Cash'], ['card', 'Card'], ...(order.channel_id ? [['other', order.channel_name]] : [])];
     const keypadOn = method === 'cash' || focus === 'amount' || focus === 'tip';
-    const quick = [...new Set([500, 1000, 2000, 5000, 10000, Math.ceil(tg / 100) * 100, Math.ceil(tg / 500) * 500, Math.ceil(tg / 1000) * 1000]
+    const quick = [...new Set([...cfg.notes, Math.ceil(tg / 100) * 100, Math.ceil(tg / 500) * 500, Math.ceil(tg / 1000) * 1000]
       .filter((x) => x > tg))].sort((a, b) => a - b).slice(0, 4);
     const enough = method !== 'cash' || (c != null && c >= tg);
     const okLabel = d <= 0 ? (mode === 'dishes' ? 'Tap the dishes this person pays for' : 'Enter an amount')
@@ -1488,7 +1518,7 @@ function payDialog(order, pay) {
           if (v === 'amount') focus = 'amount';
           else if (focus === 'amount') focus = 'cash';
         }),
-        mode === 'even' && h('div', { class: 'row' }, seg([2, 3, 4, 5, 6].map((n) => [n, `÷ ${n}`]), even.n, (n) => { even = { n, done: 0 }; }),
+        mode === 'even' && h('div', { class: 'row split-n' }, seg(Array.from({ length: cfg.splitMax - 1 }, (_, i) => i + 2).map((n) => [n, `÷ ${n}`]), even.n, (n) => { even = { n, done: 0 }; }),
           h('span', { class: 'muted' }, `Person ${even.done + 1} of ${even.n}: ${money(evenAmount())}`)),
         mode === 'amount' && field('amount', 'Amount to pay now', typed.amount || '0.00', `of ${money(left())} left`),
         mode === 'dishes' && h('div', { class: 'stack dish-pick' }, bill().map((it) => {
@@ -1500,12 +1530,12 @@ function payDialog(order, pay) {
             h('div', { class: 'stepper', onclick: (e) => e.stopPropagation() },
               h('button', { onclick: () => set(q - 1) }, '−'), h('span', {}, `${q}/${max}`), h('button', { onclick: () => set(q + 1) }, '+')));
         })),
-        h('div', { class: 'pay-label' }, 'Tip'),
-        seg([[0, 'No tip'], [500, '5%'], [1000, '10%'], [1500, '15%'], ['other', 'Other']], tipMode, (v) => {
+        cfg.tipsOn && h('div', { class: 'pay-label' }, 'Tip'),
+        cfg.tipsOn && seg([[0, 'No tip'], ...cfg.tips.map((p) => [Math.round(p * 100), `${p}%`]), ['other', 'Other']], tipMode, (v) => {
           tipMode = v;
           if (v === 'other') focus = 'tip'; else if (focus === 'tip') focus = 'cash';
         }),
-        tipMode === 'other' && field('tip', 'Tip', typed.tip || '0.00'),
+        cfg.tipsOn && tipMode === 'other' && field('tip', 'Tip', typed.tip || '0.00'),
         h('div', { class: 'pay-sum' },
           h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'To pay now'), h('strong', {}, money(d))),
           t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'Tip'), h('strong', {}, money(t))),
@@ -1515,7 +1545,7 @@ function payDialog(order, pay) {
         h('div', { class: 'seg methods' }, methods.map(([v, label]) => h('button', { class: method === v ? 'on' : '', onclick: () => { method = v; if (v === 'cash') focus = 'cash'; draw(); } }, label))),
         method === 'cash' && field('cash', 'Cash received', typed.cash || `${money(tg)} (exact)`,
           c == null ? 'Enter an amount like 20 or 12.50' : c >= tg ? `Change ${money(c - tg)}` : `Short by ${money(tg - c)}`, c == null || c < tg),
-        method === 'cash' && h('div', { class: 'row quick' }, h('button', { onclick: () => { typed.cash = ''; focus = 'cash'; draw(); } }, 'Exact'),
+        method === 'cash' && h('div', { class: 'row quick' }, h('button', { onclick: () => { typed.cash = ''; if (!cfg.exactPays || due() > 0) focus = 'cash'; draw(); if (cfg.exactPays) take(); } }, cfg.exactPays ? 'Pay exact' : 'Exact'),
           quick.map((x) => h('button', { onclick: () => { typed.cash = String(x / 100); focus = 'cash'; draw(); } }, money(x)))),
         method !== 'cash' && !keypadOn && h('div', { class: 'muted pay-hint' }, method === 'card'
           ? `Take ${money(tg)} on the card machine, then confirm below.` : `${order.channel_name} has collected the payment.`),
@@ -2799,10 +2829,24 @@ async function renderUsers() {
 
 // ---------- reports (admin) ----------
 
+/// Kitchen screen settings (Manage → Kitchen printer → Kitchen screen; managers
+/// may change them). Not set = the defaults, how the screen always worked.
+/// kds_paid_hours is used by the POS itself (kitchen_board), the rest here.
+const KDS_KEYS = ['kds_slow_mins', 'kds_late_mins', 'kds_refresh_secs', 'kds_paid_hours'];
+const KDS_LIMITS = { slow: [1, 240, 10], late: [1, 240, 20], refresh: [2, 30, 4], paid: [0, 24, 6] };
+function kdsSettings(raw = {}) {
+  const int = (v, [lo, hi, def]) => { const n = Number(v ?? NaN); return Number.isInteger(n) && n >= lo && n <= hi ? n : def; };
+  const c = { slow: int(raw.kds_slow_mins, KDS_LIMITS.slow), late: int(raw.kds_late_mins, KDS_LIMITS.late),
+    refresh: int(raw.kds_refresh_secs, KDS_LIMITS.refresh), paid: int(raw.kds_paid_hours, KDS_LIMITS.paid) };
+  if (c.late <= c.slow) c.late = c.slow + 1;
+  return c;
+}
+
 /// Kitchen screen: one card per order with the dishes still to cook.
 /// Tap a dish when it is done; "Done" clears the whole card. Refreshes by itself.
 async function renderKitchen() {
-  const teams = await call('list_teams').catch(() => []);
+  const [teams, cfg] = await Promise.all([call('list_teams').catch(() => []),
+    invoke('get_settings', { keys: KDS_KEYS }).then(kdsSettings).catch(() => kdsSettings())]);
   let filter = 'all';
   try { filter = localStorage.getItem('pos.kdsFilter') || 'all'; } catch {}
   let lastDone = null;
@@ -2831,7 +2875,7 @@ async function renderKitchen() {
     setKids(board, orders.length ? orders.map((o) => {
       const age = mins(o.since);
       const todo = o.items.filter((i) => !i.done).map((i) => i.id);
-      return h('div', { class: `kds-card ${age >= 20 ? 'late' : age >= 10 ? 'slow' : ''}` },
+      return h('div', { class: `kds-card ${age >= cfg.late ? 'late' : age >= cfg.slow ? 'slow' : ''}` },
         h('div', { class: 'kds-head' }, h('strong', {}, o.heading), h('span', { class: 'kds-age' }, `${age} min`)),
         (o.customer_name || o.paid) && h('div', { class: 'kds-sub' }, [o.customer_name, o.paid ? 'PAID' : ''].filter(Boolean).join(' · ')),
         h('div', { class: 'kds-items' }, o.items.map((i) => h('button', { class: `kds-item ${i.done ? 'done' : ''}`,
@@ -2848,7 +2892,7 @@ async function renderKitchen() {
   drawBar();
   screen(h('div', { class: 'page kds-page' }, bar, board));
   await refresh();
-  live(refresh, 4000);
+  live(refresh, cfg.refresh * 1000);
 }
 
 /// Shift & cash: open with a float, money in / out, close by counting.
@@ -3427,14 +3471,15 @@ async function renderSettings() {
   const tab = settingsGroups().find(([id]) => id === state.settingsTab);
   if (!tab) return renderManageHome();
   const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
-  const [kitchenCfg, receiptCfg, systemPrinters] = await Promise.all([
+  // Printers are admin settings (managers only see the kitchen cards).
+  const [kitchenCfg, receiptCfg, systemPrinters] = isAdmin() ? await Promise.all([
     call('get_kitchen_printer'), call('get_receipt_settings'), call('list_system_printers'),
-  ]);
+  ]) : [{}, {}, []];
 
-  const kitchen = printerForm(kitchenCfg, systemPrinters, 'No kitchen printer',
+  const kitchen = isAdmin() && printerForm(kitchenCfg, systemPrinters, 'No kitchen printer',
     [['both', 'English with Thai under it'], ['english', 'English only'], ['thai', 'Thai only']], true);
 
-  const receipt = printerForm(receiptCfg, systemPrinters, 'No receipt printer',
+  const receipt = isAdmin() && printerForm(receiptCfg, systemPrinters, 'No receipt printer',
     [['english', 'English only'], ['both', 'English with Thai under it']]);
   const autoPrint = h('input', { type: 'checkbox', checked: receiptCfg.auto_print });
   const drawer = h('input', { type: 'checkbox', checked: receiptCfg.drawer_on_cash });
@@ -3532,8 +3577,8 @@ async function renderSettings() {
 
   const cards = {
     shop: () => [restaurantCard(), serviceCard(), menuDefaultsCard()],
-    bills: () => [receiptCard(), ticketLabelsCard()],
-    kitchen: () => [kitchenPrinterCard(), routesCard(systemPrinters)],
+    bills: () => [receiptCard(), paymentsCard(), ticketLabelsCard()],
+    kitchen: () => [isAdmin() && kitchenPrinterCard(), isAdmin() && routesCard(systemPrinters), kdsCard()],
     tickets: () => [splitCard()],
     orders: () => [courseCard(), isAdmin() && fixSentCard(), quickNotesCard()],
     teams: () => [teamsCard()],
@@ -3555,7 +3600,7 @@ async function renderSettings() {
 /// The settings areas this user may open: all for admins, the kitchen ones
 /// for managers, none for staff.
 function settingsGroups() {
-  const kitchen = ['tickets', 'orders', 'teams'];
+  const kitchen = ['kitchen', 'tickets', 'orders', 'teams'];
   return SETTINGS_GROUPS.filter(([id]) => (id !== 'screen' || !state.remote) && (isAdmin() || (state.session?.role === 'manager' && kitchen.includes(id))));
 }
 
@@ -3625,6 +3670,78 @@ function routesCard(systemPrinters) {
   return card;
 }
 
+/// A small number box for the settings cards.
+const numBox = (value, attrs = {}) => h('input', { inputmode: 'decimal', value, style: 'width:70px', ...attrs });
+
+/// Settings card: tips, cash quick buttons, split evenly, how Finish & Pay opens (admins).
+function paymentsCard() {
+  const card = h('div', { class: 'card stack' });
+  invoke('get_settings', { keys: PAY_KEYS }).then((raw) => {
+    const c = paySettings(raw);
+    const tips = c.tips.map((p) => numBox(String(p), { 'aria-label': 'Tip %' }));
+    const notes = h('input', { value: c.notes.map((x) => String(x / 100)).join(', '), placeholder: '5, 10, 20, 50, 100', style: 'width:240px' });
+    const split = numBox(String(c.splitMax), { inputmode: 'numeric' });
+    const method = h('select', {}, h('option', { value: 'cash' }, 'Cash'), h('option', { value: 'card' }, 'Card'));
+    method.value = c.method;
+    setKids(card,
+      h('h3', {}, 'Payments'),
+      h('div', { class: 'muted' }, 'How Finish & Pay looks. Switches save at once; the rest with the Save button.'),
+      settingSwitch('tips_on', 'Ask for tips (a Tip row in Finish & Pay)', 'Finish & Pay asks for tips', 'No Tip row in Finish & Pay'),
+      h('div', { class: 'row' }, h('span', {}, 'Tip buttons'),
+        tips.map((t) => h('label', { class: 'field' }, t, '%'))),
+      h('label', { class: 'field' }, 'Cash quick buttons', notes),
+      h('div', { class: 'muted small' }, 'Note values, separated by commas. The total rounded up is offered too; the four smallest amounts above the total show.'),
+      h('label', { class: 'field' }, 'Split evenly: up to', split, 'people (2 to 12)'),
+      h('label', { class: 'field' }, 'Payment method when Finish & Pay opens', method),
+      settingSwitch('exact_cash_pays', 'Tapping "Exact" takes the cash payment at once (no second tap)',
+        '"Exact" takes the payment at once', '"Exact" fills in the amount, then tap Take cash', false),
+      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
+        const tipList = numberList(tips.map((t) => t.value.replace(',', '.')).join(','));
+        if (!goodTips(tipList)) return toast('Enter three tip percentages, e.g. 5, 10 and 15 (more than 0, at most 100)', true);
+        const noteList = numberList(notes.value);
+        if (!goodNotes(noteList)) return toast('Enter 1 to 8 cash amounts separated by commas, e.g. 5, 10, 20, 50, 100', true);
+        const n = Number(split.value);
+        if (!goodSplit(n)) return toast('Split evenly: enter a number of people from 2 to 12', true);
+        const values = { tip_presets: tipList.join(','), cash_quick: noteList.join(','), split_max: String(n), pay_default_method: method.value };
+        for (const [key, value] of Object.entries(values)) await call('set_setting', { key, value });
+        toast(`Payments saved: tips ${tipList.join(' / ')} %, split up to ${n}, opens on ${method.value === 'card' ? 'Card' : 'Cash'}`);
+      }) }, 'Save payments')));
+  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
+  return card;
+}
+
+/// Settings card: kitchen screen colours, refresh, how long paid orders stay (managers too).
+function kdsCard() {
+  const card = h('div', { class: 'card stack' });
+  invoke('get_settings', { keys: KDS_KEYS }).then((raw) => {
+    const c = kdsSettings(raw);
+    const box = (v) => numBox(String(v), { inputmode: 'numeric' });
+    const slow = box(c.slow), late = box(c.late), refresh = box(c.refresh), paid = box(c.paid);
+    const dot = (cls) => h('span', { class: `kds-dot ${cls}` });
+    setKids(card,
+      h('h3', {}, 'Kitchen screen'),
+      h('div', { class: 'muted' }, 'The Kitchen screen (Manage → Kitchen screen) on a tablet: when a card changes colour, how often it refreshes, and how long a paid order with dishes still to cook stays on it.'),
+      h('div', { class: 'row' },
+        h('label', { class: 'field' }, dot('slow'), 'Orange after', slow, 'min'),
+        h('label', { class: 'field' }, dot('late'), 'Red after', late, 'min')),
+      h('label', { class: 'field' }, 'Refresh every', refresh, 'seconds (2 to 30)'),
+      h('label', { class: 'field' }, 'Keep paid orders for', paid, 'hours (0 to 24)'),
+      h('div', { class: 'muted small' }, '0 hours: a paid order leaves the screen at once, even if dishes are still to cook.'),
+      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
+        const v = { slow: Number(slow.value), late: Number(late.value), refresh: Number(refresh.value), paid: Number(paid.value) };
+        const ok = (n, [lo, hi]) => Number.isInteger(n) && n >= lo && n <= hi;
+        if (!ok(v.slow, KDS_LIMITS.slow) || !ok(v.late, KDS_LIMITS.late)) return toast('Orange and red: whole minutes from 1 to 240', true);
+        if (v.late <= v.slow) return toast('Red must come after orange (more minutes)', true);
+        if (!ok(v.refresh, KDS_LIMITS.refresh)) return toast('Refresh: whole seconds from 2 to 30', true);
+        if (paid.value.trim() === '' || !ok(v.paid, KDS_LIMITS.paid)) return toast('Paid orders: whole hours from 0 to 24', true);
+        const values = { kds_slow_mins: v.slow, kds_late_mins: v.late, kds_refresh_secs: v.refresh, kds_paid_hours: v.paid };
+        for (const [key, value] of Object.entries(values)) await call('set_setting', { key, value: String(value) });
+        toast(`Kitchen screen saved: orange after ${v.slow} min, red after ${v.late} min, refresh every ${v.refresh} s`);
+      }) }, 'Save kitchen screen')));
+  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
+  return card;
+}
+
 /// Settings card: whether drinks and desserts get their own tickets.
 function splitCard() {
   return h('div', { class: 'card stack' },
@@ -3653,10 +3770,10 @@ function fixSentCard() {
       '"Print again" prints that dish again. Then add the right dish and send it.'));
 }
 
-/// An on/off switch for setting `key` (on unless it is "0").
-function settingSwitch(key, label, onMsg, offMsg) {
-  const box = h('input', { type: 'checkbox', checked: true });
-  invoke('get_setting', { key }).then((v) => (box.checked = v !== '0')).catch(() => {});
+/// An on/off switch for setting `key` ("1" / "0"; not set = `def`).
+function settingSwitch(key, label, onMsg, offMsg, def = true) {
+  const box = h('input', { type: 'checkbox', checked: def });
+  invoke('get_setting', { key }).then((v) => (box.checked = v == null ? def : v !== '0')).catch(() => {});
   box.onchange = act(async () => {
     await call('set_setting', { key, value: box.checked ? '1' : '0' });
     toast(box.checked ? onMsg : offMsg);

@@ -43,8 +43,9 @@ fn check_name_free(conn: &rusqlite::Connection, name: &str, except: Option<i64>)
     let names = stmt.query_map([except], |r| r.get::<_, String>(0))?;
     let wanted = name.trim().to_lowercase();
     for n in names {
-        if n?.trim().to_lowercase() == wanted {
-            return invalid(format!("someone is already called {name}: use another name (e.g. add a surname initial)"));
+        let n = n?;
+        if n.trim().to_lowercase() == wanted {
+            return invalid(format!("{} already exists: use another name (e.g. add a surname initial)", n.trim()));
         }
     }
     Ok(())

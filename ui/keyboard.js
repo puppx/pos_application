@@ -105,7 +105,7 @@
     const init = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
     el.dispatchEvent(new KeyboardEvent('keydown', init));
     el.dispatchEvent(new KeyboardEvent('keyup', init));
-    hide();
+    hideAfterKey();
   }
   function typeKey(ch) {
     insert(ch);
@@ -188,7 +188,7 @@
     if (allowsDot(el)) add('.', '', () => insert('.')); else g.append(document.createElement('span'));
     digit('0');
     add('C', 'fn', clear, { title: 'Clear' });
-    add(ICON_DOWN, 'fn', hide, { html: true, title: 'Hide keyboard' });
+    add(ICON_DOWN, 'fn', hideAfterKey, { html: true, title: 'Hide keyboard' });
     return g;
   }
 
@@ -202,7 +202,7 @@
     } else {
       box.append(...letterRows());
       const r = row('osk-bottom');
-      r.append(key(ICON_DOWN, 'fn', hide, { html: true, title: 'Hide keyboard' }));
+      r.append(key(ICON_DOWN, 'fn', hideAfterKey, { html: true, title: 'Hide keyboard' }));
       r.append(key(S.layer === 'sym' ? 'ABC' : '123', 'fn', () => { S.layer = S.layer === 'sym' ? 'letters' : 'sym'; draw(); }));
       r.append(key(S.lang === 'en' ? 'ไทย' : 'EN', 'fn', () => {
         S.lang = S.lang === 'en' ? 'th' : 'en'; S.layer = 'letters'; S.shift = 0; store.set(LS_LANG, S.lang); draw();
@@ -268,7 +268,29 @@
     if (e.target instanceof Element && (e.target.closest('#osk') || eligible(e.target) || e.target.closest('label'))) return;
     hideAfterTap = true;
   }, true);
+  // Done, OK and the hide key close the keyboard the same way: once the tap
+  // on the key is over. The click that ends that tap is swallowed if it
+  // comes after the keyboard has gone, so it cannot land on what was under
+  // the key (e.g. the Bill button).
+  let hideAfterKeyTap = false;
+  function hideAfterKey() { hideAfterKeyTap = true; }
+  function swallowTapClick() {
+    const until = Date.now() + 400;
+    const eat = (e) => {
+      window.removeEventListener('click', eat, true);
+      if (Date.now() > until || (e.target instanceof Element && e.target.closest('#osk'))) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    window.addEventListener('click', eat, true);
+    setTimeout(() => window.removeEventListener('click', eat, true), 400);
+  }
   const finishTap = () => {
+    if (hideAfterKeyTap) {
+      hideAfterKeyTap = false;
+      swallowTapClick();
+      setTimeout(hide, 0);
+    }
     if (!hideAfterTap) return;
     hideAfterTap = false;
     setTimeout(hide, 0);

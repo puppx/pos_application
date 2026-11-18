@@ -110,7 +110,7 @@ fn two_active_staff_cannot_have_the_same_name() {
     let sam = k.pos.create_user(&s, "Sam", Role::Staff, "2222").unwrap();
     for name in ["Sam", " sam ", "SAM", "owner"] {
         let err = k.pos.create_user(&s, name, Role::Staff, "3333").unwrap_err();
-        assert!(matches!(&err, PosError::Validation(m) if m.contains("already called")), "{name}: {err}");
+        assert!(matches!(&err, PosError::Validation(m) if m.contains("already exists")), "{name}: {err}");
     }
     let mia = k.pos.create_user(&s, "Mia", Role::Manager, "4444").unwrap();
     // Renaming onto someone else's name: refused; keeping your own (any case): fine.
@@ -159,4 +159,25 @@ fn a_shared_pin_counts_as_the_logged_in_user_when_it_is_theirs() {
     assert_eq!(k.pos.pin_owner("2222").unwrap().role, Role::Staff);
     // The logged-in user's id never helps a PIN that is not theirs.
     assert!(matches!(k.pos.pin_owner_for("9999", Some(mia.id)), Err(PosError::InvalidPin)));
+}
+
+#[test]
+fn an_empty_order_is_cancelled_only_while_it_is_still_empty() {
+    let mut k = setup();
+    let (s, soup) = (k.admin.clone(), k.soup.id);
+    let plain = || NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: OrderDetails::default() };
+    // Empty: cancelled, and a second call does nothing.
+    let o = k.pos.open_order(&s, &plain()).unwrap();
+    assert!(k.pos.cancel_if_empty(&s, o.id).unwrap());
+    assert_eq!(k.pos.get_order(&s, o.id).unwrap().status, "cancelled");
+    assert!(!k.pos.cancel_if_empty(&s, o.id).unwrap());
+    // A dish added (by another till): left open.
+    let o = k.pos.open_order(&s, &plain()).unwrap();
+    k.pos.add_item(&s, o.id, soup, 1, None, None, &[]).unwrap();
+    assert!(!k.pos.cancel_if_empty(&s, o.id).unwrap());
+    assert_eq!(k.pos.get_order(&s, o.id).unwrap().status, "open");
+    // Customer details typed but no dishes yet: kept, so nothing typed is lost.
+    let o = k.pos.open_order(&s, &order(OrderType::Delivery, Some("Ann"))).unwrap();
+    assert!(!k.pos.cancel_if_empty(&s, o.id).unwrap());
+    assert_eq!(k.pos.get_order(&s, o.id).unwrap().status, "open");
 }

@@ -741,6 +741,17 @@ td.short, strong.short { color: var(--danger); }
   .pay-right .keypad button { min-height: 44px; font-size: 20px; }
   .pay-ok { min-height: 56px; font-size: 19px; }
 }
+/* Many dishes: the dish list shrinks to the space left (it scrolls), so the
+   total under it stays in view, part payments and tip included. */
+@media (min-width: 761px) {
+  .pay-one { max-height: calc(100vh - 68px); grid-template-rows: minmax(0, 1fr); }
+  .pay-left > * { flex-shrink: 0; }
+  .pay-left > .dish-pick { flex-shrink: 1; min-height: 96px; }
+  .pay-left > .pay-parts { flex-shrink: 1; min-height: 52px; overflow: auto; }
+}
+@media (min-width: 761px) and (max-height: 640px) {
+  .pay-left > .dish-pick { min-height: 64px; }
+}
 @media (max-width: 760px) {
   .pay-one { grid-template-columns: 1fr; }
 }
@@ -756,6 +767,7 @@ button.danger-outline:hover { background: var(--danger-soft); }
 .bulk-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
 .bulk-row.on { border-color: var(--danger); background: var(--danger-soft); }
 .bulk-row input { width: 20px; height: 20px; }
+.warn-box { padding: 8px 10px; border-radius: var(--radius-sm); background: var(--warn-soft); border: 1px solid var(--warn); color: var(--ink); font-size: 14px; }
 .pin-dots { display: flex; justify-content: center; gap: 12px; padding: 8px 0; }
 .pin-dots span { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--ink-2); }
 .pin-dots span.on { background: var(--ink); }

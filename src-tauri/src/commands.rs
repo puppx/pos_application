@@ -812,6 +812,11 @@ commands! {
         Ok(print(job))
     }
 
+    /// Leaving an order with nothing on it: cancel it if it is still empty.
+    fn cancel_empty_order(app, t, order_id: i64) -> bool {
+        app.with_session(t, |pos, s| pos.cancel_if_empty(s, order_id))
+    }
+
     fn void_order(app, t, order_id: i64, reason: String) -> Order {
         app.with_session(t, |pos, s| pos.void_order(s, order_id, &reason))
     }

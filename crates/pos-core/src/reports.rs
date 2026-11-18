@@ -105,7 +105,7 @@ impl Pos {
         sum.cancelled_count = self
             .conn
             .prepare_cached(
-                "SELECT COUNT(*) FROM orders WHERE opened_at >= ?1 AND opened_at < ?2 AND status = 'cancelled'",
+                "SELECT COUNT(*) FROM orders WHERE opened_at >= ?1 AND opened_at < ?2 AND status = 'cancelled' AND COALESCE(close_reason, '') <> 'empty'",
             )?
             .query_row(params![from, to], |r| r.get(0))?;
         let mut stmt = self.conn.prepare_cached(

@@ -16,7 +16,11 @@ const terminalId = (() => {
     return id;
   } catch { return make(); }
 })();
+/// Anything sent for the empty order on screen (a dish, details…) means it
+/// is no longer to be dropped, even before the server has answered.
+const ORDER_READS = new Set(['get_order', 'cancel_empty_order']);
 async function invoke(cmd, args = {}) {
+  if (args.orderId != null && args.orderId === state.orderEmpty && !ORDER_READS.has(cmd)) state.orderEmpty = null;
   if (TAURI) return DESKTOP_ONLY.has(cmd) ? TAURI.invoke(cmd, args) : TAURI.invoke('call', { cmd, args });
   let r;
   try {
@@ -227,9 +231,14 @@ function toast(msg, err = false) {
   toastTimer = setTimeout(() => (t.hidden = true), err ? 4000 : 2500);
 }
 
+/// Saving a setting can change the order screen ("Starter or Main?", tax,
+/// service charge…): the next order screen loads the menu and settings again.
+const SETTINGS_WRITES = new Set(['set_setting', 'set_service_settings', 'set_receipt_settings']);
 async function call(cmd, args = {}) {
   try {
-    return await invoke(cmd, args);
+    const r = await invoke(cmd, args);
+    if (SETTINGS_WRITES.has(cmd)) state.menu = null;
+    return r;
   } catch (e) {
     const msg = String(e?.message ?? e);
     if (msg === 'please log in') start();
@@ -444,8 +453,9 @@ function go(view) {
   if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
   if (view === 'settings') state.settingsTab = null; // the settings menu first
   state.view = view;
+  const left = state.orderId;
   state.orderId = null;
-  renderShell();
+  dropEmptyOrder(left).finally(renderShell);
 }
 
 // ---------- automatic updates ----------
@@ -548,13 +558,27 @@ function openOrder(id) {
 }
 
 function closeOrder() {
+  const left = state.orderId;
   state.orderId = null;
   state.view = state.returnTo;
-  renderShell();
+  dropEmptyOrder(left).finally(renderShell);
+}
+
+/// Leaving an order with nothing on it (a free table tapped, then Back)
+/// cancels it, so the table is free again and the day can be closed.
+/// `state.orderEmpty` is the id of the order on screen while it is empty.
+async function dropEmptyOrder(id) {
+  if (id == null || state.orderEmpty !== id) return;
+  state.orderEmpty = null;
+  try {
+    // The server cancels it only if it is still empty (another till may have added something).
+    await invoke('cancel_empty_order', { orderId: id });
+  } catch { /* it stays open, as before */ }
 }
 
 async function logOut(message = null) {
   closeModal();
+  await dropEmptyOrder(state.orderId);
   try { await invoke('logout'); } catch { /* already logged out on the server */ }
   Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null });
   document.getElementById('bar').hidden = true;
@@ -784,8 +808,9 @@ async function renderOrder() {
     drawCourse();
     const add = act(async () => {
       if (!name.value.trim()) return toast('Type the dish name', true);
+      if (!price.value.trim()) return toast('Type the price (0 if it is free)', true);
       let cents;
-      try { cents = parseMoney(price.value || '0'); } catch { return toast('Enter a price like 2 or 2.50', true); }
+      try { cents = parseMoney(price.value); } catch { return toast('Enter a price like 2 or 2.50', true); }
       order = await call('add_open_item', { orderId, name: name.value, priceCents: cents, qty, note: note.value.trim() || null, starter: course });
       closeModal(); draw(); toast(`${name.value.trim()} added`);
     });
@@ -1066,18 +1091,29 @@ async function renderOrder() {
     const r = await call('send_to_kitchen', { orderId, allCourses });
     order = await call('get_order', { id: orderId });
     draw();
-    const n = r.items.reduce((n, i) => n + i.qty, 0);
+    // Counted like the Send button: a set's dishes, not the set's own line.
+    const n = r.items.filter((i) => !i.is_set).reduce((n, i) => n + i.qty, 0);
     const prep = (r.prep ?? []).reduce((n, i) => n + i.qty, 0);
     if (!n && !prep) return toast('Nothing new to send');
     const waiting = order.items.filter((i) => i.held && !i.sent_at).reduce((n, i) => n + i.qty, 0);
     const msg = `${what}: ${n} item(s)` + (prep ? ` · PREPARE NOW for ${prep}` : '') + (waiting ? ` · ${waiting} main(s) wait for "Call mains"` : '');
     reportPrint(r.prep_print?.error ? r.prep_print : r.print, msg);
   }
+  // The order again from the server, e.g. after a payment was taken back in Finish & Pay.
+  const reload = async () => {
+    if (state.orderId !== orderId || !layout?.isConnected) return;
+    order = await call('get_order', { id: orderId });
+    if (order.status !== 'open') return renderShell();
+    draw();
+  };
   const finish = act(async () => {
+    order = await call('get_order', { id: orderId });
+    if (order.status !== 'open') return renderShell();
+    draw();
     if (!order.items.length) return toast('The order is empty', true);
     let sentFirst = false;
     let printError = null;
-    await payDialog(order, async (payment) => {
+    await payDialog(order, reload, async (payment) => {
       // Anything not yet sent (mains waiting included) goes to the kitchen with the first payment.
       if (!sentFirst && order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
       sentFirst = true;
@@ -1100,6 +1136,8 @@ async function renderOrder() {
   });
 
   function draw() {
+    const hasDetails = ['customer_name', 'customer_phone', 'delivery_address', 'notes', 'external_ref', 'customer_id'].some((k) => order[k]);
+    state.orderEmpty = !order.items.length && !order.payments?.length && !hasDetails ? orderId : null;
     setKids(lines, h('table', { class: 'ticket-lines' }, order.items.map((it) => {
       const sent = !!it.sent_at;
       // A dish inside a set: shown under the set, no price or stepper.
@@ -1107,6 +1145,7 @@ async function renderOrder() {
         return h('tr', { class: 'set-dish' }, h('td', { colspan: 4 },
           it.section_name && h('span', { class: 'muted' }, `${it.section_name}: `), it.qty > 1 ? `${it.qty} × ${it.name}` : it.name,
           it.with_name && h('span', { class: 'muted' }, ` with ${it.with_name}`),
+          it.options.length > 0 && h('span', { class: 'muted' }, ` · ${it.options.map((o) => o.name).join(', ')}`),
           sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
           it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
@@ -1330,8 +1369,9 @@ async function renderOrder() {
     const key = (k) => { if (k === '⌫') pin = pin.slice(0, -1); else if (k === 'C') pin = ''; else if (pin.length < 8) pin += k; err.textContent = ''; drawPin(); };
     const go = act(async () => {
       if (pin.length < 4) return;
+      let r;
       try {
-        await invoke('cancel_order', { orderId, reason: '', pin });
+        r = await invoke('cancel_order', { orderId, reason: '', pin });
       } catch (e) {
         const msg = String(e?.message ?? e);
         pin = ''; drawPin();
@@ -1339,7 +1379,10 @@ async function renderOrder() {
           : /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
         return;
       }
-      closeModal(); toast(`Order #${order.id} cancelled`); closeOrder();
+      closeModal(); closeOrder();
+      // Dishes still cooking get a CANCELLED ticket.
+      if (r?.error) toast(`Order #${order.id} cancelled, but the CANCELLED ticket did not print (${r.error}). Tell the kitchen.`, true);
+      else toast(`Order #${order.id} cancelled` + (r?.attempted ? ' · CANCELLED ticket sent to the kitchen' : ''));
     });
     ok.onclick = go;
     showModal(h('h3', {}, `Cancel order #${order.id}?`),
@@ -1407,6 +1450,10 @@ function closeModal() {
   m.hidden = true;
   setKids(m);
   document.removeEventListener('keydown', state.modalKeys);
+  // Run once, however the dialog was closed (see payDialog).
+  const closed = state.onModalClose;
+  state.onModalClose = null;
+  closed?.();
 }
 
 function showModal(...kids) {
@@ -1450,9 +1497,11 @@ function paySettings(raw = {}) {
 /// amount or chosen dishes), an optional tip, the payment method, and for
 /// cash what was handed over. One button takes the payment.
 /// `pay(input)` takes one payment and returns the order (still open after a
-/// part payment).
-async function payDialog(order, pay) {
+/// part payment). `refresh()` reloads the order screen: after a payment is
+/// taken back and when the dialog closes, however it closes.
+async function payDialog(order, refresh, pay) {
   const cfg = paySettings(await invoke('get_settings', { keys: PAY_KEYS }).catch(() => ({})));
+  const reload = () => { Promise.resolve(refresh()).catch(() => {}); };
   let busy = false;
   let mode = 'all'; // all | even | amount | dishes
   let even = { n: 2, done: 0 };
@@ -1557,6 +1606,7 @@ async function payDialog(order, pay) {
             h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(async () => {
               order = await call('remove_payment', { orderId: order.id, paymentId: p.id });
               mode = 'all'; even.done = 0; draw();
+              reload();
             }) }, 'undo'))),
           h('div', { class: 'row' }, h('strong', { style: 'flex:1' }, 'Left to pay'), h('span', { class: 'big' }, money(left())))),
         h('div', { class: 'pay-label' }, 'Pay'),
@@ -1609,6 +1659,7 @@ async function payDialog(order, pay) {
     });
   }
   draw();
+  state.onModalClose = reload;
 }
 
 /// Inputs for customer details, shown according to order type.
@@ -1942,7 +1993,12 @@ async function renderMenuAdmin() {
   const catTree = cats.filter(isMain).flatMap((m) => [m, ...cats.filter((c) => c.parent_id === m.id)]);
   const catLabel = (c) => (isMain(c) ? c.name : `${catById[c.parent_id].name} › ${c.name}`);
   // What a new item in category `id` starts with.
-  const defaultsFor = (id) => ({ tax: catById[id]?.tax_rate_bp ?? defaultTax, starter: !!catById[id]?.starter, prep: !!catById[id]?.prep, team: catById[id]?.team_id ?? null, drink: !!catById[id]?.drink, dessert: !!catById[id]?.dessert });
+  // A sub-category without its own tax or team uses its main category's, then the restaurant's.
+  const defaultsFor = (id) => {
+    const c = catById[id], m = catById[c?.parent_id];
+    return { tax: c?.tax_rate_bp ?? m?.tax_rate_bp ?? defaultTax, team: c?.team_id ?? m?.team_id ?? null,
+      starter: !!(c?.starter || m?.starter), prep: !!(c?.prep || m?.prep), drink: !!(c?.drink || m?.drink), dessert: !!(c?.dessert || m?.dessert) };
+  };
   const form = popupHost();
   const list = h('div');
   const search = h('input', { type: 'search', placeholder: 'Search items' });
@@ -2798,10 +2854,10 @@ async function renderPlan() {
           await call('update_floor', { id: floor.id, name: rename.value, sortOrder: floor.sort_order });
           toast('Renamed'); renderPlan();
         }) }, 'Rename')),
-        isAdmin() && h('button', { class: 'danger', onclick: act(async () => {
+        isAdmin() && confirmBtn('Delete floor', `Tap again to delete ${floor.name}`, async () => {
           await call('delete_floor', { id: floor.id });
           setDirty(false); state.floorId = null; toast('Floor removed'); renderPlan();
-        }) }, 'Delete floor')));
+        })));
     setKids(panel, ...kids);
   }
 
@@ -2847,6 +2903,20 @@ async function renderUsers() {
     const active = h('input', { type: 'checkbox', checked: u ? u.active : true });
     const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: u ? 'New PIN (optional)' : 'PIN (4-8 digits)' });
     for (const el of [name, pin]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
+    // Shared PINs are allowed, but say so before saving.
+    const shared = h('div', { class: 'warn-box', hidden: true });
+    let pinTimer;
+    pin.addEventListener('input', () => {
+      clearTimeout(pinTimer);
+      const v = pin.value;
+      if (!/^\d{4,8}$/.test(v)) { shared.hidden = true; return; }
+      pinTimer = setTimeout(async () => {
+        const names = await invoke('pin_shared', { pin: v, exceptUserId: u?.id ?? null }).catch(() => []);
+        if (pin.value !== v) return;
+        shared.hidden = !names.length;
+        shared.textContent = names.length ? `${names.join(', ')} already ${names.length > 1 ? 'use' : 'uses'} this PIN. Better give each person their own: when someone else types a shared PIN to approve, it counts as the lowest role among them.` : '';
+      }, 200);
+    });
     const save = act(async () => {
       if (u) {
         await call('update_user', { id: u.id, name: name.value, role: role.value, active: active.checked });
@@ -2863,7 +2933,7 @@ async function renderUsers() {
       h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, 'Name', name),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Role', role), u && h('label', { class: 'check' }, active, ' Active')),
       h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, u ? 'New PIN' : 'PIN', pin,
-        h('span', { class: 'muted small' }, u ? 'Leave empty to keep the current PIN.' : '4 to 8 digits; used to log in.')),
+        h('span', { class: 'muted small' }, u ? 'Leave empty to keep the current PIN.' : '4 to 8 digits; used to log in.'), shared),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'))));
     name.focus();
   }
@@ -2960,9 +3030,10 @@ async function renderKitchen() {
 }
 
 /// Shift & cash: open with a float, money in / out, close by counting.
-async function renderShift() {
+/// `shown`: a report to show straight away (the shift just closed).
+async function renderShift(shown = null) {
   const [cur, past] = await Promise.all([call('current_shift'), call('list_shifts', { limit: 20 }).catch(() => [])]);
-  const report = h('pre', { class: 'report', hidden: true });
+  const report = h('pre', { class: 'report', hidden: !shown }, shown ?? '');
   const moneyIn = (placeholder) => h('input', { inputmode: 'decimal', placeholder, style: 'width:140px' });
   const cents = (el) => { try { return el.value.trim() ? parseMoney(el.value) : null; } catch { return null; } };
   let main;
@@ -3030,8 +3101,8 @@ async function renderShift() {
           if (c == null) return toast('Type the cash you counted', true);
           const r = await call('close_shift', { countedCents: c, note: note.value });
           toast('Shift closed' + (r.print.error ? ` (report did not print: ${r.print.error})` : r.print.attempted ? ' · report printed' : ''), !!r.print.error);
-          await renderShift();
-          report.textContent = r.text; report.hidden = false;
+          await renderShift(r.text);
+          document.querySelector('pre.report')?.scrollIntoView({ block: 'nearest' });
         }) }, 'Close shift & print')));
   }
   const closed = past.filter((p) => p.shift.closed_at);

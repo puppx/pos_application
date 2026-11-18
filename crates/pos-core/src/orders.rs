@@ -1385,6 +1385,30 @@ impl Pos {
         Ok(())
     }
 
+    /// Cancel an order only if it is still open with nothing on it (no lines,
+    /// no payments): a free table tapped, then left. Checked and cancelled in
+    /// one transaction, so a dish another till adds meanwhile is never lost.
+    /// Returns whether it was cancelled.
+    pub fn cancel_if_empty(&mut self, s: &Session, order_id: i64) -> Result<bool> {
+        s.require(Permission::Sell)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "UPDATE orders SET status = 'cancelled', closed_by = ?2, closed_at = unixepoch(), close_reason = 'empty'
+             WHERE id = ?1 AND status = 'open'
+               AND NOT EXISTS (SELECT 1 FROM order_items WHERE order_id = ?1)
+               AND NOT EXISTS (SELECT 1 FROM payments WHERE order_id = ?1)
+               AND COALESCE(customer_name, '') = '' AND COALESCE(customer_phone, '') = ''
+               AND COALESCE(delivery_address, '') = '' AND COALESCE(notes, '') = ''
+               AND COALESCE(external_ref, '') = '' AND customer_id IS NULL",
+            params![order_id, s.user_id],
+        )?;
+        if n > 0 {
+            audit_tx(&tx, s.user_id, "order.cancel", &format!("{order_id} empty"))?;
+        }
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
     /// Reverse a paid order (refund) and put its stock back.
     pub fn void_order(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<Order> {
         s.require(Permission::VoidOrder)?;
@@ -1477,6 +1501,7 @@ impl Pos {
         let mut stmt = self.conn.prepare_cached(&format!(
             "{SUMMARY_SQL}
              WHERE o.opened_at >= ?1 AND o.opened_at < ?2 AND o.status <> 'open'
+               AND NOT (o.status = 'cancelled' AND COALESCE(o.close_reason, '') = 'empty')
                AND (?3 IS NULL OR o.opened_by = ?3 OR o.paid_by = ?3)
              ORDER BY o.opened_at DESC, o.id DESC LIMIT ?4 OFFSET ?5"
         ))?;

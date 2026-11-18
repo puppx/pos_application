@@ -186,6 +186,14 @@ The settings tiles: Restaurant, Bills & receipts, Kitchen printer, Drinks & dess
 
 Manage → Kitchen teams → **Use kitchen teams** switches teams off without deleting them (tickets print as before teams).
 
+More settings (admins). Not set = the behaviour before they existed, except the discount buttons:
+- **Start screen after login** (Login & staff): *Tables* (default), *Orders*, or *New takeaway*, which opens a new takeaway order straight after login (leaving it empty drops it, as with any empty order). Setting `start_screen` = `tables` / `orders` / `takeaway`.
+- **Warn before** auto logout (Login & staff): *No warning*, 10, 20 or 30 seconds (default 30) or 1 minute. A big **Logging out in 10 s** covers the screen and counts down; any tap or key keeps you logged in, and the tap does not press anything under it. The warning never takes more than half the auto-logout time. Setting `auto_logout_warn_secs` (0 to 120, 0 = off).
+- **Order types** (Orders): switch off **Takeaway**, **Collection** or **Delivery** (your own drivers) to hide their new-order buttons on the Orders screen and Customers page. Dine-in always shows, delivery-app buttons are set up under Delivery apps, and open orders of a hidden type still work as usual. Settings `show_takeaway`, `show_collection`, `show_delivery` (`1` / `0`, default `1`).
+- **Discounts** (Orders): **Buttons**, up to 8 percentages (default 5, 10, 15, 20; empty = none), show when you tap ✎ on an order line, and one tap saves that much off the line. The discount box also takes a percentage such as `10%`. **Staff can give up to N %** without a manager PIN (empty = no limit, the default). Above it, the till asks for a manager's or admin's PIN to approve it (nobody is logged in or out, and the approval is in the audit log). The server checks the limit too. Managers and admins are never limited, and lowering or removing a discount never needs a PIN. Settings `discount_presets` and `discount_staff_max_pct`.
+- **Customer receipts** (Bills & receipts → Receipt printer): **Show the VAT / tax breakdown** (off) adds the TAX / NET / VAT / GROSS table under the total of bills and receipts, with "Prices include tax" when it is inside the prices. **Show "Served by"** (on) can take the staff name off customer bills and receipts; the staff copy always has it. The name, address lines and bottom message were already editable there. With both left as they are, receipts print exactly as before.
+- **Menu button size** (Screen & devices): *Normal* or *Large*. Large makes the menu tiles, categories and the order screen's Send, Finish & Pay, tool and +/− buttons bigger on every device, with no sideways scrolling at 1024 × 600 or on a phone. Setting `button_size` = `normal` / `large`. This card also shows on phones and tablets; full screen and the local server stay on the main till.
+
 ### Set menus
 
 Menu → **+ Set menu**: a name, price and tax, and sections (Starter, Main and Side to start with; rename, add, remove or reorder them).
@@ -291,7 +299,7 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 | | Admin | Manager | Staff |
 | --- | :---: | :---: | :---: |
 | Open orders, add items, send to kitchen, reprint, take payment | ✔ | ✔ | ✔ |
-| Move tables and dishes, edit customer details, discounts | ✔ | ✔ | ✔ |
+| Move tables and dishes, edit customer details, discounts | ✔ | ✔ | ✔ (over the Settings limit with a manager's or admin's PIN) |
 | Remove or reduce items already sent to the kitchen (unless Settings keep it to admins) | ✔ | ✔ | ✔ |
 | Cancel an order that has items in the kitchen | ✔ | ✔ | with a manager's or admin's PIN |
 | Void / refund paid orders | ✔ | ✔ | |

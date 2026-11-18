@@ -10,6 +10,9 @@ use crate::{Pos, PosError, Result, Role, Session};
 const FREE_ATTEMPTS: u32 = 5;
 const BASE_LOCKOUT: Duration = Duration::from_secs(30);
 const MAX_LOCKOUT: Duration = Duration::from_secs(15 * 60);
+/// Wrong PINs further apart than this start the count again (longer than
+/// the longest lockout, so waiting one out does not reset it).
+const FORGET_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// OWASP minimum for Argon2id (19 MiB, 2 passes): ~20-60 ms per login on
 /// low-end CPUs, but makes offline guessing of a stolen database slow.
@@ -34,6 +37,7 @@ pub(crate) fn validate_pin(pin: &str) -> Result<()> {
 pub struct LoginThrottle {
     failures: u32,
     locked_until: Option<Instant>,
+    last_failure: Option<Instant>,
 }
 
 impl LoginThrottle {
@@ -47,6 +51,11 @@ impl LoginThrottle {
     }
 
     pub fn record_failure(&mut self, now: Instant) {
+        // Typos long ago don't count: only a run of wrong PINs locks.
+        if self.last_failure.is_some_and(|t| now.duration_since(t) > FORGET_AFTER) {
+            self.failures = 0;
+        }
+        self.last_failure = Some(now);
         self.failures += 1;
         if self.failures >= FREE_ATTEMPTS {
             let shift = (self.failures - FREE_ATTEMPTS).min(10);
@@ -57,6 +66,13 @@ impl LoginThrottle {
 
     pub fn record_success(&mut self) {
         *self = LoginThrottle::default();
+    }
+
+    /// Your own PIN typed in an approval box: it proves nothing about the
+    /// guesses before it, so they are not cleared, but they stop adding up
+    /// (the next wrong guess locks for the shortest time, not longer).
+    pub fn record_own_pin(&mut self) {
+        self.failures = self.failures.min(FREE_ATTEMPTS - 1);
     }
 }
 
@@ -172,7 +188,13 @@ impl Pos {
             self.audit(None, "pin.failed", "")?;
             return Err(PosError::InvalidPin);
         };
-        self.throttle.record_success();
+        // Your own PIN proves nothing about someone else's: it must not
+        // clear the wrong guesses (no guess, own PIN, guess…).
+        if current_user == Some(user_id) {
+            self.throttle.record_own_pin();
+        } else {
+            self.throttle.record_success();
+        }
         let role = Role::parse(&role).ok_or_else(|| PosError::Internal("bad role".into()))?;
         Ok(Session { user_id, name, role })
     }
@@ -278,5 +300,24 @@ mod tests {
         assert!(matches!(t.check(t0), Err(PosError::LockedOut(60))));
         t.record_success();
         assert!(t.check(t0).is_ok());
+    }
+
+    #[test]
+    fn own_pin_caps_wrong_guesses_and_old_typos_are_forgotten() {
+        let t0 = Instant::now();
+        let mut t = LoginThrottle::default();
+        // Typos spread over a shift, with your own PIN in between: never more than the shortest lock.
+        for i in 0..8 {
+            let now = t0 + Duration::from_secs(i * 60);
+            t.record_failure(now);
+            if let Err(PosError::LockedOut(s)) = t.check(now) {
+                assert_eq!(s, 30);
+            }
+            t.record_own_pin();
+        }
+        // An hour after the last typo the count starts again.
+        let later = t0 + Duration::from_secs(8 * 60 + 61 * 60);
+        t.record_failure(later);
+        assert!(t.check(later).is_ok());
     }
 }

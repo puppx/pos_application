@@ -23,6 +23,7 @@ mod products;
 mod reports;
 mod roles;
 mod service;
+mod settings;
 mod shifts;
 mod sets;
 mod teams;
@@ -54,6 +55,7 @@ pub use orders::{
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
+pub use settings::{discount_presets, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS};
 pub use shifts::{CashMove, Shift};
 pub use sets::{SetChoice, SetPick, SetSection, SetSectionInput};
 pub use teams::{Team, TeamInput};
@@ -154,6 +156,7 @@ impl Pos {
         if key.starts_with('_') {
             return error::invalid("reserved setting key");
         }
+        settings::validate(key, value)?;
         self.conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",

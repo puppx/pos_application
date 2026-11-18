@@ -18,6 +18,14 @@ const MAX_QTY: i64 = 1_000;
 pub const OPEN_ITEM_SKU: &str = "__open_item__";
 pub(crate) const MAX_ITEMS: i64 = 300;
 
+
+/// SQL condition (on `orders`, no alias) for an order with nothing on it:
+/// no dishes, payments or customer details.
+pub(crate) const EMPTY_ORDER: &str = "NOT EXISTS (SELECT 1 FROM order_items WHERE order_id = orders.id)
+    AND NOT EXISTS (SELECT 1 FROM payments WHERE order_id = orders.id)
+    AND COALESCE(customer_name, '') = '' AND COALESCE(customer_phone, '') = ''
+    AND COALESCE(delivery_address, '') = '' AND COALESCE(notes, '') = ''
+    AND COALESCE(external_ref, '') = '' AND customer_id IS NULL";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderType {
@@ -587,7 +595,7 @@ fn close_paid(tx: &Transaction, s: &Session, order_id: i64, t: &Totals) -> Resul
     Ok(())
 }
 
-fn audit_tx(tx: &Transaction, user_id: i64, action: &str, detail: &str) -> Result<()> {
+pub(crate) fn audit_tx(tx: &Transaction, user_id: i64, action: &str, detail: &str) -> Result<()> {
     tx.prepare_cached("INSERT INTO audit_log (user_id, action, detail) VALUES (?1, ?2, ?3)")?
         .execute(params![user_id, action, detail])?;
     Ok(())
@@ -1060,6 +1068,12 @@ impl Pos {
     /// Lines already sent to the kitchen can only be reduced or removed by
     /// an admin (it is food that has been made), and their note is fixed.
     pub fn update_item(&mut self, s: &Session, item_id: i64, upd: &ItemUpdate) -> Result<Order> {
+        self.update_item_approved(s, None, item_id, upd)
+    }
+
+    /// [`Pos::update_item`], with `approver` (from a manager's PIN typed on
+    /// this till) allowing a discount over the staff limit.
+    pub fn update_item_approved(&mut self, s: &Session, approver: Option<&Session>, item_id: i64, upd: &ItemUpdate) -> Result<Order> {
         s.require(Permission::Sell)?;
         let note = opt_text(&upd.note, 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1108,6 +1122,22 @@ impl Pos {
         } else {
             if !(0..=cur.unit_price_cents * upd.qty).contains(&upd.discount_cents) {
                 return invalid(format!("invalid discount on {}", cur.name));
+            }
+            // A bigger share off than before, over the staff limit: a manager's or admin's say-so.
+            let more = upd.discount_cents * cur.qty > cur.discount_cents * upd.qty;
+            if more && !s.role.can(Permission::AnyDiscount) {
+                if let Some(max) = crate::settings::discount_limit(&tx)? {
+                    // Rounded to the nearest penny, as the till works out "15%".
+                    if upd.discount_cents * 100 > max * cur.unit_price_cents * upd.qty + 50 {
+                        match approver {
+                            None => return invalid(format!("a discount over {max}% needs a manager PIN")),
+                            Some(a) if !a.role.can(Permission::AnyDiscount) => {
+                                return invalid(format!("a discount over {max}% needs a manager's or admin's PIN"))
+                            }
+                            Some(a) => audit_tx(&tx, a.user_id, "order.discount_approved", &format!("order {order_id} {} {} for {}", cur.name, upd.discount_cents, s.name))?,
+                        }
+                    }
+                }
             }
             tx.execute(
                 "UPDATE order_items SET qty = ?2, discount_cents = ?3, note = ?4 WHERE id = ?1",
@@ -1393,13 +1423,8 @@ impl Pos {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let n = tx.execute(
-            "UPDATE orders SET status = 'cancelled', closed_by = ?2, closed_at = unixepoch(), close_reason = 'empty'
-             WHERE id = ?1 AND status = 'open'
-               AND NOT EXISTS (SELECT 1 FROM order_items WHERE order_id = ?1)
-               AND NOT EXISTS (SELECT 1 FROM payments WHERE order_id = ?1)
-               AND COALESCE(customer_name, '') = '' AND COALESCE(customer_phone, '') = ''
-               AND COALESCE(delivery_address, '') = '' AND COALESCE(notes, '') = ''
-               AND COALESCE(external_ref, '') = '' AND customer_id IS NULL",
+            &format!("UPDATE orders SET status = 'cancelled', closed_by = ?2, closed_at = unixepoch(), close_reason = 'empty'
+                      WHERE id = ?1 AND status = 'open' AND {EMPTY_ORDER}"),
             params![order_id, s.user_id],
         )?;
         if n > 0 {

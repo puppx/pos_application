@@ -83,7 +83,9 @@ fn four_teams_are_there_to_start_with_and_can_be_edited() {
     assert!(k.pos.save_teams(&k.s, &[TeamInput { id: None, name: " ".into(), name_alt: None }]).is_err());
     k.pos.create_user(&k.s, "Sam", Role::Staff, "2222").unwrap();
     let staff = k.pos.login("2222").unwrap();
-    assert!(k.pos.save_teams(&staff, &list).is_err() && k.pos.list_teams(&staff).is_err());
+    assert!(k.pos.save_teams(&staff, &list).is_err());
+    // Staff may read the list (the kitchen screen filters by team): names and counts only.
+    assert_eq!(k.pos.list_teams(&staff).unwrap().len(), saved.len());
     // A product can only join a team that exists.
     let p = k.pos.get_product(&k.s, k.cola.id).unwrap();
     let upd = |team| ProductUpdate {

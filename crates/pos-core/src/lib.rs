@@ -130,6 +130,7 @@ impl Pos {
         )?;
         conn.set_prepared_statement_cache_capacity(64);
         migrate(&conn)?;
+        conn.execute_batch(receipt::BILL_STALE_TRIGGERS)?;
         let pin_salt = load_or_create_salt(&conn)?;
         Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default() })
     }

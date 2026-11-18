@@ -261,3 +261,54 @@ fn set_dishes_can_have_choices_and_options() {
     let text: String = t.iter().map(|t| t.to_text(42)).collect();
     assert!(text.contains("Pad Thai (Beef)") && text.contains("King prawns"), "{text}");
 }
+
+#[test]
+fn removing_a_sent_set_tells_the_kitchen_which_dishes_are_cancelled() {
+    let mut k = setup();
+    let ticket = |job: Option<PrintJob>| String::from_utf8_lossy(&job.expect("a CANCELLED ticket").bytes()).to_string();
+    let remove = ItemUpdate { qty: 0, discount_cents: 0, note: None };
+
+    // All of it sent (starter, then mains), then the set removed with "-" or Remove.
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    let o = k.pos.add_set(&k.s, o.id, k.set.id, &picks(&k, k.satay.id), None).unwrap();
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    k.pos.call_mains(&k.s, o.id).unwrap();
+    let parent = o.items.iter().find(|i| i.is_set).unwrap().id;
+    let (after, job) = k.pos.update_item_for_kitchen(&k.s, parent, &remove).unwrap();
+    assert!(after.items.is_empty());
+    let text = ticket(job);
+    assert!(text.contains("CANCELLED") && text.contains("DINNER SET"), "{text}");
+    assert!(text.contains("Satay") && text.contains("Green curry") && text.contains("Jasmine rice"), "{text}");
+    // The bill line itself never prints.
+    assert!(!text.contains("Dinner set"), "{text}");
+    k.pos.cancel_order(&k.s, o.id, "").unwrap();
+
+    // Only the starter sent: only the starter is cancelled.
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    let o = k.pos.add_set(&k.s, o.id, k.set.id, &picks(&k, k.soup.id), None).unwrap();
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    let parent = o.items.iter().find(|i| i.is_set).unwrap().id;
+    let (after, job) = k.pos.update_item_for_kitchen(&k.s, parent, &remove).unwrap();
+    assert!(after.items.is_empty());
+    let text = ticket(job);
+    assert!(text.contains("DINNER SET") && text.contains("Soup") && !text.contains("Green curry"), "{text}");
+    k.pos.cancel_order(&k.s, o.id, "").unwrap();
+
+    // Two sets down to one still works, and cancels one set's dishes.
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    let o = k.pos.add_set(&k.s, o.id, k.set.id, &picks(&k, k.satay.id), None).unwrap();
+    let parent = o.items.iter().find(|i| i.is_set).unwrap().id;
+    k.pos.update_item(&k.s, parent, &ItemUpdate { qty: 2, discount_cents: 0, note: None }).unwrap();
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    k.pos.call_mains(&k.s, o.id).unwrap();
+    let (after, job) = k.pos.update_item_for_kitchen(&k.s, parent, &ItemUpdate { qty: 1, discount_cents: 0, note: None }).unwrap();
+    assert_eq!(after.items.len(), 4);
+    let text = ticket(job);
+    assert!(text.contains("CANCELLED") && text.contains("1 x Satay") && text.contains("1 x Green curry"), "{text}");
+
+    // A dish not yet sent goes quietly.
+    let o = k.pos.add_item(&k.s, o.id, k.soup.id, 1, None, None, &[]).unwrap();
+    let soup = o.items.iter().find(|i| i.product_id == k.soup.id && i.parent_id.is_none()).unwrap().id;
+    let (_, job) = k.pos.update_item_for_kitchen(&k.s, soup, &remove).unwrap();
+    assert!(job.is_none());
+}

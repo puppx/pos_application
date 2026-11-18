@@ -551,30 +551,7 @@ commands! {
     /// A change to a dish already sent tells the kitchen: fewer or removed
     /// prints CANCELLED (with the set's dishes for a set), a new note CHANGED.
     fn update_item(app, t, item_id: i64, update: ItemUpdate) -> Order {
-        let (order, job) = app.with_session(t, |pos, s| {
-            let order_id = pos.order_of_item(item_id)?;
-            let before = pos.get_order(s, order_id)?;
-            let order = pos.update_item(s, item_id, &update)?;
-            let Some(cur) = before.items.iter().find(|i| i.id == item_id).filter(|i| i.sent_at.is_some()) else {
-                return Ok((order, None));
-            };
-            let job = if update.qty < cur.qty {
-                let gone = cur.qty - update.qty;
-                let lines: Vec<OrderItem> = if cur.is_set {
-                    before.items.iter().filter(|i| i.parent_id == Some(cur.id) && i.sent_at.is_some())
-                        .map(|i| OrderItem { qty: i.qty / cur.qty * gone, ..i.clone() }).collect()
-                } else {
-                    vec![OrderItem { qty: gone, ..cur.clone() }]
-                };
-                pos.kitchen_change_job(s, order_id, "CANCELLED", &lines)?
-            } else if update.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) != cur.note.as_deref() {
-                let now: Vec<OrderItem> = order.items.iter().filter(|i| i.id == item_id).cloned().collect();
-                pos.kitchen_change_job(s, order_id, "CHANGED", &now)?
-            } else {
-                None
-            };
-            Ok((order, job))
-        })?;
+        let (order, job) = app.with_session(t, |pos, s| pos.update_item_for_kitchen(s, item_id, &update))?;
         // The change is saved either way; a printer problem must not undo it.
         let _ = print(job);
         Ok(order)
@@ -822,14 +799,17 @@ commands! {
 
     /// Cancel an open order, confirmed with a PIN: the PIN's owner cancels
     /// it (an order already in the kitchen needs a manager's or admin's PIN).
-    fn cancel_order(app, t, order_id: i64, reason: String, pin: Option<String>) -> () {
-        app.with_session(t, |pos, s| match pin.as_deref() {
+    /// The user logged in here counts as the PIN's owner when it is theirs,
+    /// even if they share it. Dishes still cooking get a CANCELLED ticket.
+    fn cancel_order(app, t, order_id: i64, reason: String, pin: Option<String>) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| match pin.as_deref() {
             Some(p) => {
-                let approver = pos.pin_owner(p)?;
-                pos.cancel_order(&approver, order_id, &reason)
+                let approver = pos.pin_owner_for(p, Some(s.user_id))?;
+                pos.cancel_order_for_kitchen(&approver, order_id, &reason)
             }
-            None => pos.cancel_order(s, order_id, &reason),
-        })
+            None => pos.cancel_order_for_kitchen(s, order_id, &reason),
+        })?;
+        Ok(print(job))
     }
 
     fn void_order(app, t, order_id: i64, reason: String) -> Order {
@@ -894,6 +874,12 @@ commands! {
 
     fn reset_pin(app, t, id: i64, pin: String) -> () {
         app.with_session(t, |pos, s| pos.reset_pin(s, id, &pin))
+    }
+
+    /// Names of the other active users with this PIN (admins only), so the
+    /// staff editor can warn before two people share a PIN.
+    fn pin_shared(app, t, pin: String, except_user_id: Option<i64>) -> Vec<String> {
+        app.with_session(t, |pos, s| pos.pin_shared(s, &pin, except_user_id))
     }
 
     fn sales_summary(app, t, from: i64, to: i64) -> SalesSummary {
@@ -1211,5 +1197,47 @@ mod tests {
         assert!(err.to_string().starts_with("get_order: missing field `id`"), "{err}");
         let err = dispatch(&app, LOCAL, "install_update", json!({})).unwrap_err();
         assert_eq!(err.to_string(), "unknown command install_update");
+    }
+
+    #[test]
+    fn cancelling_with_a_shared_pin_on_your_own_till_and_the_kitchen_is_told() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        let mia = pos.create_user(&admin, "Mia", Role::Manager, "2222").unwrap();
+        let curry = pos
+            .create_product(&admin, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap();
+        let path = std::env::temp_dir().join(format!("pos-cancel-test-{}.bin", std::process::id()));
+        pos.set_kitchen_printer(&admin, &PrinterConfig {
+            target: PrinterTarget::File { path: path.display().to_string() }, copy_delay_secs: 0, app_font: false, ..Default::default()
+        })
+        .unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        // The admin's editor can see the PIN is shared.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let names = dispatch(&app, LOCAL, "pin_shared", json!({ "pin": "2222", "exceptUserId": mia.id })).unwrap();
+        assert_eq!(names, json!(["Sam"]));
+        // Mia, logged in, sends a dish, then cancels the order with her own PIN.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222", "userId": mia.id })).unwrap();
+        // Staff and managers may read the kitchen teams (kitchen screen).
+        assert!(dispatch(&app, LOCAL, "list_teams", json!({})).unwrap().is_array());
+        let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+        let id = o["id"].as_i64().unwrap();
+        dispatch(&app, LOCAL, "add_item", json!({ "orderId": id, "productId": curry.id, "qty": 1 })).unwrap();
+        dispatch(&app, LOCAL, "send_to_kitchen", json!({ "orderId": id })).unwrap();
+        let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": id, "reason": "mistake", "pin": "2222" })).unwrap();
+        assert_eq!(r, json!({ "attempted": true, "error": null }));
+        let printed = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(printed.contains("CANCELLED") && printed.contains("Green curry"), "{printed}");
+        assert_eq!(dispatch(&app, LOCAL, "get_order", json!({ "id": id })).unwrap()["status"], "cancelled");
+        // Nothing in the kitchen: nothing printed.
+        let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+        let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": o["id"], "reason": "" })).unwrap();
+        assert_eq!(r, json!({ "attempted": false, "error": null }));
     }
 }

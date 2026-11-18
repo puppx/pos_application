@@ -36,6 +36,20 @@ pub(crate) fn clean_name(name: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+/// Refuse a name another active user already has (ignoring case), so the
+/// login screen never shows two tiles with the same name.
+fn check_name_free(conn: &rusqlite::Connection, name: &str, except: Option<i64>) -> Result<()> {
+    let mut stmt = conn.prepare_cached("SELECT name FROM users WHERE active = 1 AND id IS NOT ?1")?;
+    let names = stmt.query_map([except], |r| r.get::<_, String>(0))?;
+    let wanted = name.trim().to_lowercase();
+    for n in names {
+        if n?.trim().to_lowercase() == wanted {
+            return invalid(format!("someone is already called {name}: use another name (e.g. add a surname initial)"));
+        }
+    }
+    Ok(())
+}
+
 impl Pos {
     pub fn list_users(&self, s: &Session) -> Result<Vec<User>> {
         s.require(Permission::ManageUsers)?;
@@ -60,6 +74,7 @@ impl Pos {
     pub fn create_user(&self, s: &Session, name: &str, role: Role, pin: &str) -> Result<User> {
         s.require(Permission::ManageUsers)?;
         let name = clean_name(name)?;
+        check_name_free(&self.conn, &name, None)?;
         let hash = self.hash_pin(pin)?;
         self.conn
             .execute(
@@ -83,6 +98,9 @@ impl Pos {
         s.require(Permission::ManageUsers)?;
         let name = clean_name(name)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if active {
+            check_name_free(&tx, &name, Some(id))?;
+        }
         let changed = tx.execute(
             "UPDATE users SET name = ?2, role = ?3, active = ?4 WHERE id = ?1",
             params![id, name, role.as_str(), active],

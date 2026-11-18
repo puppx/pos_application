@@ -14,7 +14,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::{Order, OrderItem, OrderType, Permission, Pos, PosError, Result, Session};
+use crate::{ItemUpdate, Order, OrderItem, OrderType, Permission, Pos, PosError, Result, Session};
 
 const SETTING_KEY: &str = "_kitchen_printer";
 const NET_TIMEOUT: Duration = Duration::from_secs(4);
@@ -1042,6 +1042,71 @@ impl Pos {
             jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs));
         }
         Ok(PrintJob::join(jobs))
+    }
+
+    /// [`Pos::update_item`], with what the kitchen must be told about a dish
+    /// already sent: fewer or removed prints CANCELLED (a set with the dishes
+    /// of it that were sent), a new note CHANGED. None when nothing to tell
+    /// or no kitchen printer is set up.
+    pub fn update_item_for_kitchen(&mut self, s: &Session, item_id: i64, upd: &ItemUpdate) -> Result<(Order, Option<PrintJob>)> {
+        let order_id = self.order_of_item(item_id)?;
+        let before = self.get_order(s, order_id)?;
+        let Some(cur) = before.items.iter().find(|i| i.id == item_id && i.sent_at.is_some()).cloned() else {
+            return Ok((self.update_item(s, item_id, upd)?, None));
+        };
+        if upd.qty < cur.qty {
+            let gone = cur.qty - upd.qty;
+            let lines: Vec<OrderItem> = if cur.is_set {
+                before
+                    .items
+                    .iter()
+                    .filter(|i| i.parent_id == Some(cur.id) && i.sent_at.is_some())
+                    .map(|i| OrderItem { qty: i.qty / cur.qty * gone, ..i.clone() })
+                    .collect()
+            } else {
+                vec![OrderItem { qty: gone, ..cur.clone() }]
+            };
+            // Removed altogether: the ticket is made first, while the set's
+            // line (its name heads its dishes) is still on the order.
+            if upd.qty == 0 {
+                let job = self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?;
+                return Ok((self.update_item(s, item_id, upd)?, job));
+            }
+            let order = self.update_item(s, item_id, upd)?;
+            let job = self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?;
+            return Ok((order, job));
+        }
+        let order = self.update_item(s, item_id, upd)?;
+        let job = if upd.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) != cur.note.as_deref() {
+            let now: Vec<OrderItem> = order.items.iter().filter(|i| i.id == item_id).cloned().collect();
+            self.kitchen_change_job(s, order_id, "CHANGED", &now)?
+        } else {
+            None
+        };
+        Ok((order, job))
+    }
+
+    /// [`Pos::cancel_order`], with a CANCELLED ticket for the dishes already
+    /// sent and not yet marked done on the kitchen screen, routed like any
+    /// other ticket. None when there are none or no kitchen printer is set up.
+    pub fn cancel_order_for_kitchen(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<Option<PrintJob>> {
+        s.require(Permission::Sell)?;
+        crate::orders::require_open(&self.conn, order_id)?;
+        // Made before cancelling: a cancelled order is not every user's to read.
+        let cooking: Vec<i64> = self
+            .conn
+            .prepare_cached("SELECT id FROM order_items WHERE order_id = ?1 AND sent_at IS NOT NULL AND kitchen_done_at IS NULL")?
+            .query_map([order_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let job = if cooking.is_empty() {
+            None
+        } else {
+            let o = self.get_order(s, order_id)?;
+            let lines: Vec<OrderItem> = o.items.into_iter().filter(|i| cooking.contains(&i.id)).collect();
+            self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?
+        };
+        self.cancel_order(s, order_id, reason)?;
+        Ok(job)
     }
 
     /// Drinks first and desserts last on tickets of their own (each when

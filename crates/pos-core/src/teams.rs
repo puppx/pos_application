@@ -43,8 +43,10 @@ pub(crate) fn load_teams(conn: &Connection) -> Result<Vec<Team>> {
 }
 
 impl Pos {
+    /// The kitchen teams (names and how many menu items each has): anyone
+    /// selling may read them, e.g. for the kitchen screen's team filter.
     pub fn list_teams(&self, s: &Session) -> Result<Vec<Team>> {
-        s.require(Permission::ManageMenu)?;
+        s.require(Permission::Sell)?;
         load_teams(&self.conn)
     }
 

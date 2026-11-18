@@ -148,15 +148,22 @@ impl Pos {
     /// When people share the PIN, it counts as the one allowed the least,
     /// so a shared PIN never approves more than every owner could.
     pub fn pin_owner(&mut self, pin: &str) -> Result<Session> {
+        self.pin_owner_for(pin, None)
+    }
+
+    /// [`Pos::pin_owner`], except that when the PIN is also `current_user`'s
+    /// own (whoever is logged in on this terminal) it counts as theirs: a
+    /// manager sharing a PIN with staff can still approve on her own till.
+    pub fn pin_owner_for(&mut self, pin: &str, current_user: Option<i64>) -> Result<Session> {
         self.throttle.check(Instant::now())?;
         let found = match self.hash_pin(pin) {
             Ok(hash) => self
                 .conn
                 .prepare_cached(
                     "SELECT id, name, role FROM users WHERE pin_hash = ?1 AND active = 1
-                     ORDER BY CASE role WHEN 'staff' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, id LIMIT 1",
+                     ORDER BY id IS NOT ?2, CASE role WHEN 'staff' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, id LIMIT 1",
                 )?
-                .query_row([hash], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .query_row(params![hash, current_user], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
                 .optional()?,
             Err(_) => None,
         };
@@ -168,6 +175,19 @@ impl Pos {
         self.throttle.record_success();
         let role = Role::parse(&role).ok_or_else(|| PosError::Internal("bad role".into()))?;
         Ok(Session { user_id, name, role })
+    }
+
+    /// Names of the active users (other than `except_user`) whose PIN is
+    /// `pin`, so the staff editor can warn that the PIN would be shared.
+    /// Sharing stays allowed. Admins only.
+    pub fn pin_shared(&self, s: &Session, pin: &str, except_user: Option<i64>) -> Result<Vec<String>> {
+        s.require(crate::Permission::ManageUsers)?;
+        let hash = self.hash_pin(pin)?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT name FROM users WHERE pin_hash = ?1 AND active = 1 AND id IS NOT ?2 ORDER BY name COLLATE NOCASE")?;
+        let rows = stmt.query_map(params![hash, except_user], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The people who can log in, for the login screen (name first, then

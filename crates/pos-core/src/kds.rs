@@ -27,7 +27,8 @@ pub struct BoardItem {
 #[derive(Debug, Clone, Serialize)]
 pub struct BoardOrder {
     pub order_id: i64,
-    /// "DINE-IN 4", "TAKEAWAY", "GRAB 123"...
+    /// "DINE-IN 4", "TAKEAWAY #12", "GRAB 123" (the order number when the
+    /// channel gave no reference: "GRAB #12"). The customer's name is apart.
     pub heading: String,
     pub customer_name: Option<String>,
     /// When the oldest dish still to do was sent.
@@ -101,12 +102,16 @@ impl Pos {
                 None => {
                     let (kind, table, channel, external, customer, paid): (String, Option<String>, Option<String>, Option<String>, Option<String>, bool) =
                         info.query_row([order_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+                    // Orders without a table carry their number, so three
+                    // takeaways are three different cards ("TAKEAWAY #12").
+                    let number = format!("#{order_id}");
+                    let external = external.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
                     let heading = match (channel, kind.as_str()) {
-                        (Some(ch), _) => format!("{} {}", ch.to_uppercase(), external.unwrap_or_default()).trim().to_string(),
+                        (Some(ch), _) => format!("{} {}", ch.to_uppercase(), external.unwrap_or(number)),
                         (None, "dine_in") => format!("{} {}", self.label("label_dine_in")?, table.unwrap_or_default()).trim().to_string(),
-                        (None, "collection") => self.label("label_collection")?,
-                        (None, "delivery") => self.label("label_delivery")?,
-                        (None, _) => self.label("label_takeaway")?,
+                        (None, "collection") => format!("{} {number}", self.label("label_collection")?),
+                        (None, "delivery") => format!("{} {number}", self.label("label_delivery")?),
+                        (None, _) => format!("{} {number}", self.label("label_takeaway")?),
                     };
                     out.push(BoardOrder { order_id, heading, customer_name: customer, since: item.sent_at, paid, items: Vec::new() });
                     out.len() - 1

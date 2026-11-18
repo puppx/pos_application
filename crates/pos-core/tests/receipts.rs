@@ -280,3 +280,110 @@ fn a_bill_printed_before_payment_is_not_printed_again_and_shows_no_included_tax(
     let paid = pos.pay_order(&admin, o.id, PaymentMethod::Card, 0).unwrap();
     assert_eq!(count(&pos.payment_print_job(&admin, &paid).unwrap().unwrap().bytes(), &CUT), 2);
 }
+
+/// Pay by card; the tickets cut at payment: 1 = only the staff copy (the
+/// customer has the bill), 2 = the customer's receipt and the staff copy.
+fn cuts_at_payment(pos: &mut Pos, s: &Session, order_id: i64) -> usize {
+    let paid = pos.pay_order(s, order_id, PaymentMethod::Card, 0).unwrap();
+    count(&pos.payment_print_job(s, &paid).unwrap().unwrap().bytes(), &CUT)
+}
+
+#[test]
+fn a_bill_changed_after_printing_gets_a_final_receipt_at_payment() {
+    let (mut pos, admin, m) = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let printer = PrinterConfig { target: PrinterTarget::File { path: dir.path().join("r.bin").display().to_string() }, copy_delay_secs: 0, app_font: false, ..Default::default() };
+    pos.set_receipt_settings(&admin, &ReceiptSettings { printer, staff_copy: true, ..Default::default() }).unwrap();
+    let floor = pos.create_floor(&admin, "Ground").unwrap();
+    let table = |name: &str| TableLayout { id: None, name: name.into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 };
+    let tables = pos.save_floor_layout(&admin, floor.id, &[table("1"), table("2")]).unwrap();
+    let (t1, t2) = (tables[0].id, tables[1].id);
+    let dine_in = |t: i64| NewOrder { order_type: OrderType::DineIn, table_id: Some(t), channel_id: None, details: Default::default() };
+    // A table with two soups and the bill printed.
+    let billed = |pos: &mut Pos| -> Order {
+        let o = pos.open_order(&admin, &dine_in(t1)).unwrap();
+        let o = pos.add_item(&admin, o.id, m.soup.id, 2, None, None, &[]).unwrap();
+        pos.receipt_job(&admin, o.id).unwrap();
+        o
+    };
+    let upd = |qty, discount_cents, note: Option<&str>| ItemUpdate { qty, discount_cents, note: note.map(str::to_string) };
+
+    // Nothing changed: the bill was the receipt, printed once.
+    let o = billed(&mut pos);
+    assert_eq!(cuts_at_payment(&mut pos, &admin, o.id), 1);
+    // Nor when only something off the bill changed: sent to the kitchen, a note.
+    let o = billed(&mut pos);
+    pos.send_to_kitchen(&admin, o.id).unwrap();
+    assert_eq!(cuts_at_payment(&mut pos, &admin, o.id), 1);
+    let o = billed(&mut pos).id;
+    let item = pos.get_order(&admin, o).unwrap().items[0].id;
+    pos.update_item(&admin, item, &upd(2, 0, Some("extra hot"))).unwrap();
+    assert_eq!(cuts_at_payment(&mut pos, &admin, o), 1);
+    // A repeated tap on Bill after a change still counts.
+    let o = billed(&mut pos);
+    pos.add_item(&admin, o.id, m.cola.id, 1, None, None, &[]).unwrap();
+    pos.receipt_job(&admin, o.id).unwrap();
+    assert_eq!(cuts_at_payment(&mut pos, &admin, o.id), 1);
+
+    // Every change to what it costs means a new receipt at payment.
+    type Change<'a> = Box<dyn Fn(&mut Pos, i64, i64) + 'a>;
+    let changes: Vec<(&str, Change)> = vec![
+        ("dish added", Box::new(|pos, o, _| { pos.add_item(&admin, o, m.cola.id, 1, None, None, &[]).unwrap(); })),
+        ("more of a dish", Box::new(|pos, o, _| { pos.add_item(&admin, o, m.soup.id, 1, None, None, &[]).unwrap(); })),
+        ("open item", Box::new(|pos, o, _| { pos.add_open_item(&admin, o, "Cake", 300, 1, None, false).unwrap(); })),
+        ("fewer", Box::new(|pos, _, item| { pos.update_item(&admin, item, &upd(1, 0, None)).unwrap(); })),
+        ("discount", Box::new(|pos, _, item| { pos.update_item(&admin, item, &upd(2, 100, None)).unwrap(); })),
+        ("service charge", Box::new(|pos, o, _| { pos.set_service_charge(&admin, o, 1000).unwrap(); })),
+        ("tax", Box::new(|pos, o, _| { pos.set_order_tax(&admin, o, Some(2000)).unwrap(); })),
+        ("dish moved out", Box::new(|pos, o, item| { pos.move_items(&admin, o, t2, &[(item, 1)]).unwrap(); })),
+        ("dish moved in", Box::new(|pos, o, _| {
+            let other = pos.open_order(&admin, &dine_in(t2)).unwrap();
+            let other = pos.add_item(&admin, other.id, m.bread.id, 1, None, None, &[]).unwrap();
+            pos.move_items(&admin, other.id, t1, &[(other.items[0].id, 1)]).unwrap();
+            assert_eq!(pos.get_order(&admin, o).unwrap().items.len(), 2);
+        })),
+    ];
+    for (what, change) in changes {
+        let o = billed(&mut pos);
+        change(&mut pos, o.id, o.items[0].id);
+        assert_eq!(cuts_at_payment(&mut pos, &admin, o.id), 2, "{what}");
+        // Clear table 2 for the next round.
+        if let Some(left) = pos.table_order(&admin, t2).unwrap() {
+            pos.cancel_order(&admin, left.id, "").unwrap();
+        }
+    }
+    // A whole other table joining this bill.
+    let o = billed(&mut pos);
+    let other = pos.open_order(&admin, &dine_in(t2)).unwrap();
+    pos.add_item(&admin, other.id, m.bread.id, 1, None, None, &[]).unwrap();
+    pos.merge_into_table(&admin, other.id, t1).unwrap();
+    assert_eq!(cuts_at_payment(&mut pos, &admin, o.id), 2, "tables joined");
+}
+
+#[test]
+fn the_staff_copy_shows_what_was_paid_then_cash_tendered_and_change() {
+    let (mut pos, admin, m) = setup();
+    let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    pos.add_item(&admin, o.id, m.soup.id, 1, None, None, &[]).unwrap(); // 5.00 + 10% = 5.50
+    pos.pay_order(&admin, o.id, PaymentMethod::Cash, 1000).unwrap();
+    let r = pos.receipt(&admin, o.id).unwrap();
+    let staff = r.staff_to_text(42);
+    let line = |text: &str, start: &str| text.lines().find(|l| l.trim_start().starts_with(start)).map(str::to_string).unwrap_or_else(|| panic!("no {start} in\n{text}"));
+    assert!(line(&staff, "Paid: Cash").ends_with("£5.50"), "{staff}");
+    assert!(line(&staff, "Tendered").ends_with("£10.00"), "{staff}");
+    assert!(line(&staff, "Change").ends_with("£4.50"), "{staff}");
+    // The customer's copy as before: what was handed over, then the change.
+    let customer = r.to_text(42);
+    assert!(line(&customer, "Cash").ends_with("£10.00") && line(&customer, "Change").ends_with("£4.50"), "{customer}");
+
+    // Card, and cash given exactly: just what was paid.
+    let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    pos.add_item(&admin, o.id, m.soup.id, 1, None, None, &[]).unwrap();
+    let half = PaymentInput { method: PaymentMethod::Card, amount_cents: Some(300), tendered_cents: 0, tip_cents: 0, items: None };
+    pos.add_payment(&admin, o.id, &half).unwrap();
+    let rest = PaymentInput { method: PaymentMethod::Cash, amount_cents: None, tendered_cents: 250, tip_cents: 0, items: None };
+    pos.add_payment(&admin, o.id, &rest).unwrap();
+    let staff = pos.receipt(&admin, o.id).unwrap().staff_to_text(42);
+    assert!(line(&staff, "Paid: Card").ends_with("£3.00") && line(&staff, "Paid: Cash").ends_with("£2.50"), "{staff}");
+    assert!(!staff.contains("Tendered") && !staff.contains("Change"), "{staff}");
+}

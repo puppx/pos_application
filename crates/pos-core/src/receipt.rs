@@ -14,6 +14,35 @@ use crate::{Order, OrderItem, OrderType, Permission, Pos, PosError, PrintJob, Pr
 
 const SETTING_KEY: &str = "_receipt_printer";
 
+/// A bill handed over (`orders.bill_printed_at`) stops the receipt printing
+/// again at payment, but only while the bill is still right: any change to
+/// what the order costs (dishes added, removed or moved in or out, quantity,
+/// price, discount, tax, service charge) forgets it, so the customer gets a
+/// receipt with the final amount. Done with TEMP triggers, created on every
+/// connection and never stored in the database (no migration), so every
+/// way an order can change is covered, now and later.
+pub(crate) const BILL_STALE_TRIGGERS: &str = "
+    CREATE TEMP TRIGGER IF NOT EXISTS bill_stale_item_added AFTER INSERT ON main.order_items
+    BEGIN
+        UPDATE orders SET bill_printed_at = NULL WHERE id = NEW.order_id AND bill_printed_at IS NOT NULL;
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS bill_stale_item_removed AFTER DELETE ON main.order_items
+    BEGIN
+        UPDATE orders SET bill_printed_at = NULL WHERE id = OLD.order_id AND bill_printed_at IS NOT NULL;
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS bill_stale_item_changed
+    AFTER UPDATE OF qty, unit_price_cents, discount_cents, tax_rate_bp, order_id ON main.order_items
+    WHEN OLD.qty IS NOT NEW.qty OR OLD.unit_price_cents IS NOT NEW.unit_price_cents OR OLD.discount_cents IS NOT NEW.discount_cents
+      OR OLD.tax_rate_bp IS NOT NEW.tax_rate_bp OR OLD.order_id IS NOT NEW.order_id
+    BEGIN
+        UPDATE orders SET bill_printed_at = NULL WHERE id IN (OLD.order_id, NEW.order_id) AND bill_printed_at IS NOT NULL;
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS bill_stale_order_changed AFTER UPDATE OF service_bp, tax_bp, tax_incl ON main.orders
+    WHEN OLD.service_bp IS NOT NEW.service_bp OR OLD.tax_bp IS NOT NEW.tax_bp OR OLD.tax_incl IS NOT NEW.tax_incl
+    BEGIN
+        UPDATE orders SET bill_printed_at = NULL WHERE id = NEW.id AND bill_printed_at IS NOT NULL;
+    END;";
+
 /// ESC @ (reset) then ESC p 0 25 250: pulse drawer pin 2 for 50 ms on / 500 ms off.
 const DRAWER_KICK: [u8; 7] = [0x1B, b'@', 0x1B, b'p', 0, 25, 250];
 
@@ -130,8 +159,12 @@ pub struct Receipt {
     /// ("Service charge 12.5%", 3.13), when the order has one.
     pub service: Option<(String, i64)>,
     pub total_cents: i64,
-    /// ("Cash", 40.00), ("Change", 5.35)...
+    /// ("Cash", 40.00), ("Change", 5.35)...: what was handed over.
     pub payment: Vec<(String, i64)>,
+    /// The staff copy's: what each payment paid, then for cash with change
+    /// what was handed over and the change ("Paid: Cash", 5.00),
+    /// ("  Tendered", 10.00), ("  Change", 5.00).
+    pub staff_payment: Vec<(String, i64)>,
 }
 
 /// Left text and right-aligned amount on one line; long text wraps.
@@ -257,9 +290,8 @@ impl Receipt {
         two_col(&mut v, Size::Normal, true, &format!("{} #{}", self.title, self.order_id), &self.time, width, "");
         v.push(Line::new(Size::Normal, true, false, self.heading.clone()));
         v.push(Line::new(Size::Normal, false, false, format!("Served by {}", self.staff)));
-        for (label, amount) in self.payment.iter().filter(|(l, _)| !l.starts_with("  Change")) {
-            let label = if label.starts_with(' ') { label.clone() } else { format!("Paid: {label}") };
-            two_col(&mut v, Size::Normal, false, &label, &self.money(*amount), width, "");
+        for (label, amount) in &self.staff_payment {
+            two_col(&mut v, Size::Normal, false, label, &self.money(*amount), width, "");
         }
         line(&mut v, '-');
         two_col(&mut v, Size::Normal, true, "ITEM", "AMOUNT", width, "");
@@ -386,6 +418,7 @@ impl Pos {
             .prepare_cached("SELECT name FROM users WHERE id = ?1")?
             .query_row([o.paid_by.unwrap_or(o.opened_by)], |r| r.get(0))?;
         let mut payment = Vec::new();
+        let mut staff_payment = Vec::new();
         // Each payment (several for a split bill), with its tip and change.
         // A bill printed after a part payment shows what is left to pay.
         for p in &o.payments {
@@ -395,16 +428,27 @@ impl Pos {
                 _ => o.channel_name.as_ref().map(|c| format!("Paid by {c}")).unwrap_or_else(|| "Other".into()),
             };
             // Cash: what was handed over (change follows); card: the bill part (tip follows).
-            payment.push((label, if p.method == "cash" { p.tendered_cents } else { p.amount_cents }));
+            payment.push((label.clone(), if p.method == "cash" { p.tendered_cents } else { p.amount_cents }));
             if p.tip_cents > 0 {
                 payment.push(("  Tip".into(), p.tip_cents));
             }
             if p.change_cents > 0 {
                 payment.push(("  Change".into(), p.change_cents));
             }
+            // The staff copy: what it paid towards the bill first.
+            staff_payment.push((format!("Paid: {label}"), p.amount_cents));
+            if p.tip_cents > 0 {
+                staff_payment.push(("  Tip".into(), p.tip_cents));
+            }
+            if p.method == "cash" && p.change_cents > 0 {
+                staff_payment.push(("  Tendered".into(), p.tendered_cents));
+                staff_payment.push(("  Change".into(), p.change_cents));
+            }
         }
         if o.status == "open" && o.paid_cents > 0 {
-            payment.push(("LEFT TO PAY".into(), (o.total_cents - o.paid_cents).max(0)));
+            let left = ("LEFT TO PAY".to_string(), (o.total_cents - o.paid_cents).max(0));
+            payment.push(left.clone());
+            staff_payment.push(left);
         }
         // Receipts print English, or English with Thai under it.
         let names = match cfg.printer.names {
@@ -467,6 +511,7 @@ impl Pos {
                 .then(|| (format!("{} {}%", self.service_settings().map(|c| c.label).unwrap_or_default(), percent(o.service_bp)), o.service_cents)),
             total_cents: o.total_cents,
             payment,
+            staff_payment,
         })
     }
 
@@ -573,6 +618,7 @@ impl Pos {
             service: None,
             total_cents: 3135,
             payment: vec![("Cash".into(), 4000), ("  Change".into(), 865)],
+            staff_payment: vec![("Paid: Cash".into(), 3135), ("  Tendered".into(), 4000), ("  Change".into(), 865)],
         };
         let p = &cfg.printer;
         Ok(PrintJob::copies(p.target.clone(), &[], r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs))

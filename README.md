@@ -44,8 +44,8 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **PIN login** with **admin** and **staff** roles
 - **Auto logout**: after 5 minutes without a touch or key press (Manage → Auto logout: never, 1–60 minutes), with a 30-second warning. Applies to the till and every device on the local server; open orders are kept
 - **Delete mistakes (admin)**: History → an order → **Delete order** removes an order entered by mistake from history and reports for good (stock is put back); use Void for real refunds. In Menu, **Delete item** and **Delete category** remove them for good (items named on past orders are hidden everywhere, and those orders keep their own copy of the name and price)
-- **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items
-- **Backups**: automatic daily copy at startup (last 14 kept), plus "Back up everything now"
+- **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items. History's **Today** is the open business day (from the last day close, as in the header), so orders after midnight before the day is closed are still under Today; **Yesterday** is the business day closed last and **Last 7 days** the business days dated in the last week. The **Day** picker shows calendar days (midnight to midnight). The line under the buttons says which times are shown
+- **Backups**: automatic daily copy at startup (the last 14 kept, or as set in Backup & data), plus "Back up everything now"
 - **Menu backup**: Manage → Menu backup saves just the menu (categories, items, choices, options, prices) to restore later or load on another till (*Restore from a file…*)
 - **Reset data (admin, danger zone)**: tick what to delete (sales history, all or before a date; customers; menu; floor plan; staff; settings) and keep the rest. Needs your PIN and typing RESET, and a full backup is saved automatically first
 - **Audit log** of logins, voids, discounts, removed items, menu, floor and user changes
@@ -128,6 +128,7 @@ Manage → Kitchen printer → "Call mains again prints only the table" turns th
 ### Sub-categories
 
 A category can sit under a main category (one level), e.g. **Food** › Burgers, Pizza, Sides. In Menu, tap a category and choose its **Main category** (or tap a main category, then **+ Sub-category here**). On the order screen the left column shows the main categories (with a ›); tapping one shows its sub-categories as buttons above the items, with **All …** for everything in it. Deleting a main category makes its sub-categories main categories again. Menu backups keep the sub-categories.
+A sub-category takes its main category's defaults for new items (starter, prepared ahead, drink, dessert) unless told otherwise: in its editor each one is **Same as main** (default), **On** or **Off**, so e.g. *Drinks › Snacks* can be Off for "Drinks". Changing Drinks or Desserts there also moves the items already in the sub-category, as for a main category.
 
 ### Drinks
 
@@ -170,7 +171,7 @@ Manage → Kitchen printer → **Other kitchen printers**: add a printer (e.g. *
 
 Manage → **Kitchen screen** on a tablet in the kitchen (through the local server): one card per order with the dishes sent and not yet done, oldest first, turning orange after 10 minutes and red after 20. Tap a dish when it is ready, or **Done** for the whole card; **Undo last done** if tapped by mistake. Filter by team, food, drinks or desserts. It refreshes every few seconds and never logs out by itself.
 
-Manage → Kitchen printer → **Kitchen screen** (admins and managers): **Orange after** (10) and **Red after** (20) minutes, **Refresh every** 2 to 30 seconds (4), and **Keep paid orders for** 0 to 24 hours (6): a paid order with dishes still to cook stays on the screen that long; 0 = it leaves at once. Managers see only this card in that group; the printers stay admin only.
+Manage → Kitchen printer → **Kitchen screen** (admins and managers): **Orange after** (10) and **Red after** (20) minutes, **Refresh every** 2 to 30 seconds (4), and **Keep paid orders for** 0 to 24 hours (6): a paid order with dishes still to cook stays on the screen that long; 0 = it leaves at once. **Beep when a new ticket arrives** (off): the kitchen screen plays a short two-tone beep (made by the browser, no sound file) when dishes it has not shown before arrive; changing the filter does not beep. Browsers play sound only after a tap on the page: if the screen shows **Tap to turn on the sound**, tap it once (it beeps to confirm). Setting `kds_beep` (`1` / `0`). Managers see only this card in that group; the printers stay admin only.
 
 ### Desserts
 
@@ -192,6 +193,8 @@ More settings (admins). Not set = the behaviour before they existed, except the 
 - **Order types** (Orders): switch off **Takeaway**, **Collection** or **Delivery** (your own drivers) to hide their new-order buttons on the Orders screen and Customers page. Dine-in always shows, delivery-app buttons are set up under Delivery apps, and open orders of a hidden type still work as usual. Settings `show_takeaway`, `show_collection`, `show_delivery` (`1` / `0`, default `1`).
 - **Discounts** (Orders): **Buttons**, up to 8 percentages (default 5, 10, 15, 20; empty = none), show when you tap ✎ on an order line, and one tap saves that much off the line. The discount box also takes a percentage such as `10%`. **Staff can give up to N %** without a manager PIN (empty = no limit, the default). Above it, the till asks for a manager's or admin's PIN to approve it (nobody is logged in or out, and the approval is in the audit log). The server checks the limit too. Managers and admins are never limited, and lowering or removing a discount never needs a PIN. Settings `discount_presets` and `discount_staff_max_pct`.
 - **Customer receipts** (Bills & receipts → Receipt printer): **Show the VAT / tax breakdown** (off) adds the TAX / NET / VAT / GROSS table under the total of bills and receipts, with "Prices include tax" when it is inside the prices. **Show "Served by"** (on) can take the staff name off customer bills and receipts; the staff copy always has it. The name, address lines and bottom message were already editable there. With both left as they are, receipts print exactly as before.
+- **Payment names** (Bills & receipts → Payments): **Call Cash** and **Call Card** rename how the two methods are shown on the till (Finish & Pay buttons, the payment button, part payments, the change screen), on receipts and the staff copy, in History, Reports, the shift screen and report, and the end-of-day report, e.g. `เงินสด` and `QR / Card`. Display only: payments are still stored and counted as cash and card. Up to 24 characters; empty = Cash / Card, and then receipts print exactly as before. Settings `pay_name_cash`, `pay_name_card`.
+- **Keep the last N backups** (Backup & data): how many full backups stay in the backup folder, 3 to 90 (default 14, as before; empty = 14). The copies taken before an update or a reset are kept apart (the newest 3 of each) and other files in the folder are never touched. Lowering it deletes the oldest daily backups at the next backup (startup or **Back up everything now**). Setting `backups_kept`.
 - **Menu button size** (Screen & devices): *Normal* or *Large*. Large makes the menu tiles, categories and the order screen's Send, Finish & Pay, tool and +/− buttons bigger on every device, with no sideways scrolling at 1024 × 600 or on a phone. Setting `button_size` = `normal` / `large`. This card also shows on phones and tablets; full screen and the local server stay on the main till.
 
 ### Set menus
@@ -325,6 +328,7 @@ devices on the same network, with nothing to install on them.
 
 How it works:
 - Each device is its own terminal with its own login, so a waiter can use a phone while the till is in use. Logins on devices expire after 12 hours idle.
+- On a phone the order screen shows the menu or the order. **View order** gives the dishes most of the screen: the bottom menu bar steps aside, the order's header is one line, Send and Finish & Pay sit side by side under small totals, and **+ Add** (top right) goes back to the menu. **←** leaves the order as before.
 - Everything is stored and printed by the main till: kitchen tickets and receipts go to the printers set up there, and **Open drawer** opens the till's drawer.
 - The main till must be on with the app open. Devices only work on the local network (no internet connection is used).
 - Updates, backups and the server itself are managed on the main till.

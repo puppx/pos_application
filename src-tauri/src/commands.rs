@@ -21,7 +21,6 @@ pub const LOCAL: &str = "local";
 const IDLE_LOGOUT: Duration = Duration::from_secs(12 * 60 * 60);
 /// Logged-in browsers kept at once (the longest idle is logged out first).
 const MAX_TERMINALS: usize = 64;
-pub const BACKUPS_KEPT: usize = 14;
 /// Menu-only backups kept (each is a small JSON file).
 const MENU_BACKUPS_KEPT: usize = 30;
 
@@ -266,8 +265,29 @@ pub fn list_backups(dir: &Path) -> Vec<(SystemTime, PathBuf)> {
     v
 }
 
-pub fn prune_backups(dir: &Path) {
-    for (_, old) in list_backups(dir).into_iter().skip(BACKUPS_KEPT) {
+/// Safety copies made before an update or a reset: the newest few of each
+/// kind always stay, whatever `backups_kept` says.
+pub const SAFETY_COPIES_KEPT: usize = 3;
+
+/// Keep the newest `keep` regular backups ("pos-<time>.db", Settings →
+/// Backup & data, `backups_kept`) and the newest [`SAFETY_COPIES_KEPT`]
+/// before-update and before-reset copies. Nothing else is ever deleted.
+pub fn prune_backups(dir: &Path, keep: usize) {
+    let all = list_backups(dir);
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let of_kind = |kind: &'static str| {
+        all.iter().map(|(_, p)| p).filter(move |p| {
+            let n = name(p);
+            n.strip_prefix(kind)
+                .and_then(|r| r.strip_suffix(".db"))
+                .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
+        })
+    };
+    let gone = of_kind("pos-")
+        .skip(keep.max(1))
+        .chain(of_kind("pos-before-update-").skip(SAFETY_COPIES_KEPT))
+        .chain(of_kind("pos-before-reset-").skip(SAFETY_COPIES_KEPT));
+    for old in gone {
         let _ = std::fs::remove_file(old);
     }
 }
@@ -995,6 +1015,10 @@ commands! {
         app.with_session(t, |pos, s| pos.set_category_parent(s, id, parent_id))
     }
 
+    fn set_category_flags_off(app, t, id: i64, flags_off: i64) -> Category {
+        app.with_session(t, |pos, s| pos.set_category_flags_off(s, id, flags_off))
+    }
+
     fn delete_category(app, t, id: i64) -> () {
         app.with_session(t, |pos, s| pos.delete_category(s, id))
     }
@@ -1131,8 +1155,11 @@ commands! {
 
     fn backup_now(app, t) -> String {
         let path = backup_path(&app.backup_dir);
-        app.with_session(t, |pos, s| pos.backup_to(s, &path))?;
-        prune_backups(&app.backup_dir);
+        let keep = app.with_session(t, |pos, s| {
+            pos.backup_to(s, &path)?;
+            pos.backups_kept()
+        })?;
+        prune_backups(&app.backup_dir, keep);
         Ok(path.display().to_string())
     }
 }
@@ -1147,6 +1174,34 @@ mod tests {
         let admin = pos.setup_first_admin("Owner", "1111").unwrap();
         pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
         App::new(pos, std::env::temp_dir())
+    }
+
+    #[test]
+    fn pruning_keeps_safety_copies_and_other_files() {
+        let dir = std::env::temp_dir().join(format!("pos-prune-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut names: Vec<String> = (0..6).map(|i| format!("pos-{}.db", 1_700_000_000 + i)).collect();
+        names.extend((0..5).map(|i| format!("pos-before-update-{}.db", 1_600_000_000 + i)));
+        names.extend((0..2).map(|i| format!("pos-before-reset-{}.db", 1_500_000_000 + i)));
+        names.extend(["pos-notes.txt".to_string(), "pos-mine.db".to_string()]);
+        let t0 = SystemTime::now() - std::time::Duration::from_secs(10_000);
+        for (i, n) in names.iter().enumerate() {
+            let f = std::fs::File::create(dir.join(n)).unwrap();
+            // Newer timestamp in the name = newer file.
+            let ts: u64 = n.chars().filter(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
+            f.set_modified(t0 + std::time::Duration::from_secs(ts % 10_000 + i as u64)).unwrap();
+        }
+        prune_backups(&dir, 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, [
+            "pos-1700000003.db", "pos-1700000004.db", "pos-1700000005.db",
+            "pos-before-reset-1500000000.db", "pos-before-reset-1500000001.db",
+            "pos-before-update-1600000002.db", "pos-before-update-1600000003.db", "pos-before-update-1600000004.db",
+            "pos-mine.db", "pos-notes.txt",
+        ]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::error::invalid;
 use crate::printing::{render_escpos, render_text, wrap, Line, Size};
 use crate::receipt::{local_time, money, two_col};
-use crate::{Permission, Pos, PosError, PrintJob, PrinterTarget, Result, SalesSummary, Session};
+use crate::{PaymentNames, Permission, Pos, PosError, PrintJob, PrinterTarget, Result, SalesSummary, Session};
 
 const DATE_KEY: &str = "_business_date";
 
@@ -24,6 +24,17 @@ pub struct BusinessDay {
     pub since: i64,
     /// Orders still open; the day cannot close until they are paid or cancelled.
     pub open_orders: i64,
+    /// Start of the previous business day (it ends at `since`): the last
+    /// close's start, or local midnight of the day before `date` before the
+    /// first close. History's "Yesterday".
+    pub prev_since: i64,
+    /// The previous business day's date, if a day was ever closed.
+    pub prev_date: Option<String>,
+    /// Start of the last 7 business days (this one included): the start of
+    /// the earliest closed day dated within 6 days before `date`, or local
+    /// midnight 6 days before `date` if no day was ever closed. Never after
+    /// `since`. History's "Last 7 days".
+    pub week_since: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,12 +59,11 @@ pub(crate) fn local_midnight(d: NaiveDate) -> i64 {
         .unwrap_or(0)
 }
 
-fn payment_label(key: &str) -> String {
-    match key {
-        "cash" => "Cash".into(),
-        "card" => "Card".into(),
-        "other" => "Other / platform".into(),
-        k => k.into(),
+fn payment_label(names: &PaymentNames, key: &str) -> String {
+    match (names.of(key), key) {
+        (Some(n), _) => n.into(),
+        (None, "other") => "Other / platform".into(),
+        (None, k) => k.into(),
     }
 }
 
@@ -68,7 +78,7 @@ fn type_label(key: &str) -> String {
 }
 
 impl DayClose {
-    fn layout(&self, store: &str, currency: &str, width: usize) -> Vec<Line> {
+    fn layout(&self, store: &str, currency: &str, width: usize, names: &PaymentNames) -> Vec<Line> {
         let m = |c: i64| money(currency, c);
         let big = width / 2;
         let sum = &self.summary;
@@ -113,18 +123,18 @@ impl DayClose {
                 two_col(v, Size::Normal, false, &format!("{label} ({count})"), &m(cents), width, "  ");
             }
         };
-        let rows = |g: &[crate::GroupTotal], label: fn(&str) -> String| {
+        let rows = |g: &[crate::GroupTotal], label: &dyn Fn(&str) -> String| {
             g.iter().map(|g| (label(&g.key), g.count, g.total_cents)).collect::<Vec<_>>()
         };
-        section(&mut v, "PAYMENTS", rows(&sum.by_payment, payment_label));
+        section(&mut v, "PAYMENTS", rows(&sum.by_payment, &|k| payment_label(names, k)));
         if sum.tip_cents != 0 {
             two_col(&mut v, Size::Normal, false, "  Tips (not in total)", &m(sum.tip_cents), width, "");
         }
-        section(&mut v, "ORDER TYPES", rows(&sum.by_type, type_label));
+        section(&mut v, "ORDER TYPES", rows(&sum.by_type, &type_label));
         if sum.by_channel.iter().any(|c| c.key != "Direct") {
-            section(&mut v, "PLATFORMS", rows(&sum.by_channel, str::to_string));
+            section(&mut v, "PLATFORMS", rows(&sum.by_channel, &str::to_string));
         }
-        section(&mut v, "CATEGORIES (before tax)", rows(&sum.by_category, str::to_string));
+        section(&mut v, "CATEGORIES (before tax)", rows(&sum.by_category, &str::to_string));
         v.push(Line::new(Size::Normal, false, false, "-".repeat(width)));
         two_col(&mut v, Size::Normal, false, &format!("Voided ({})", sum.voided_count), &m(sum.voided_total_cents), width, "");
         two_col(&mut v, Size::Normal, false, "Cancelled orders", &sum.cancelled_count.to_string(), width, "");
@@ -156,7 +166,36 @@ impl Pos {
             [],
             |r| r.get(0),
         )?;
-        Ok(BusinessDay { date: date.format("%Y-%m-%d").to_string(), since: self.day_start(date)?, open_orders })
+        let since = self.day_start(date)?;
+        let last: Option<(i64, String)> = self
+            .conn
+            .prepare_cached("SELECT from_ts, business_date FROM day_closes ORDER BY to_ts DESC LIMIT 1")?
+            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let week_floor = date - chrono::Days::new(6);
+        let week_start: Option<i64> = self.conn.query_row(
+            "SELECT MIN(from_ts) FROM day_closes WHERE business_date >= ?1",
+            [week_floor.format("%Y-%m-%d").to_string()],
+            |r| r.get(0),
+        )?;
+        // Days before the first ever close are calendar days.
+        let older_close: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM day_closes WHERE business_date < ?1)",
+            [week_floor.format("%Y-%m-%d").to_string()],
+            |r| r.get(0),
+        )?;
+        let week_since = match (week_start, &last) {
+            (Some(t), _) if older_close => t.min(since),
+            (Some(t), _) => t.min(since).min(local_midnight(week_floor)),
+            // Days were closed, but none in the last week: this day began before it.
+            (None, Some(_)) => since,
+            (None, None) => local_midnight(week_floor).min(since),
+        };
+        let (prev_since, prev_date) = match last {
+            Some((from, d)) => (from.min(since), Some(d)),
+            None => (local_midnight(date - chrono::Days::new(1)).min(since), None),
+        };
+        Ok(BusinessDay { date: date.format("%Y-%m-%d").to_string(), since, open_orders, prev_since, prev_date, week_since })
     }
 
     /// Close the business day: record its sales summary and move to the
@@ -239,7 +278,7 @@ impl Pos {
     pub fn day_close_text(&self, d: &DayClose) -> Result<String> {
         let cfg = self.receipt_settings()?;
         let store = self.setting("store_name")?.unwrap_or_else(|| "POS".into());
-        Ok(render_text(&d.layout(&store, &cfg.currency, cfg.printer.width), cfg.printer.width))
+        Ok(render_text(&d.layout(&store, &cfg.currency, cfg.printer.width, &self.payment_names()?), cfg.printer.width))
     }
 
     /// The report on the receipt printer (one copy), or None if there is none.
@@ -250,7 +289,8 @@ impl Pos {
             return Ok(None);
         }
         let store = self.setting("store_name")?.unwrap_or_else(|| "POS".into());
-        let bytes = render_escpos(&d.layout(&store, &cfg.currency, cfg.printer.width), cfg.printer.width, cfg.printer.bold);
+        let layout = d.layout(&store, &cfg.currency, cfg.printer.width, &self.payment_names()?);
+        let bytes = render_escpos(&layout, cfg.printer.width, cfg.printer.bold);
         Ok(Some(PrintJob::new(cfg.printer.target, bytes)))
     }
 }

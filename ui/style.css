@@ -962,3 +962,15 @@ body.big-buttons .new-tile { min-height: 112px; font-size: 19px; }
   .order.show-ticket .ticket > * { flex-shrink: 0; }
   .order.show-ticket .lines { flex: none; min-height: 120px; overflow-y: visible; }
 }
+
+/* Settings > Backup & data: full backups */
+.backup-list { display: flex; flex-direction: column; }
+.backup-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 2px; border-bottom: 1px solid var(--line); }
+.backup-row:last-child { border-bottom: 0; }
+.backup-row .muted { overflow-wrap: anywhere; }
+.backup-acts { flex-wrap: nowrap; }
+.backup-acts button { min-height: 40px; padding: 0 12px; }
+.backup-folder code { overflow-wrap: anywhere; font-size: 13px; }
+.restore-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; align-items: baseline; }
+.restore-facts strong { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .backup-acts { width: 100%; justify-content: flex-end; } }

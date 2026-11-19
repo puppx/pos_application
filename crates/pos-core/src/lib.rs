@@ -21,6 +21,7 @@ mod raster;
 mod receipt;
 mod products;
 mod reports;
+mod restore;
 mod roles;
 mod service;
 mod settings;
@@ -54,6 +55,7 @@ pub use orders::{
 };
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
+pub use restore::{io_error, is_disk_full, BackupSummary, PreparedRestore, DISK_FULL};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
 pub use settings::{
     discount_presets, PaymentNames, BACKUPS_KEPT_DEFAULT, BACKUPS_KEPT_KEY, BACKUPS_KEPT_RANGE, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS, MAX_PAY_NAME,
@@ -100,7 +102,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0025_sub_categories.sql"),
     include_str!("migrations/0026_sub_category_off.sql"),
 ];
-const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
+/// The schema this app creates; backups up to this version can be restored.
+pub const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
 pub struct Pos {
     conn: Connection,
@@ -138,6 +141,9 @@ impl Pos {
         migrate(&conn)?;
         conn.execute_batch(receipt::BILL_STALE_TRIGGERS)?;
         let pin_salt = load_or_create_salt(&conn)?;
+        if database_id(&conn)?.is_none() {
+            new_database_id(&conn)?;
+        }
         Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default() })
     }
 
@@ -181,6 +187,12 @@ impl Pos {
     pub fn backup_unchecked(&self, dest: impl AsRef<Path>) -> Result<()> {
         self.conn.backup(rusqlite::DatabaseName::Main, dest, None)?;
         Ok(())
+    }
+
+    /// Random id of this database's contents, changed by every restore, so
+    /// terminals can tell the data was swapped under them and reload.
+    pub fn database_id(&self) -> Result<String> {
+        Ok(database_id(&self.conn)?.unwrap_or_default())
     }
 
     /// Run on shutdown: lets SQLite refresh planner statistics cheaply.
@@ -229,4 +241,24 @@ fn load_or_create_salt(conn: &Connection) -> Result<[u8; 16]> {
     getrandom::getrandom(&mut salt).map_err(|e| PosError::Internal(e.to_string()))?;
     conn.execute("INSERT INTO settings (key, value) VALUES ('_pin_salt', ?1)", [&salt[..]])?;
     Ok(salt)
+}
+
+const DB_ID_KEY: &str = "_db_id";
+
+fn database_id(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT CAST(value AS TEXT) FROM settings WHERE key = ?1", [DB_ID_KEY], |r| r.get(0))
+        .optional()?)
+}
+
+/// Give the database a new random id (see [`Pos::database_id`]).
+fn new_database_id(conn: &Connection) -> Result<String> {
+    let mut b = [0u8; 8];
+    getrandom::getrandom(&mut b).map_err(|e| PosError::Internal(e.to_string()))?;
+    let id: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [DB_ID_KEY, &id],
+    )?;
+    Ok(id)
 }

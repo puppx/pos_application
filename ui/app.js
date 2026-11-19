@@ -6,7 +6,7 @@
 
 const TAURI = window.__TAURI__?.core;
 /// Commands only the desktop window has (they act on this PC itself).
-const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server', 'toggle_fullscreen']);
+const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server', 'toggle_fullscreen', 'open_backup_folder']);
 /// A browser's own random id: its login belongs to this id only.
 const terminalId = (() => {
   const make = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -228,13 +228,14 @@ const where = (o) => o.order_type === 'dine_in'
 const addressText = (c) => [c.address_line1, c.address_line2, c.town, c.postcode].filter(Boolean).join(', ');
 
 let toastTimer;
-function toast(msg, err = false) {
+/// `ms`: how long it stays (longer messages need longer).
+function toast(msg, err = false, ms = err ? 4000 : 2500) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = err ? 'err' : '';
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), err ? 4000 : 2500);
+  toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
 /// Saving a setting can change the order screen ("Starter or Main?", tax,
@@ -273,7 +274,9 @@ async function call(cmd, args = {}) {
     return r;
   } catch (e) {
     const msg = String(e?.message ?? e);
-    if (msg === 'please log in') start();
+    // Logged out on the server (idle, or a backup was restored on any till):
+    // forget everything from the old session before showing the login.
+    if (msg === 'please log in') { forgetSession(); start(); }
     else if (isDeadOrder(msg, args, cmd) || await deniedForDeadOrder(msg, args, cmd)) leaveDeadOrder();
     else toast(msg, true);
     const err = new Error(msg);
@@ -301,8 +304,35 @@ function live(fn, ms = 10000) {
 
 // ---------- start / setup / login ----------
 
+/// Drop everything remembered from the session and its data (as logging
+/// out does): the order on screen, the menu and what comes with it, the
+/// floor, the open settings page. The next screens load them again.
+function forgetSession() {
+  closeModal();
+  Object.assign(state, {
+    session: null, orderId: null, orderOpen: false, orderEmpty: null, view: 'floor', returnTo: 'floor', floorId: null,
+    menu: null, cats: null, catId: null, subId: null, itemGroups: null, itemVariants: null, service: null, defaultTax: null,
+    quickNotes: null, starterChoice: null, menuTab: null, menuShown: null, newSubOf: null, openEditor: null, settingsTab: null,
+    planDirty: false, day: null,
+  });
+}
+
+/// The data on the main till was replaced (a backup was restored): reload
+/// the page so nothing from the old data survives anywhere. True if so.
+function dataChanged(st) {
+  if (state.dbId && st?.db_id && st.db_id !== state.dbId) {
+    location.reload();
+    return true;
+  }
+  if (st?.db_id) state.dbId = st.db_id;
+  return false;
+}
+/// "Restored backup…": shown again after the reload that follows a restore.
+const FLASH_KEY = 'pos.flash';
+
 async function start() {
   const st = await invoke('app_status');
+  if (dataChanged(st)) return;
   state.session = st.session;
   state.storeName = st.store_name;
   state.plan = { w: st.plan_width, h: st.plan_height };
@@ -438,7 +468,7 @@ function renderLogin() {
       closeBtn());
   }
   lockScreen(main);
-  invoke('app_status').then((st) => (autoOn = st.auto_pin_on !== false)).catch(() => {});
+  invoke('app_status').then((st) => { if (!dataChanged(st)) autoOn = st.auto_pin_on !== false; }).catch(() => {});
   invoke('login_users').then((list) => {
     users = list;
     if (users.length) pickStep(); else pinStep(null);
@@ -4146,16 +4176,21 @@ async function renderSettings() {
         if (info && !info.available) toast(`You have the latest version (${info.current})`);
       }) }, 'Check for updates'))]);
   const backupCard = () => {
-    const list = h('div', { class: 'stack' });
-    const size = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+    const list = h('div', { class: 'backup-list' });
+    const admin = isAdmin();
     let files = [];
     const load = async () => {
       files = await call('list_full_backups').catch(() => []);
-      setKids(list, files.length ? h('table', {}, files.map((f) => h('tr', {},
-        h('td', {}, fmtTime(f.modified)), h('td', { class: 'muted small' }, f.name), h('td', { class: 'num muted' }, size(f.size)),
-        h('td', { class: 'num' }, isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => {
-          await call('delete_backups', { names: [f.name] }); toast('Backup deleted'); await load();
-        }, 'danger-outline'))))) : h('div', { class: 'muted' }, 'No backups yet.'));
+      setKids(list, files.length ? files.map((f) => h('div', { class: 'backup-row' },
+        h('div', { class: 'grow' }, h('div', {}, fmtTime(f.modified)),
+          h('div', { class: 'muted small' }, `${backupKind(f.name)} · ${f.name} · ${fileSize(f.size)}`)),
+        admin && h('div', { class: 'row backup-acts' },
+          h('button', { onclick: act(async () => restoreDialog(f, await call('inspect_backup', { name: f.name }))) }, 'Restore'),
+          state.remote && h('button', { onclick: act(() => downloadBackup(f.name)) }, 'Download'),
+          confirmBtn('Delete', 'Tap again to delete', async () => {
+            await call('delete_backups', { names: [f.name] }); toast('Backup deleted'); await load();
+          }, 'danger-outline'))))
+        : h('div', { class: 'muted' }, 'No backups yet.'));
     };
     load();
     // How many full backups to keep (setting backups_kept; not set = 14).
@@ -4166,11 +4201,33 @@ async function renderSettings() {
       const n = Number(v);
       if (v != null && Number.isInteger(n) && n >= KEEP_MIN && n <= KEEP_MAX) { keep.value = String(n); keepText.textContent = `the last ${n} are kept`; }
     }).catch(() => {});
+    // Where the files are, to copy one to a USB stick (moving to a new PC).
+    const folder = h('div', { class: 'muted small backup-folder' });
+    if (admin) invoke('backup_folder').then((dir) => setKids(folder, state.remote ? 'Backup folder on the main till: ' : 'Backup folder: ', h('code', {}, dir))).catch(() => {});
+    const status = h('div', { class: 'muted', hidden: true });
+    const fileInput = h('input', { type: 'file', accept: '.db', hidden: true });
+    const fromFile = h('button', { onclick: () => fileInput.click() }, 'Restore everything from a file…');
+    fileInput.onchange = act(async () => {
+      const f = fileInput.files[0];
+      fileInput.value = '';
+      if (!f) return;
+      fromFile.disabled = true;
+      status.hidden = false;
+      try {
+        const r = await uploadBackup(f, (pct) => { status.textContent = `Loading ${f.name}… ${pct}%`; });
+        status.textContent = '';
+        await load();
+        restoreDialog(r.file, r.summary);
+      } finally {
+        fromFile.disabled = false;
+        status.hidden = true;
+      }
+    });
     return h('div', { class: 'card stack' },
       h('h3', {}, 'Backup'),
-      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, settings) is backed up automatically once a day at startup; ', keepText,
-        '. The copies made before an update or a reset are kept apart (the last 3 of each).'),
-      isAdmin() && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Keep the last', keep, 'backups'),
+      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, staff and PINs, settings) is backed up automatically once a day at startup; ', keepText,
+        '. The copies made before an update, a reset or a restore, and files loaded from elsewhere, are kept apart (the last 3 of each, and any from the last 7 days).'),
+      admin && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Keep the last', keep, 'backups'),
         h('button', { onclick: act(async () => {
           const raw = keep.value.trim(), n = Number(raw);
           if (raw && (!Number.isInteger(n) || n < KEEP_MIN || n > KEEP_MAX)) return toast(`Backups kept: a whole number from ${KEEP_MIN} to ${KEEP_MAX}`, true);
@@ -4178,11 +4235,18 @@ async function renderSettings() {
           keepText.textContent = `the last ${raw || KEEP_DEF} are kept`;
           toast(`Keeping the last ${raw || KEEP_DEF} backups. Older ones are deleted at the next backup.`);
         }) }, 'Save')),
-      isAdmin() && h('div', { class: 'muted small' }, `${KEEP_MIN} to ${KEEP_MAX} (empty = ${KEEP_DEF}). Daily backups only: copies taken before an update or a reset are kept apart. Each backup is a full copy of the database.`),
-      h('div', { class: 'row' }, h('button', { onclick: act(async () => { toast('Backup saved: ' + (await call('backup_now'))); await load(); }) }, 'Back up everything now'),
+      admin && h('div', { class: 'muted small' }, `${KEEP_MIN} to ${KEEP_MAX} (empty = ${KEEP_DEF}). Daily backups only: safety copies and files loaded from elsewhere are kept apart. Each backup is a full copy of the database.`),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => { toast('Backup saved: ' + (await call('backup_now'))); await load(); }) }, 'Back up everything now'),
+        admin && fromFile, fileInput,
+        admin && !state.remote && h('button', { onclick: act(() => invoke('open_backup_folder')) }, 'Open backup folder'),
         h('span', { class: 'grow' }),
-        isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete backups', files.map((f) => ({ id: f.name, label: fmtTime(f.modified), sub: `${f.name} · ${size(f.size)}` })),
+        admin && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete backups', files.map((f) => ({ id: f.name, label: fmtTime(f.modified), sub: `${f.name} · ${fileSize(f.size)}` })),
           async (names) => `${await call('delete_backups', { names })} backup(s) deleted`, load) }, 'Delete several…')),
+      status,
+      admin && h('div', { class: 'muted small' }, h('strong', {}, 'Moving to a new PC? '),
+        state.remote ? 'Download a backup here, ' : 'Back up, open the backup folder and copy the newest backup to a USB stick, ',
+        'then on the new PC open Backup & data and use Restore everything from a file…'),
+      admin && folder,
       list);
   };
 
@@ -4467,6 +4531,88 @@ function confirmBtn(label, sure, fn, cls = 'danger') {
   return b;
 }
 
+// ---------- full backups: restore, load from a file, download ----------
+
+const fileSize = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+/// What a full backup file is, from its name (see prune_backups in commands.rs).
+function backupKind(name) {
+  const kinds = [['pos-before-update-', 'Before an update'], ['pos-before-reset-', 'Before a reset'],
+    ['pos-before-restore-', 'Before a restore'], ['pos-imported-', 'Loaded from a file']];
+  return kinds.find(([p]) => name.startsWith(p))?.[1] ?? 'Backup';
+}
+/// Bytes as base64, in slices (one big String.fromCharCode call overflows the stack).
+function base64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+/// Send a .db file to the till in pieces (each request stays small enough
+/// for the local server), then have it checked. Resolves to { file, summary }.
+const UPLOAD_PIECE = 512 * 1024;
+async function uploadBackup(f, progress) {
+  if (!f.size) throw new Error('This file is empty: it is not a POS backup.');
+  const id = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  for (let offset = 0; offset < f.size; offset += UPLOAD_PIECE) {
+    progress(Math.floor((offset * 100) / f.size));
+    const piece = new Uint8Array(await f.slice(offset, offset + UPLOAD_PIECE).arrayBuffer());
+    await call('upload_backup_chunk', { upload: id, offset, data: base64(piece) });
+  }
+  progress(100);
+  return call('finish_backup_upload', { upload: id });
+}
+/// Browsers: save a full backup from the main till to this device.
+async function downloadBackup(name) {
+  let r;
+  try {
+    r = await fetch('/backup-file', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Terminal': terminalId }, body: JSON.stringify({ name }) });
+  } catch { throw new Error('Cannot reach the POS. Check the main till is on and its server is running.'); }
+  if (!r.ok) throw new Error((await r.json().catch(() => null)) || `server error ${r.status}`);
+  const a = h('a', { href: URL.createObjectURL(await r.blob()), download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+/// Show what a backup holds, then RESTORE typed and the admin's PIN replace
+/// all data with it. `f`: the backup file (name, modified); `s`: inspect_backup.
+function restoreDialog(f, s) {
+  const word = h('input', { placeholder: 'Type RESTORE', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', style: 'width:170px' });
+  const go = h('button', { class: 'danger solid', disabled: true }, 'Restore…');
+  word.oninput = () => (go.disabled = word.value.trim() !== 'RESTORE');
+  const fact = (k, v) => [h('span', { class: 'muted' }, k), h('strong', {}, String(v))];
+  const when = s.last_used_at ?? f.modified;
+  go.onclick = act(async () => {
+    let r;
+    const ok = await pinDialog({
+      title: 'Enter your PIN to restore', hint: 'All data on this till will be replaced by the backup.', okLabel: 'Restore now', okClass: 'danger solid paybig',
+      submit: async (pin) => {
+        try { r = await invoke('restore_backup', { name: f.name, pin, confirm: word.value }); } catch (e) { return String(e?.message ?? e); }
+      },
+    });
+    if (!ok) return;
+    const n = r.summary;
+    const msg = `Restored backup from ${fmtTime(when)}: ${n.orders} orders, ${n.menu_items} menu items, ${n.customers} customers, ${n.staff} staff. ` +
+      'Log in with a PIN from the backup.';
+    // Reload like every other till and tablet will, and say what happened after.
+    try { sessionStorage.setItem(FLASH_KEY, msg); } catch {}
+    forgetSession();
+    location.reload();
+  });
+  showModal(h('h3', {}, 'Restore this backup?'),
+    h('div', { class: 'restore-facts' },
+      fact('Restaurant', s.store_name ?? '(no name)'), fact('Last used', fmtTime(when)),
+      fact('Orders', s.open_orders ? `${s.orders} (${s.open_orders} open)` : s.orders), fact('Menu items', s.menu_items),
+      fact('Customers', s.customers), fact('Staff', s.staff)),
+    h('div', { class: 'muted small' }, `${backupKind(f.name)} · ${f.name}`,
+      s.schema_version < s.app_schema_version ? ' · from an older version of the app: it is brought up to date' : ''),
+    h('div', { class: 'warn-box' }, h('strong', {}, 'Everything on this till is replaced: '),
+      'orders, menu, customers, staff and PINs, and settings all come from the backup. ',
+      'A safety copy of the current data is saved first ("Before a restore" in the list), so you can go back. ',
+      'Every till, tablet and kitchen screen is logged out: log in with a PIN from the backup.'),
+    h('div', { class: 'row' }, word, go, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Cancel')));
+  word.focus();
+}
+
 /// Menu only: save, list, restore, and restore from a file (another till).
 function menuBackupCard() {
   const list = h('div', { class: 'stack' });
@@ -4607,3 +4753,11 @@ document.getElementById('fullscreen').onclick = act(toggleFullscreen);
 
 document.getElementById('logout').append(icon('logout'));
 start().catch((e) => toast(String(e?.message ?? e), true));
+// After a restore this page reloaded: say what was restored.
+try {
+  const flash = sessionStorage.getItem(FLASH_KEY);
+  if (flash) { sessionStorage.removeItem(FLASH_KEY); toast(flash, false, 9000); }
+} catch {}
+// A till or tablet left on the login screen notices a restore on another
+// one (its list of names would be the old staff) and reloads.
+setInterval(() => { if (!state.session) invoke('app_status').then(dataChanged).catch(() => {}); }, 15000);

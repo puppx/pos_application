@@ -2549,20 +2549,23 @@ dependencies = [
 
 [[package]]
 name = "pos-app"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
+ "base64 0.22.1",
  "pos-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-updater",
+ "tempfile",
  "tiny_http",
 ]
 
 [[package]]
 name = "pos-core"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "ab_glyph_rasterizer",
  "argon2",

@@ -696,14 +696,36 @@ commands! {
     }
 
     /// `starter`: order a starter as a main (false) or any dish as a starter
-    /// (true); left out = the menu's setting.
-    fn add_item(app, t, order_id: i64, product_id: i64, qty: i64, note: Option<String>, variant_id: Option<i64>, option_ids: Option<Vec<i64>>, starter: Option<bool>) -> Order {
+    /// (true); left out = the menu's setting. `team_id`: the kitchen team
+    /// that makes it ("Which team makes this?"); left out = the menu's.
+    fn add_item(app, t, order_id: i64, product_id: i64, qty: i64, note: Option<String>, variant_id: Option<i64>, option_ids: Option<Vec<i64>>, starter: Option<bool>, team_id: Option<i64>) -> Order {
         let option_ids = option_ids.unwrap_or_default();
-        app.with_session(t, |pos, s| pos.add_item_as(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids, starter))
+        app.with_session(t, |pos, s| pos.add_item_for(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids, starter, team_id))
     }
 
     fn set_item_course(app, t, item_id: i64, starter: bool) -> Order {
         app.with_session(t, |pos, s| pos.set_item_course(s, item_id, starter))
+    }
+
+    /// Move a dish not yet sent to another kitchen team (None = its menu team).
+    fn set_item_team(app, t, item_id: i64, team_id: Option<i64>) -> Order {
+        app.with_session(t, |pos, s| pos.set_item_team(s, item_id, team_id))
+    }
+
+    /// Prints that failed after the till was told they were sent (a ticket
+    /// sent slowly, a later copy), after number `after`; none = the last
+    /// two minutes'. Every till shows them.
+    fn print_failures(app, t, after: Option<u64>) -> PrintFailures {
+        app.with_session(t, |_, s| s.require(Permission::Sell))?;
+        Ok(pos_core::print_failures(after))
+    }
+
+    /// The teams "Which team makes this?" offers (empty = off).
+    fn team_choice(app, t) -> Vec<i64> {
+        app.with_session(t, |pos, s| {
+            s.require(Permission::Sell)?;
+            pos.team_choice()
+        })
     }
 
     /// A dish not on the menu: name and price typed on the order.
@@ -1560,7 +1582,7 @@ mod tests {
             .unwrap();
         let path = std::env::temp_dir().join(format!("pos-cancel-test-{}.bin", std::process::id()));
         pos.set_kitchen_printer(&admin, &PrinterConfig {
-            target: PrinterTarget::File { path: path.display().to_string() }, copy_delay_secs: 0, app_font: false, ..Default::default()
+            target: PrinterTarget::File { path: path.display().to_string() }, copy_delay_secs: 0, app_font: false, slow_send: false, ..Default::default()
         })
         .unwrap();
         let app = App::new(pos, std::env::temp_dir());
@@ -1586,6 +1608,51 @@ mod tests {
         let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
         let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": o["id"], "reason": "" })).unwrap();
         assert_eq!(r, json!({ "attempted": false, "error": null }));
+    }
+
+    /// "Send slowly" paces the bytes after the command has released the
+    /// database lock: the till gets its answer at once and other terminals
+    /// carry on while the ticket is still going out.
+    #[test]
+    fn slow_sending_happens_outside_the_lock() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        let curry = pos
+            .create_product(&admin, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: Some("แกงเขียวหวาน".into()), prep: false, team_id: None,
+            })
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let printer = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut s, &mut buf).unwrap();
+            (buf, Instant::now())
+        });
+        // Defaults: the app's font (a ticket of tens of KB) and "Send slowly" on.
+        pos.set_kitchen_printer(&admin, &PrinterConfig { target: PrinterTarget::Network { host: "127.0.0.1".into(), port }, ..Default::default() })
+            .unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+        let id = o["id"].as_i64().unwrap();
+        dispatch(&app, LOCAL, "add_item", json!({ "orderId": id, "productId": curry.id, "qty": 2 })).unwrap();
+        let started = Instant::now();
+        let r = dispatch(&app, LOCAL, "send_to_kitchen", json!({ "orderId": id })).unwrap();
+        assert_eq!(r["print"], json!({ "attempted": true, "error": null }));
+        assert!(started.elapsed() < Duration::from_millis(300), "the till waited {:?}", started.elapsed());
+        // Still sending, yet the lock is free and another terminal's command runs at once.
+        assert!(app.inner.try_lock().is_ok());
+        let other = Instant::now();
+        dispatch(&app, LOCAL, "list_open_orders", json!({})).unwrap();
+        assert!(other.elapsed() < Duration::from_millis(200));
+        assert!(!printer.is_finished(), "the ticket is still going out");
+        let (bytes, done) = printer.join().unwrap();
+        assert!(bytes.starts_with(&[0x1B, b'@']) && bytes.ends_with(&[0x1D, b'V', 66, 0]));
+        assert!(bytes.len() > 10 * pos_core::SLOW_CHUNK, "{} bytes", bytes.len());
+        assert!(done - started >= pos_core::paced_duration(bytes.len()));
     }
 
     #[test]

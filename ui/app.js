@@ -240,7 +240,7 @@ function toast(msg, err = false, ms = err ? 4000 : 2500) {
 
 /// Saving a setting can change the order screen ("Starter or Main?", tax,
 /// service charge…): the next order screen loads the menu and settings again.
-const SETTINGS_WRITES = new Set(['set_setting', 'set_service_settings', 'set_receipt_settings']);
+const SETTINGS_WRITES = new Set(['set_setting', 'set_service_settings', 'set_receipt_settings', 'save_teams']);
 /// The server's answer for anything done to an order that is no longer open (orders.rs `require_open`).
 const ORDER_CLOSED = 'this order is already closed';
 /// True when `msg` (from a call made on the order screen) means the order on
@@ -890,6 +890,10 @@ async function loadMenu() {
       call('get_setting', { key: QUICK_NOTES_KEY }), call('get_setting', { key: 'default_tax_bp' }),
     ]);
     state.starterChoice = (await call('get_setting', { key: 'starter_choice' }).catch(() => null)) !== '0';
+    // "Which team makes this?" (Settings → Kitchen teams): the teams to choose from; empty = off.
+    const [choice, teams] = await Promise.all([call('team_choice').catch(() => []), call('list_teams').catch(() => [])]);
+    state.teams = teams;
+    state.teamChoice = choice.map((id) => teams.find((t) => t.id === id)).filter(Boolean);
     state.service = service;
     state.quickNotes = quickNotes(notes);
     state.defaultTax = Math.max(0, parseInt(tax ?? '0', 10) || 0);
@@ -921,6 +925,17 @@ function groupRule(g) {
 /// so one tap adds the usual dish without undercharging for a cheaper size.
 const preselect = (g) => (g.min_select === 1 && g.max_select === 1 && g.options.length
   ? [(g.options.find((o) => o.price_cents === 0) ?? g.options[0]).id] : []);
+
+/// The teams a menu item's dish can be moved to ("Which team makes this?"):
+/// the chosen teams when the item's own team is one of them, else none
+/// (the dish stays with its team and nobody is asked).
+function teamsFor(productId) {
+  const p = state.menu?.find((x) => x.id === productId);
+  return p && p.team_id != null && state.teamChoice?.some((t) => t.id === p.team_id) ? state.teamChoice : [];
+}
+/// The team that makes an order line: the one it was moved to, else its menu item's.
+const lineTeam = (it) => it.team_id ?? state.menu?.find((x) => x.id === it.product_id)?.team_id ?? null;
+const teamName = (id) => state.teams?.find((t) => t.id === id)?.name ?? '';
 
 async function renderOrder() {
   await loadMenu();
@@ -1055,22 +1070,38 @@ async function renderOrder() {
   let editing = null;
 
   // `course`: true = starter, false = main, null = as on the menu.
-  async function addItem(productId, optionIds = [], variantId = null, course = null) {
-    order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds, starter: course });
+  // `team`: the team that makes it (team id), null = the menu's.
+  async function addItem(productId, optionIds = [], variantId = null, course = null, team = null) {
+    order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds, starter: course, teamId: team });
     editing = null; // a dish added: the totals and Send come back
     draw();
   }
   // Tap on a menu item: add it straight away, or ask for its options first.
-  // A starter on a dine-in order first asks "Starter or Main?" (Settings → Orders).
+  // Dine-in, when Settings → Kitchen teams has teams to choose from and the
+  // dish's team is one of them: "Which team makes this?" first. Otherwise a
+  // starter on a dine-in order asks "Starter or Main?" (Settings → Orders).
   function choose(p) {
     return act(async () => {
       if (p.is_set) return openSetPicker(p);
       const groups = (state.itemGroups[p.id] || []).filter((g) => g.options.length);
       const variants = state.itemVariants[p.id] || [];
-      const next = async (course) => {
-        if (!groups.length && !variants.length) { await addItem(p.id, [], null, course); closePicker(); return; }
-        openPicker(p, groups, variants, course);
+      const next = async (course, team = null) => {
+        if (!groups.length && !variants.length) { await addItem(p.id, [], null, course, team); closePicker(); return; }
+        openPicker(p, groups, variants, course, team);
       };
+      // The team picker replaces "Starter or Main?"; the course stays as on the menu.
+      if (order.order_type === 'dine_in' && state.teamChoice?.length) {
+        const teams = teamsFor(p.id);
+        if (!teams.length) return next(null);
+        setKids(picker, h('h3', {}, p.name), h('div', { class: 'muted' }, 'Which team makes this?'),
+          h('div', { class: 'course-pick team-pick' }, teams.map((t) => h('button', {
+            class: t.id === p.team_id ? 'primary usual' : '',
+            onclick: act(() => next(null, t.id)),
+          }, t.name, t.name_alt && h('small', { lang: 'th' }, t.name_alt), t.id === p.team_id && h('small', {}, 'usual')))),
+          h('div', { class: 'row' }, h('button', { onclick: closePicker }, 'Cancel')));
+        [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
+        return;
+      }
       if (p.starter && order.order_type === 'dine_in' && state.starterChoice) {
         setKids(picker, h('h3', {}, p.name), h('div', { class: 'muted' }, 'Serve it as:'),
           h('div', { class: 'course-pick' },
@@ -1083,7 +1114,7 @@ async function renderOrder() {
       await next(null);
     });
   }
-  function openPicker(p, groups, variants = [], course = null) {
+  function openPicker(p, groups, variants = [], course = null, team = null) {
     const chosen = new Map(groups.map((g) => [g.id, new Set(preselect(g))]));
     let variant = null;
     const body = h('div', { class: 'stack' });
@@ -1118,14 +1149,14 @@ async function renderOrder() {
       if (variants.length && !variant) return toast(`Choose which ${p.name}`, true);
       const missing = groups.find((g) => chosen.get(g.id).size < g.min_select);
       if (missing) return toast(`${missing.name}: ${groupRule(missing)}`, true);
-      await addItem(p.id, groups.flatMap((g) => [...chosen.get(g.id)]), variant?.id ?? null, course);
+      await addItem(p.id, groups.flatMap((g) => [...chosen.get(g.id)]), variant?.id ?? null, course, team);
       closePicker();
     });
     // With only choices (no option groups), one tap on a choice adds it.
     if (!groups.length) {
       setKids(picker, h('h3', {}, p.name),
         h('div', { class: 'opts' }, variants.map((v) => h('button', {
-          onclick: act(async () => { await addItem(p.id, [], v.id, course); closePicker(); }),
+          onclick: act(async () => { await addItem(p.id, [], v.id, course, team); closePicker(); }),
         }, v.name, h('small', {}, money(v.price_cents))))),
         h('div', { class: 'row' }, h('button', { onclick: closePicker }, 'Cancel')));
       [picker.hidden, grid.hidden, cats.hidden] = [false, true, true];
@@ -1354,7 +1385,8 @@ async function renderOrder() {
         h('td', { class: 'line-name', title: 'Note, discount, remove', onclick: toggleEdit }, h('div', {}, it.name, sent ? h('span', { class: 'sent' }, ' ✓') : '',
           it.held && !sent ? h('span', { class: 'badge held' }, 'waits for mains') : '',
           it.starter && !sent ? h('span', { class: 'badge' }, 'starter') : '',
-          it.prep && !sent ? h('span', { class: 'badge prep' }, it.prep_sent_at ? 'preparing' : 'prep ahead') : ''),
+          it.prep && !sent ? h('span', { class: 'badge prep' }, it.prep_sent_at ? 'preparing' : 'prep ahead') : '',
+          it.team_id != null && teamName(it.team_id) ? h('span', { class: 'badge team', title: 'Made by this team on this order' }, teamName(it.team_id)) : ''),
           it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt),
           it.options.length > 0 && h('div', { class: 'muted' }, it.options.map((o) => o.name).join(', ')),
           it.note && h('div', { class: 'muted' }, '“', it.note, '”'),
@@ -1367,7 +1399,7 @@ async function renderOrder() {
           h('span', {}, it.qty),
           h('button', { onclick: act(() => (sent
             ? (it.is_set ? openSetPicker(state.menu.find((p) => p.id === it.product_id) ?? { id: it.product_id, name: it.name, price_cents: it.unit_price_cents })
-              : addItem(it.product_id, it.options.map((o) => o.option_id), it.variant_id))
+              : addItem(it.product_id, it.options.map((o) => o.option_id), it.variant_id, null, it.team_id ?? null))
             : setLine(it, { qty: it.qty + 1 }))) }, '+'))),
         h('td', { class: 'num' }, money(it.line_total_cents)),
         h('td', {}, h('button', { class: `icon-btn ${editing === it.id ? 'on' : ''}`, title: 'Note, discount, remove',
@@ -1422,6 +1454,18 @@ async function renderOrder() {
             class: !!it.starter === v ? 'on' : '',
             onclick: act(async () => { if (!!it.starter === v) return; order = await call('set_item_course', { itemId: it.id, starter: v }); draw(); toast(`${it.name}: ${l.toLowerCase()}`); }),
           }, l)))),
+        // Which team makes it, while it has not gone to the kitchen (Settings → Kitchen teams).
+        !sent && !it.is_set && order.order_type === 'dine_in' && (() => {
+          const teams = teamsFor(it.product_id);
+          const cur = lineTeam(it);
+          if (!teams.length && !(it.team_id != null && state.teamChoice?.length)) return '';
+          const list = teams.length ? teams : state.teamChoice;
+          return h('div', { class: 'row course-row' }, h('span', { class: 'muted small' }, 'Team'),
+            h('div', { class: 'seg' }, list.map((t) => h('button', {
+              class: cur === t.id ? 'on' : '',
+              onclick: act(async () => { if (cur === t.id) return; order = await call('set_item_team', { itemId: it.id, teamId: t.id }); draw(); toast(`${it.name}: made by ${t.name}`); }),
+            }, t.name))));
+        })(),
         chips, discChips, h('div', { class: 'row' }, note, disc, saveLine,
         sent && h('button', { title: 'Print this dish on a kitchen ticket again', onclick: act(async () =>
           reportPrint(await call('reprint_kitchen_items', { orderId, itemIds: [it.id] }), `${it.name} printed again`, true)) }, 'Print again'),
@@ -3787,6 +3831,11 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
   const large = h('input', { type: 'checkbox', checked: cfg.large_text ?? true });
   const tableOnly = h('input', { type: 'checkbox', checked: cfg.call_table_only ?? true });
   const appFont = h('input', { type: 'checkbox', checked: cfg.app_font ?? true });
+  // On unless switched off (older saved settings too): cheap printers lose data sent all at once.
+  const slow = h('input', { type: 'checkbox', checked: cfg.slow_send ?? true });
+  const slowRow = h('div', { class: 'stack', style: 'gap:2px' },
+    h('label', { class: 'check' }, slow, ' Send slowly (for printers that print junk or skip lines)'),
+    h('div', { class: 'muted small' }, 'Sends each ticket in small pieces so the printer keeps up. The till does not wait; a long ticket finishes a second or two later. Network and serial printers only.'));
   const courseCopies = (v) => h('input', { type: 'number', min: 1, max: 9, value: v ?? '', placeholder: 'same', style: 'width:80px' });
   const starterCopies = courseCopies(cfg.starter_copies), mainsCopies = courseCopies(cfg.mains_copies), prepCopies = courseCopies(cfg.prep_copies);
   const additionalCopies = h('input', { type: 'number', min: 1, max: 9, value: cfg.additional_copies ?? '', placeholder: '1', style: 'width:80px' });
@@ -3797,12 +3846,16 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
   const imageMode = h('select', { 'aria-label': 'Image mode (for Thai text)' }, IMAGE_MODES.map(([v, label]) => h('option', { value: v }, label)));
   imageMode.value = IMAGE_MODES.some(([v]) => v === cfg.image_mode) ? cfg.image_mode : 'raster';
   const fields = h('div', { class: 'row' });
-  const drawFields = () => setKids(fields, ...{
-    none: [],
-    network: [h('label', { class: 'field' }, 'IP address', host), h('label', { class: 'field' }, 'Port', port)],
-    windows: [h('label', { class: 'field' }, 'Printer', winName)],
-    file: [h('label', { class: 'field' }, 'Port or path', path)],
-  }[kind.value]);
+  const drawFields = () => {
+    setKids(fields, ...{
+      none: [],
+      network: [h('label', { class: 'field' }, 'IP address', host), h('label', { class: 'field' }, 'Port', port)],
+      windows: [h('label', { class: 'field' }, 'Printer', winName)],
+      file: [h('label', { class: 'field' }, 'Port or path', path)],
+    }[kind.value]);
+    // Windows printers are paced by the spooler and USB already.
+    slowRow.hidden = !['network', 'file'].includes(kind.value);
+  };
   kind.onchange = drawFields;
   drawFields();
   return {
@@ -3821,6 +3874,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
       // Label above the select: stays readable on a phone.
       h('label', { class: 'field-col', style: 'gap:4px;align-self:flex-start;max-width:100%;color:var(--ink-2)' }, 'Image mode (for Thai text)', imageMode),
       h('div', { class: 'muted small' }, 'Thai text (and all kitchen text in the app\'s font) prints as pictures. If it doesn\'t print, tap Test Thai printing and choose the number that prints clearly.'),
+      slowRow,
       courses && h('label', { class: 'check' }, appFont, ' Print tickets in the app\'s font (the same as the team names); off = the printer\'s own font'),
       courses && h('label', { class: 'check' }, tableOnly, ' "Call mains again" prints only the table, in huge letters (no dishes)'),
       courses && h('label', { class: 'check' }, large, ' Large text for dishes, options and notes (fewer letters per line)')),
@@ -3831,6 +3885,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
       names: lang.value,
       bold: bold.checked,
       image_mode: imageMode.value,
+      slow_send: slow.checked,
       ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), additional_copies: copiesOf(additionalCopies), large_text: large.checked, call_table_only: tableOnly.checked, app_font: appFont.checked }),
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
@@ -3930,6 +3985,7 @@ function teamsCard() {
         await call('save_teams', { teams: rows.map((r) => ({ id: r.id, name: r.name.trim(), name_alt: (r.name_alt ?? '').trim() || null })) });
         state.menu = null;
         await load();
+        reloadTeamChoice?.();
         toast('Teams saved');
       }) }, 'Save teams'),
       h('button', { onclick: act(async () => { printResult(await call('test_teams_print'), 'Sample tickets printed'); }) }, 'Print sample tickets')));
@@ -4352,7 +4408,7 @@ async function renderSettings() {
     kitchen: () => [isAdmin() && kitchenPrinterCard(), isAdmin() && routesCard(systemPrinters), kdsCard()],
     tickets: () => [splitCard()],
     orders: () => [isAdmin() && orderTypesCard(), isAdmin() && discountCard(), courseCard(), cancelTicketCard(), isAdmin() && fixSentCard(), quickNotesCard()],
-    teams: () => [teamsCard()],
+    teams: () => [teamsCard(), teamChoiceCard()],
     login: () => [startScreenCard(), autoLogoutCard()],
     delivery: () => [platformsCard()],
     // Full screen and the local server are this PC's own (not on a phone or tablet).
@@ -4414,7 +4470,7 @@ function routesCard(systemPrinters) {
         const teamBoxes = teams.map((t) => ({ t, box: h('input', { type: 'checkbox', checked: (r.team_ids ?? []).includes(t.id) }) }));
         const value = () => {
           const c = pf.config();
-          return { label: label.value.trim(), kind: c.kind, host: c.host, port: c.port, name: c.name, path: c.path, width: c.width, copies: c.copies, image_mode: c.image_mode,
+          return { label: label.value.trim(), kind: c.kind, host: c.host, port: c.port, name: c.name, path: c.path, width: c.width, copies: c.copies, image_mode: c.image_mode, slow_send: c.slow_send,
             drinks: drinks.checked, desserts: desserts.checked, team_ids: teamBoxes.filter((x) => x.box.checked).map((x) => x.t.id) };
         };
         forms.push(value);
@@ -4546,7 +4602,38 @@ function courseCard() {
     h('h3', {}, 'Starter or main course'),
     settingSwitch('starter_choice', 'When a starter is tapped on a dine-in order, ask "Starter or Main course?"',
       'Starters ask Starter or Main', 'Starters are added as starters'),
-    h('div', { class: 'muted' }, 'Main course: the dish waits and goes with the mains. A dish not yet sent can also be changed later: tap ✎ on it, then Starter or Main course.'));
+    h('div', { class: 'muted' }, 'Main course: the dish waits and goes with the mains. A dish not yet sent can also be changed later: tap ✎ on it, then Starter or Main course.'),
+    h('div', { class: 'muted small' }, 'When teams are ticked under Settings → Kitchen teams → "Which team makes this?", that question is asked instead of this one.'));
+}
+
+/// Reloads the "Which team makes this?" card on screen (after the teams are saved).
+let reloadTeamChoice = null;
+/// Settings card: "Which team makes this?" — the teams a dish can be moved
+/// to when it is ordered (setting team_choice: team ids, empty = off).
+function teamChoiceCard() {
+  const card = h('div', { class: 'card stack' });
+  // The saved list itself (team_choice reads empty while kitchen teams are switched off).
+  const load = () => Promise.all([call('list_teams'), call('get_setting', { key: 'team_choice' })]).then(([teams, raw]) => {
+    const chosen = (raw ?? '').split(',').map((x) => parseInt(x, 10)).filter((x) => !Number.isNaN(x));
+    const boxes = teams.map((t) => ({ t, box: h('input', { type: 'checkbox', checked: chosen.includes(t.id) }) }));
+    setKids(card,
+      h('h3', {}, 'Which team makes this?'),
+      h('div', { class: 'muted' }, 'Tick the teams staff can choose between. On a dine-in order, tapping a dish of one of these teams asks "Which team makes this?": ' +
+        'the dish then prints under that team (and on its printer) for this order only. Dishes of other teams are added straight away. ' +
+        'This replaces "Starter or Main course?"; a dish stays a starter or a main as the menu says. Only while kitchen teams are on.'),
+      teams.length ? h('div', { class: 'row' }, boxes.map((x) => h('label', { class: 'check' }, x.box, ` ${x.t.name}`)))
+        : h('div', { class: 'muted' }, 'Add teams above first.'),
+      h('div', { class: 'muted small' }, 'Tick two or more, or none to switch it off. A dish not yet sent can also be moved later: tap ✎ on it, then Team.'),
+      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
+        const ids = boxes.filter((x) => x.box.checked).map((x) => x.t.id);
+        if (ids.length === 1) return toast('Tick at least two teams, or none to switch it off', true);
+        await call('set_setting', { key: 'team_choice', value: ids.join(',') });
+        toast(ids.length ? `Staff choose between ${boxes.filter((x) => x.box.checked).map((x) => x.t.name).join(', ')}` : 'Team choice off');
+      }) }, 'Save')));
+  }).catch((e) => toast(String(e?.message ?? e), true));
+  load();
+  reloadTeamChoice = () => { if (card.isConnected) load(); };
+  return card;
 }
 
 /// Settings card: whether cancelling a whole order prints a CANCELLED kitchen ticket.
@@ -4869,3 +4956,14 @@ try {
 // A till or tablet left on the login screen notices a restore on another
 // one (its list of names would be the old staff) and reloads.
 setInterval(() => { if (!state.session) invoke('app_status').then(dataChanged).catch(() => {}); }, 15000);
+/// A ticket sent slowly (or a later copy) that failed after the till was told
+/// it was sent: say so on every till, so it can be printed again.
+let printFailAfter = null;
+setInterval(() => {
+  if (!state.session) return;
+  invoke('print_failures', { after: printFailAfter }).then(({ failures: list, last }) => {
+    printFailAfter = last;
+    if (!list.length) return;
+    toast(list.length > 1 ? `${list.at(-1).message} (and ${list.length - 1} more)` : list[0].message, true, 12000);
+  }).catch(() => {});
+}, 10000);

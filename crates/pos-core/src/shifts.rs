@@ -270,6 +270,7 @@ impl Pos {
         }
         let p = &cfg.printer;
         let bytes = render_escpos_in(&self.shift_layout(sh, &cfg.currency, p.width)?, p.width, p.bold, false, p.image_mode);
-        Ok(Some(PrintJob::new(cfg.printer.target, bytes)))
+        let slow = p.slow_send;
+        Ok(Some(PrintJob::new(cfg.printer.target, bytes).paced(slow).about("Shift report")))
     }
 }

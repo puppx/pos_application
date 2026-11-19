@@ -150,6 +150,10 @@ pub struct OrderItem {
     pub with_alt: Option<String>,
     /// How many of this line were already paid for with "pay for these dishes".
     pub paid_qty: i64,
+    /// The kitchen team this dish was moved to on this order ("Which team
+    /// makes this?"); None = its menu item's team. Tickets, other kitchen
+    /// printers and the kitchen screen go by it.
+    pub team_id: Option<i64>,
 }
 
 /// One payment towards an order (an order can have several: split bill).
@@ -352,7 +356,7 @@ fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
 const TABLE_BUSY: &str = "that table already has an open order";
 
 const ITEM_COLS: &str =
-    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt, prep, prep_sent_at, is_set, parent_id, section_name, section_alt, with_name, with_alt";
+    "id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at, variant_id, starter, held, name_alt, prep, prep_sent_at, is_set, parent_id, section_name, section_alt, with_name, with_alt, team_id";
 
 fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
     let (price, rate, qty, disc): (i64, i64, i64, i64) = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
@@ -383,6 +387,7 @@ fn item_from_row(r: &Row) -> rusqlite::Result<OrderItem> {
         with_name: r.get(19)?,
         with_alt: r.get(20)?,
         paid_qty: 0,
+        team_id: r.get(21)?,
     })
 }
 
@@ -536,9 +541,9 @@ fn copy_line(tx: &Transaction, item: i64, order_id: i64, qty: i64, discount: i64
     tx.execute(
         "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at,
                                   added_by, added_at, name_alt, starter, held, variant_id, prep, prep_sent_at, is_set,
-                                  parent_id, section_name, section_alt, with_name, with_alt)
+                                  parent_id, section_name, section_alt, with_name, with_alt, team_id)
          SELECT ?2, product_id, name, unit_price_cents, tax_rate_bp, ?3, ?4, note, sent_at, added_by, added_at, name_alt, starter,
-                held, variant_id, prep, prep_sent_at, is_set, COALESCE(?5, parent_id), section_name, section_alt, with_name, with_alt
+                held, variant_id, prep, prep_sent_at, is_set, COALESCE(?5, parent_id), section_name, section_alt, with_name, with_alt, team_id
          FROM order_items WHERE id = ?1",
         params![item, order_id, qty, discount, parent],
     )?;
@@ -896,22 +901,46 @@ impl Pos {
         option_ids: &[i64],
         starter: Option<bool>,
     ) -> Result<Order> {
+        self.add_item_for(s, order_id, product_id, qty, note, variant_id, option_ids, starter, None)
+    }
+
+    /// [`Pos::add_item_as`] made by kitchen team `team_id` ("Which team makes
+    /// this?"): it prints under that team and on its printer, and shows
+    /// under it on the kitchen screen. None, or the item's own team = the
+    /// menu's team, as always.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_item_for(
+        &mut self,
+        s: &Session,
+        order_id: i64,
+        product_id: i64,
+        qty: i64,
+        note: Option<&str>,
+        variant_id: Option<i64>,
+        option_ids: &[i64],
+        starter: Option<bool>,
+        team_id: Option<i64>,
+    ) -> Result<Order> {
         s.require(Permission::Sell)?;
         if !(1..=MAX_QTY).contains(&qty) {
             return invalid(format!("quantity must be between 1 and {MAX_QTY}"));
         }
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
+        self.check_team(team_id)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let (name, base, rate, starter_default, alt, prep, sold_out): (String, i64, i64, bool, Option<String>, bool, bool) = tx
-            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep, sold_out FROM products WHERE id = ?1 AND active = 1 AND is_set = 0")?
-            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
+        type ProductRow = (String, i64, i64, bool, Option<String>, bool, bool, Option<i64>);
+        let (name, base, rate, starter_default, alt, prep, sold_out, menu_team): ProductRow = tx
+            .prepare_cached("SELECT name, price_cents, tax_rate_bp, starter, name_alt, prep, sold_out, team_id FROM products WHERE id = ?1 AND active = 1 AND is_set = 0")?
+            .query_row([product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))
             .optional()?
             .ok_or_else(|| PosError::Validation("that item is not available (a set menu needs its dishes chosen)".into()))?;
         if sold_out {
             return invalid(format!("{name} is sold out today"));
         }
         let starter = starter.unwrap_or(starter_default);
+        // Its own team is no move: the line keeps following the menu.
+        let team = team_id.filter(|t| Some(*t) != menu_team);
         // A tax rate chosen for the whole order applies to new lines too.
         let order_tax: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
         let rate = order_tax.unwrap_or(rate);
@@ -942,10 +971,10 @@ impl Pos {
                     "SELECT id FROM order_items
                      WHERE order_id = ?1 AND product_id = ?2 AND sent_at IS NULL AND note IS NULL
                        AND parent_id IS NULL AND is_set = 0 AND discount_cents = 0 AND unit_price_cents = ?3 AND qty + ?4 <= ?5
-                       AND variant_id IS ?6 AND starter = ?7
+                       AND variant_id IS ?6 AND starter = ?7 AND team_id IS ?8
                      ORDER BY id DESC",
                 )?
-                .query_map(params![order_id, product_id, price, qty, MAX_QTY, variant_id, starter], |r| r.get(0))?
+                .query_map(params![order_id, product_id, price, qty, MAX_QTY, variant_id, starter, team], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             for id in candidates {
                 if line_option_ids(&tx, id)? == wanted {
@@ -962,10 +991,10 @@ impl Pos {
                 return invalid("this order has too many lines");
             }
             tx.prepare_cached(
-                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id, starter, name_alt, prep)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, note, added_by, variant_id, starter, name_alt, prep, team_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?
-            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id, starter, alt, prep])?;
+            .execute(params![order_id, product_id, name, price, rate, qty, note, s.user_id, variant_id, starter, alt, prep, team])?;
             let item_id = tx.last_insert_rowid();
             let mut ins = tx.prepare_cached(
                 "INSERT INTO order_item_options (item_id, option_id, group_name, name, price_cents, name_alt)
@@ -990,6 +1019,24 @@ impl Pos {
         )?;
         if n == 0 {
             return invalid("only a dish not yet sent to the kitchen can change course");
+        }
+        self.get_order(s, order_id)
+    }
+
+    /// Move a dish not yet sent to another kitchen team for this order
+    /// (the ✎ editor's "Team"), or back to its menu team with None.
+    pub fn set_item_team(&mut self, s: &Session, item_id: i64, team_id: Option<i64>) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        let order_id = self.order_of_item(item_id)?;
+        require_open(&self.conn, order_id)?;
+        self.check_team(team_id)?;
+        let n = self.conn.execute(
+            "UPDATE order_items SET team_id = CASE WHEN ?2 IS (SELECT p.team_id FROM products p WHERE p.id = order_items.product_id) THEN NULL ELSE ?2 END
+             WHERE id = ?1 AND sent_at IS NULL AND parent_id IS NULL AND is_set = 0",
+            params![item_id, team_id],
+        )?;
+        if n == 0 {
+            return invalid("only a dish not yet sent to the kitchen can change team");
         }
         self.get_order(s, order_id)
     }

@@ -405,13 +405,13 @@ fn drinks_and_a_team_can_go_to_other_printers() {
     k.pos.set_drink(&k.s, k.cola.id, true).unwrap();
     let curry = k.teams.iter().find(|t| t.name == "Curry").unwrap().id;
     // No name: refused.
-    let bad = KitchenRoute { label: " ".into(), target: file(&bar), width: 42, copies: 1, team_ids: vec![], drinks: true, desserts: false, image_mode: Default::default() };
+    let bad = KitchenRoute { label: " ".into(), target: file(&bar), width: 42, copies: 1, team_ids: vec![], drinks: true, desserts: false, image_mode: Default::default(), slow_send: false };
     assert!(k.pos.set_kitchen_routes(&k.s, &[bad]).is_err());
     k.pos
-        .set_kitchen_routes(&k.s, &[KitchenRoute { label: "Bar".into(), target: file(&bar), width: 42, copies: 1, team_ids: vec![curry], drinks: true, desserts: false, image_mode: Default::default() }])
+        .set_kitchen_routes(&k.s, &[KitchenRoute { label: "Bar".into(), target: file(&bar), width: 42, copies: 1, team_ids: vec![curry], drinks: true, desserts: false, image_mode: Default::default(), slow_send: false }])
         .unwrap();
     // Saved as JSON with the Windows printer's own name beside the label.
-    let win = KitchenRoute { label: "Bar".into(), target: PrinterTarget::Windows { name: "EPSON".into() }, width: 42, copies: 1, team_ids: vec![], drinks: true, desserts: false, image_mode: Default::default() };
+    let win = KitchenRoute { label: "Bar".into(), target: PrinterTarget::Windows { name: "EPSON".into() }, width: 42, copies: 1, team_ids: vec![], drinks: true, desserts: false, image_mode: Default::default(), slow_send: false };
     let back: KitchenRoute = serde_json::from_str(&serde_json::to_string(&win).unwrap()).unwrap();
     assert_eq!(back, win);
     let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();

@@ -17,6 +17,9 @@ use tauri_plugin_updater::UpdaterExt;
 use commands::{backup_path, dispatch, newest_regular_backup, prune_backups, require_updates, unique_backup_path, App, LOCAL};
 
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// On closing or restarting, tickets still going out to a printer get this
+/// long to finish (a picture cut off half way prints the next job as junk).
+const PRINTS_FINISH: Duration = Duration::from_secs(15);
 
 type Cmd<'a> = State<'a, App>;
 
@@ -187,6 +190,7 @@ async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
         .map_err(update_error)?
         .ok_or_else(|| PosError::Validation("already up to date".into()))?;
     update.download_and_install(|_, _| {}, || {}).await.map_err(update_error)?;
+    pos_core::wait_for_prints(PRINTS_FINISH);
     handle.restart()
 }
 
@@ -209,6 +213,8 @@ fn main() {
             let data_dir = app.path().app_data_dir()?;
             let backup_dir = data_dir.join("backups");
             std::fs::create_dir_all(&backup_dir)?;
+            // Prints that fail after the till was told they were sent.
+            pos_core::set_print_error_log(Some(data_dir.join("print-errors.log")));
             let pos = Pos::open(data_dir.join("pos.db"))?;
             auto_backup(&pos, &backup_dir);
             let server = pos.server_settings()?;
@@ -242,7 +248,11 @@ fn main() {
         .expect("failed to start POS");
 
     app.run(|handle, event| {
+        if let RunEvent::ExitRequested { .. } = event {
+            pos_core::wait_for_prints(PRINTS_FINISH);
+        }
         if let RunEvent::Exit = event {
+            pos_core::wait_for_prints(PRINTS_FINISH);
             if let Some(srv) = handle.try_state::<ServerState>() {
                 if let Some(s) = srv.running.lock().unwrap_or_else(|e| e.into_inner()).take() {
                     s.stop();

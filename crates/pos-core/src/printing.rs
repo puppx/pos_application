@@ -6,9 +6,13 @@
 //! [`PrintJob`] while holding the database, release it, then call
 //! [`PrintJob::send`], so a slow or offline printer never blocks the till.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -84,6 +88,15 @@ pub struct PrinterConfig {
     /// bars). Saved settings without it print as before (standard raster).
     #[serde(default)]
     pub image_mode: ImageMode,
+    /// Send slowly: network and serial/shared printers get each job in
+    /// pieces of [`SLOW_CHUNK`] bytes, [`SLOW_PAUSE`] apart (about 20 KB a
+    /// second), so a cheap printer whose buffer overflows on a fast burst
+    /// does not lose bytes and print junk. On by default, also for settings
+    /// saved before it existed; the till does not wait for it (see
+    /// [`PrintJob::send_in_background`]). Printers installed in Windows are
+    /// never paced: the spooler and USB already pace the data.
+    #[serde(default = "yes")]
+    pub slow_send: bool,
 }
 
 fn yes() -> bool {
@@ -116,6 +129,9 @@ pub struct KitchenRoute {
     /// This printer's own way of printing images (see [`PrinterConfig`]).
     #[serde(default)]
     pub image_mode: ImageMode,
+    /// Send slowly (see [`PrinterConfig::slow_send`]); on by default.
+    #[serde(default = "yes")]
+    pub slow_send: bool,
 }
 
 /// Language of item names on a printout. Items without a Thai name always
@@ -178,6 +194,7 @@ impl Default for PrinterConfig {
             app_font: true,
             call_table_only: true,
             image_mode: ImageMode::Raster,
+            slow_send: true,
         }
     }
 }
@@ -214,11 +231,46 @@ pub struct PrintJob {
     /// The same print for other printers (kitchen tickets routed to a bar or
     /// dessert printer). Each is sent even if another one fails.
     pub more: Vec<PrintJob>,
+    /// Sent slowly, in paced pieces ([`PrinterConfig::slow_send`]).
+    pub slow: bool,
+    /// Goes ahead of the paced jobs still waiting for this printer (the cash
+    /// drawer), never into the middle of one being sent.
+    pub urgent: bool,
+    /// What it is, for a failure message: "Kitchen ticket #94".
+    pub what: String,
 }
 
 impl PrintJob {
     pub fn new(target: PrinterTarget, bytes: Vec<u8>) -> PrintJob {
-        PrintJob { target, parts: vec![bytes], gap: Duration::ZERO, more: Vec::new() }
+        PrintJob { target, parts: vec![bytes], gap: Duration::ZERO, more: Vec::new(), slow: false, urgent: false, what: String::new() }
+    }
+
+    /// This job sent slowly or not (the printer's "Send slowly" setting).
+    pub fn paced(mut self, slow: bool) -> PrintJob {
+        self.slow = slow;
+        self
+    }
+
+    /// Ahead of the jobs waiting for this printer (see [`PrintJob::urgent`]).
+    pub fn urgent(mut self) -> PrintJob {
+        self.urgent = true;
+        self
+    }
+
+    /// Named for failure messages (see [`PrintJob::what`]); the other
+    /// printers' parts too.
+    pub fn about(mut self, what: impl Into<String>) -> PrintJob {
+        self.what = what.into();
+        for m in &mut self.more {
+            m.what = self.what.clone();
+        }
+        self
+    }
+
+    /// True when this job's data goes out in paced pieces: "Send slowly" on,
+    /// to a network printer or a port / shared path.
+    pub fn is_paced(&self) -> bool {
+        self.slow && matches!(self.target, PrinterTarget::Network { .. } | PrinterTarget::File { .. })
     }
 
     /// `copies` of `doc`, the first one preceded by `lead` (e.g. the drawer pulse).
@@ -227,7 +279,7 @@ impl PrintJob {
         first.extend_from_slice(&doc);
         let mut parts = vec![first];
         parts.extend(std::iter::repeat_n(doc, usize::from(copies.max(1)) - 1));
-        PrintJob { target, parts, gap: Duration::from_secs(delay_secs.into()), more: Vec::new() }
+        PrintJob { target, parts, gap: Duration::from_secs(delay_secs.into()), more: Vec::new(), slow: false, urgent: false, what: String::new() }
     }
 
     /// Everything the printers receive, in order (this printer, then the others).
@@ -248,12 +300,17 @@ impl PrintJob {
     }
 
     /// Send every part, waiting `gap` between them, then the other printers.
+    /// Waits for all of it, paced pieces included.
     pub fn send(&self) -> Result<()> {
         for (i, part) in self.parts.iter().enumerate() {
             if i > 0 {
                 std::thread::sleep(self.gap);
             }
-            send_bytes(&self.target, part)?;
+            if self.is_paced() {
+                send_paced(&self.target, part, self.urgent && i == 0)?;
+            } else {
+                send_bytes(&self.target, part)?;
+            }
         }
         for m in &self.more {
             m.send()?;
@@ -264,6 +321,15 @@ impl PrintJob {
     /// Send the first copy now (its result is returned) and any further
     /// copies on a background thread, so the till does not wait out the delay.
     /// Every printer is tried; their errors are reported together.
+    ///
+    /// A paced job ([`PrintJob::is_paced`]) only connects now, so an
+    /// unreachable printer is still reported at once; its bytes then go out
+    /// on a background thread, piece by piece. Jobs for one printer take
+    /// turns (one connection at a time, in the order sent). When the printer
+    /// is still busy with an earlier paced job, this one waits its turn on
+    /// the background thread and the till does not wait at all. Callers send
+    /// after releasing the database (see the module notes), so nothing here
+    /// holds up other terminals.
     pub fn send_in_background(mut self) -> Result<()> {
         let more = std::mem::take(&mut self.more);
         let mut errors: Vec<String> = Vec::new();
@@ -283,23 +349,411 @@ impl PrintJob {
     }
 
     fn send_one(self) -> Result<()> {
+        if self.is_paced() {
+            return self.send_one_paced();
+        }
         let mut parts = self.parts.into_iter();
         if let Some(first) = parts.next() {
             send_bytes(&self.target, &first)?;
         }
         let rest: Vec<Vec<u8>> = parts.collect();
         if !rest.is_empty() {
-            let (target, gap) = (self.target, self.gap);
+            let (target, gap, what) = (self.target, self.gap, self.what);
+            let sending = SENDING.start();
             std::thread::spawn(move || {
+                let _sending = sending;
                 for part in rest {
                     std::thread::sleep(gap);
-                    if send_bytes(&target, &part).is_err() {
+                    if let Err(e) = send_bytes(&target, &part) {
+                        record_failure(&what, &target, &e.to_string());
                         break;
                     }
                 }
             });
         }
         Ok(())
+    }
+
+    /// [`PrintJob::send_one`] for a paced job.
+    fn send_one_paced(self) -> Result<()> {
+        let PrintJob { target, parts, gap, urgent, what, .. } = self;
+        // Free now: connect here, so the error (if any) reaches the till.
+        // Busy: take a place in the printer's line now (so jobs keep the
+        // order they were sent in) and wait for it on the thread.
+        let place = match Turn::try_take(&target) {
+            Some(turn) => Place::Now(turn, open(&target)?),
+            None => Place::Queued(Ticket::new(&target, urgent)),
+        };
+        // Counted until the last byte is out: closing the app waits for it.
+        let sending = SENDING.start();
+        std::thread::spawn(move || {
+            let _sending = sending;
+            let mut parts = parts.into_iter();
+            let Some(first) = parts.next() else { return };
+            let (turn, conn) = match place {
+                Place::Now(turn, conn) => (turn, Ok(conn)),
+                Place::Queued(ticket) => {
+                    let turn = ticket.wait();
+                    let conn = open(&target);
+                    (turn, conn)
+                }
+            };
+            let mut result = conn.and_then(|mut c| write_paced(&mut c, &first, SLOW_CHUNK, SLOW_PAUSE).map_err(|e| PosError::Printer(e.to_string())));
+            drop(turn);
+            for part in parts {
+                if result.is_err() {
+                    break;
+                }
+                std::thread::sleep(gap);
+                result = send_paced(&target, &part, false);
+            }
+            if let Err(e) = result {
+                record_failure(&what, &target, &e.to_string());
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Bytes a slow printer ([`PrinterConfig::slow_send`]) is sent at a time.
+pub const SLOW_CHUNK: usize = 1024;
+/// Pause after each piece: 1 KB per 50 ms is about 20 KB a second, some 40 mm
+/// of picture a second on 80 mm paper (504 dots = 63 bytes a row, 8 rows a
+/// mm), slower than even a cheap printer prints, so its buffer never fills.
+pub const SLOW_PAUSE: Duration = Duration::from_millis(50);
+
+/// Write `bytes` in order, at most `chunk` at a time, waiting `pause` between
+/// pieces (none after the last). The printer gets exactly `bytes`.
+pub fn write_paced(w: &mut impl Write, bytes: &[u8], chunk: usize, pause: Duration) -> std::io::Result<()> {
+    for (i, piece) in bytes.chunks(chunk.max(1)).enumerate() {
+        if i > 0 {
+            std::thread::sleep(pause);
+        }
+        w.write_all(piece)?;
+        w.flush()?;
+    }
+    Ok(())
+}
+
+/// How long the whole of `len` bytes takes to send slowly (the pauses).
+pub fn paced_duration(len: usize) -> Duration {
+    SLOW_PAUSE * u32::try_from(len.div_ceil(SLOW_CHUNK).saturating_sub(1)).unwrap_or(u32::MAX)
+}
+
+/// An open connection to a network printer, or an open port / shared path.
+enum Conn {
+    Tcp(TcpStream),
+    File(std::fs::File),
+}
+
+impl Write for Conn {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Tcp(s) => s.write(buf),
+            Conn::File(f) => f.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Conn::Tcp(s) => s.flush(),
+            Conn::File(f) => f.flush(),
+        }
+    }
+}
+
+fn connect(host: &str, port: u16) -> Result<TcpStream> {
+    let fail = PosError::Printer;
+    let addr = (host.trim(), port)
+        .to_socket_addrs()
+        .map_err(|e| fail(e.to_string()))?
+        .next()
+        .ok_or_else(|| fail(format!("cannot resolve {host}")))?;
+    let s = TcpStream::connect_timeout(&addr, NET_TIMEOUT).map_err(|e| fail(format!("cannot reach {host}:{port} ({e})")))?;
+    s.set_write_timeout(Some(NET_TIMEOUT)).map_err(|e| fail(e.to_string()))?;
+    Ok(s)
+}
+
+fn open_file(path: &str) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new().create(true).append(true).open(path.trim()).map_err(|e| PosError::Printer(format!("{path}: {e}")))
+}
+
+/// Open a paced printer (network, or port / path).
+fn open(target: &PrinterTarget) -> Result<Conn> {
+    match target {
+        PrinterTarget::Network { host, port } => {
+            let s = connect(host, *port)?;
+            // Each piece leaves at once, not held back to join the next.
+            let _ = s.set_nodelay(true);
+            Ok(Conn::Tcp(s))
+        }
+        PrinterTarget::File { path } => Ok(Conn::File(open_file(path)?)),
+        _ => Err(PosError::Printer("this printer is not sent slowly".into())),
+    }
+}
+
+/// Send one part slowly: wait for the printer's turn (ahead of the others
+/// waiting when `urgent`), connect, write it in paced pieces, close.
+fn send_paced(target: &PrinterTarget, bytes: &[u8], urgent: bool) -> Result<()> {
+    let _turn = Ticket::new(target, urgent).wait();
+    let mut conn = open(target)?;
+    write_paced(&mut conn, bytes, SLOW_CHUNK, SLOW_PAUSE).map_err(|e| PosError::Printer(e.to_string()))
+}
+
+/// Where a paced job stands when the till hands it over: sending now (the
+/// printer was free and is connected), or waiting in the printer's line.
+enum Place {
+    Now(Turn, Conn),
+    Queued(Ticket),
+}
+
+/// Background sends still running. [`wait_for_prints`] lets the app finish
+/// them before it closes or restarts for an update: a picture cut off half
+/// way makes the printer print the next job as junk.
+pub struct InFlight {
+    count: Mutex<usize>,
+    idle: Condvar,
+}
+
+/// One send counted by [`InFlight::start`]; dropping it ends it.
+pub struct Sending<'a>(&'a InFlight);
+
+impl InFlight {
+    pub const fn new() -> InFlight {
+        InFlight { count: Mutex::new(0), idle: Condvar::new() }
+    }
+
+    pub fn start(&self) -> Sending<'_> {
+        *self.count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        Sending(self)
+    }
+
+    /// Sends still running.
+    pub fn running(&self) -> usize {
+        *self.count.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Wait until none is running, at most `limit`. True when all finished.
+    pub fn wait(&self, limit: Duration) -> bool {
+        let end = Instant::now() + limit;
+        let mut n = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        while *n > 0 {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            n = self.idle.wait_timeout(n, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
+    }
+}
+
+impl Default for InFlight {
+    fn default() -> Self {
+        InFlight::new()
+    }
+}
+
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        let mut n = self.0.count.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            self.0.idle.notify_all();
+        }
+    }
+}
+
+static SENDING: InFlight = InFlight::new();
+
+/// Before the app closes or restarts: let prints still going out finish,
+/// waiting at most `limit`. True when none is left.
+pub fn wait_for_prints(limit: Duration) -> bool {
+    SENDING.wait(limit)
+}
+
+/// A print that failed after the till was told it was sent (a paced job, or
+/// a later copy): shown on the tills and written to the print error log.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PrintFailure {
+    /// Increasing number: ask for those after the last one seen.
+    pub id: u64,
+    /// Unix seconds.
+    pub at: i64,
+    pub message: String,
+}
+
+const MAX_FAILURES: usize = 20;
+/// The print error log is started afresh (the old one kept as `.old`) past this size.
+const MAX_LOG_BYTES: u64 = 256 * 1024;
+
+static FAILURE_ID: AtomicU64 = AtomicU64::new(0);
+
+fn failures() -> &'static Mutex<VecDeque<PrintFailure>> {
+    static LIST: OnceLock<Mutex<VecDeque<PrintFailure>>> = OnceLock::new();
+    LIST.get_or_init(Default::default)
+}
+
+fn error_log() -> &'static Mutex<Option<PathBuf>> {
+    static LOG: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    LOG.get_or_init(Default::default)
+}
+
+/// Where print failures are written (the app sets `print-errors.log` in its
+/// data folder; none = not written).
+pub fn set_print_error_log(path: Option<PathBuf>) {
+    *error_log().lock().unwrap_or_else(|e| e.into_inner()) = path;
+}
+
+fn printer_name(t: &PrinterTarget) -> String {
+    match t {
+        PrinterTarget::None => "no printer".into(),
+        PrinterTarget::Network { host, port } => format!("the printer at {}:{port}", host.trim()),
+        PrinterTarget::Windows { name } => format!("printer {name}"),
+        PrinterTarget::File { path } => format!("printer {}", path.trim()),
+    }
+}
+
+/// Remember a failure for the tills and append it to the print error log.
+fn record_failure(what: &str, target: &PrinterTarget, error: &str) {
+    let what = if what.is_empty() { "A print" } else { what };
+    let message = format!("{what} did not finish printing on {} ({error}): print it again", printer_name(target));
+    let now = chrono::Local::now();
+    {
+        let mut list = failures().lock().unwrap_or_else(|e| e.into_inner());
+        list.push_back(PrintFailure { id: FAILURE_ID.fetch_add(1, Ordering::SeqCst) + 1, at: now.timestamp(), message: message.clone() });
+        while list.len() > MAX_FAILURES {
+            list.pop_front();
+        }
+    }
+    eprintln!("printer: {message}");
+    let path = error_log().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(path) = path {
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+            let _ = std::fs::rename(&path, path.with_extension("old.log"));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{}  {message}", now.format("%Y-%m-%d %H:%M:%S"));
+        }
+    }
+}
+
+/// What a till's poll for print failures gets.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PrintFailures {
+    pub failures: Vec<PrintFailure>,
+    /// The newest failure's number (0 = none yet): ask for those after it next.
+    pub last: u64,
+}
+
+/// Print failures after number `after`; with none, those of the last two
+/// minutes (a till that just started or logged in).
+pub fn print_failures(after: Option<u64>) -> PrintFailures {
+    let since = chrono::Local::now().timestamp() - 120;
+    let list = failures().lock().unwrap_or_else(|e| e.into_inner());
+    let failures = list.iter().filter(|f| after.map_or(f.at >= since, |a| f.id > a)).cloned().collect();
+    PrintFailures { failures, last: list.back().map_or(0, |f| f.id) }
+}
+
+/// One printer's line: whether a job is sending now, and the jobs waiting,
+/// in the order they go (an urgent one is put at the front).
+#[derive(Default)]
+struct Gate {
+    state: Mutex<GateState>,
+    turn: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    busy: bool,
+    waiting: VecDeque<u64>,
+    next: u64,
+}
+
+fn gate(target: &PrinterTarget) -> Arc<Gate> {
+    static GATES: OnceLock<Mutex<HashMap<String, Arc<Gate>>>> = OnceLock::new();
+    let key = match target {
+        PrinterTarget::Network { host, port } => format!("net {}:{port}", host.trim().to_lowercase()),
+        PrinterTarget::File { path } => format!("file {}", path.trim().to_lowercase()),
+        PrinterTarget::Windows { name } => format!("win {name}"),
+        PrinterTarget::None => String::new(),
+    };
+    let mut gates = GATES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    gates.entry(key).or_default().clone()
+}
+
+/// Holding a [`Turn`] = sending to that printer now; dropping it lets the
+/// next job go. Paced jobs to one printer go one at a time, in order, so a
+/// printer that takes one connection at a time never sees two.
+struct Turn(Arc<Gate>);
+
+impl Turn {
+    /// The turn if nobody is sending to (or waiting for) this printer.
+    fn try_take(target: &PrinterTarget) -> Option<Turn> {
+        let gate = gate(target);
+        let mut st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.busy || !st.waiting.is_empty() {
+            return None;
+        }
+        st.busy = true;
+        drop(st);
+        Some(Turn(gate))
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.busy = false;
+        self.0.turn.notify_all();
+    }
+}
+
+/// A place in a printer's line, taken when the job is handed over (so jobs
+/// keep their order whichever thread runs first); [`Ticket::wait`] turns it
+/// into the [`Turn`]. Urgent: at the front of the line, after the job
+/// sending now.
+struct Ticket {
+    gate: Arc<Gate>,
+    mine: u64,
+    done: bool,
+}
+
+impl Ticket {
+    fn new(target: &PrinterTarget, urgent: bool) -> Ticket {
+        let gate = gate(target);
+        let mut st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = st.next;
+        st.next += 1;
+        if urgent {
+            st.waiting.push_front(mine);
+        } else {
+            st.waiting.push_back(mine);
+        }
+        drop(st);
+        Ticket { gate, mine, done: false }
+    }
+
+    fn wait(mut self) -> Turn {
+        let mut st = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        while st.busy || st.waiting.front() != Some(&self.mine) {
+            st = self.gate.turn.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        st.waiting.pop_front();
+        st.busy = true;
+        drop(st);
+        self.done = true;
+        Turn(self.gate.clone())
+    }
+}
+
+impl Drop for Ticket {
+    /// A place never used: leave the line so the jobs behind still go.
+    fn drop(&mut self) {
+        if !self.done {
+            let mut st = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.waiting.retain(|&t| t != self.mine);
+            self.gate.turn.notify_all();
+        }
     }
 }
 
@@ -308,24 +762,10 @@ fn send_bytes(target: &PrinterTarget, bytes: &[u8]) -> Result<()> {
     match target {
         PrinterTarget::None => Ok(()),
         PrinterTarget::Network { host, port } => {
-            let addr = (host.trim(), *port)
-                .to_socket_addrs()
-                .map_err(|e| fail(e.to_string()))?
-                .next()
-                .ok_or_else(|| fail(format!("cannot resolve {host}")))?;
-            let mut s = TcpStream::connect_timeout(&addr, NET_TIMEOUT)
-                .map_err(|e| fail(format!("cannot reach {host}:{port} ({e})")))?;
-            s.set_write_timeout(Some(NET_TIMEOUT)).map_err(|e| fail(e.to_string()))?;
+            let mut s = connect(host, *port)?;
             s.write_all(bytes).and_then(|_| s.flush()).map_err(|e| fail(e.to_string()))
         }
-        PrinterTarget::File { path } => {
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path.trim())
-                .map_err(|e| fail(format!("{path}: {e}")))?;
-            f.write_all(bytes).map_err(|e| fail(e.to_string()))
-        }
+        PrinterTarget::File { path } => open_file(path)?.write_all(bytes).map_err(|e| fail(e.to_string())),
         PrinterTarget::Windows { name } => windows_spool::print_raw(name, bytes).map_err(fail),
     }
 }
@@ -903,6 +1343,7 @@ impl Pos {
             prep_copies: None,
             additional_copies: Some(r.copies),
             image_mode: r.image_mode,
+            slow_send: r.slow_send,
             ..self.kitchen_printer()?
         })
     }
@@ -922,8 +1363,10 @@ impl Pos {
         let mut groups: Vec<Vec<OrderItem>> = vec![Vec::new(); routes.len() + 1];
         let mut stmt = self.conn.prepare_cached("SELECT drink, dessert, team_id FROM products WHERE id = ?1")?;
         for it in items {
-            let (drink, dessert, team): (bool, bool, Option<i64>) =
+            let (drink, dessert, menu_team): (bool, bool, Option<i64>) =
                 stmt.query_row([it.product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?.unwrap_or((false, false, None));
+            // A dish moved to another team on the order goes to that team's printer.
+            let team = it.team_id.or(menu_team);
             let slot = routes
                 .iter()
                 .position(|r| (drink && r.drinks) || (dessert && r.desserts))
@@ -1159,7 +1602,8 @@ impl Pos {
 
     /// `items` split by the team that cooks them, in team order; items with
     /// no team come last. Each group is (the team's header, its items).
-    /// The team is looked up now, so a menu change applies to orders already open.
+    /// The team is the one the dish was moved to on the order, else its menu
+    /// item's, looked up now, so a menu change applies to orders already open.
     fn team_groups(&self, items: &[OrderItem]) -> Result<Vec<(Option<String>, Vec<OrderItem>)>> {
         // Settings → Kitchen teams can switch teams off altogether.
         if self.setting("teams_on")?.as_deref() == Some("0") {
@@ -1177,7 +1621,10 @@ impl Pos {
         groups.push((None, Vec::new()));
         let general = groups.len() - 1;
         for it in items {
-            let team: Option<i64> = stmt.query_row([it.product_id], |r| r.get(0)).optional()?.flatten();
+            let team: Option<i64> = match it.team_id {
+                Some(t) => Some(t),
+                None => stmt.query_row([it.product_id], |r| r.get(0)).optional()?.flatten(),
+            };
             let slot = team.and_then(|id| teams.iter().position(|t| t.id == id)).unwrap_or(general);
             groups[slot].1.push(it.clone());
         }
@@ -1212,9 +1659,9 @@ impl Pos {
             base.title = title.to_string();
             base.footer = None;
             let tickets = self.split_for_kitchen(base, &group)?;
-            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs));
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs).paced(cfg.slow_send));
         }
-        Ok(PrintJob::join(jobs))
+        Ok(PrintJob::join(jobs).map(|j| j.about(format!("{title} ticket #{order_id}"))))
     }
 
     /// [`Pos::update_item`], with what the kitchen must be told about a dish
@@ -1484,9 +1931,9 @@ impl Pos {
             } else {
                 cfg.copies
             };
-            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs));
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send));
         }
-        Ok(PrintJob::join(jobs))
+        Ok(PrintJob::join(jobs).map(|j| j.about(format!("Kitchen ticket #{order_id}"))))
     }
 
     /// PREPARE NOW ticket for prepare-ahead dishes that wait for the mains
@@ -1501,9 +1948,9 @@ impl Pos {
             let names = cfg.names.unwrap_or(PrintNames::Both);
             let tickets = self.split_by_team(base, &group, names)?;
             let copies = cfg.prep_copies.unwrap_or(cfg.copies);
-            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs));
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send));
         }
-        Ok(PrintJob::join(jobs))
+        Ok(PrintJob::join(jobs).map(|j| j.about(format!("PREPARE NOW ticket #{order_id}"))))
     }
 
     /// The PREPARE NOW ticket: like a kitchen ticket, saying the dishes are
@@ -1535,7 +1982,7 @@ impl Pos {
             }
             jobs.push(self.main_course_part(&o, &cfg, &mains)?);
         }
-        Ok(PrintJob::join(jobs))
+        Ok(PrintJob::join(jobs).map(|j| j.about(format!("Main course call #{order_id}"))))
     }
 
     /// One printer's part of the main course call.
@@ -1560,7 +2007,7 @@ impl Pos {
             self.split_by_team(base, mains, names)?
         };
         let copies = cfg.mains_copies.unwrap_or(cfg.copies);
-        Ok(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, cfg), copies, cfg.copy_delay_secs))
+        Ok(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send))
     }
 
     fn main_course_ticket(&self, o: &Order, mains: &[OrderItem]) -> Result<KitchenTicket> {
@@ -1640,7 +2087,7 @@ impl Pos {
                 }
             })
             .collect();
-        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs)))
+        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs).paced(cfg.slow_send).about("Sample team tickets")))
     }
 
     /// A sample ticket to check a printer configuration before saving it.
@@ -1686,7 +2133,7 @@ impl Pos {
             banner: None,
             by_course: false,
         };
-        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.escpos_for(cfg), cfg.copies, cfg.copy_delay_secs))
+        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.escpos_for(cfg), cfg.copies, cfg.copy_delay_secs).paced(cfg.slow_send).about("Test ticket"))
     }
 
     /// "Test Thai printing": one short page with the Thai sample in every
@@ -1694,7 +2141,7 @@ impl Pos {
     pub fn thai_test_job(&self, s: &Session, cfg: &PrinterConfig) -> Result<PrintJob> {
         s.require(Permission::ManageSettings)?;
         cfg.validate()?;
-        Ok(PrintJob::new(cfg.target.clone(), thai_test_page(cfg.width)))
+        Ok(PrintJob::new(cfg.target.clone(), thai_test_page(cfg.width)).paced(cfg.slow_send).about("Thai test page"))
     }
 }
 
@@ -1960,6 +2407,224 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, vec![1]);
         assert!(job.send().is_err());
+    }
+
+    /// Records every write separately.
+    #[derive(Default)]
+    struct Pieces(Vec<Vec<u8>>);
+
+    impl Write for Pieces {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.push(buf.to_vec());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn slow_sending_writes_the_same_bytes_in_order_in_small_pieces() {
+        let job = ticket().to_escpos_font(42, true, true);
+        assert!(job.len() > 4 * SLOW_CHUNK, "a ticket in the app's font is tens of KB: {}", job.len());
+        for chunk in [1, 7, 512, SLOW_CHUNK, job.len(), job.len() + 1] {
+            let mut w = Pieces::default();
+            write_paced(&mut w, &job, chunk, Duration::ZERO).unwrap();
+            assert_eq!(w.0.concat(), job, "chunk {chunk}");
+            assert_eq!(w.0.len(), job.len().div_ceil(chunk));
+            assert!(w.0.iter().all(|p| !p.is_empty() && p.len() <= chunk));
+        }
+        // A pause between pieces, none after the last.
+        let started = std::time::Instant::now();
+        write_paced(&mut Pieces::default(), &[0; 3000], 1000, Duration::from_millis(40)).unwrap();
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(80) && took < Duration::from_millis(500), "{took:?}");
+        assert_eq!(paced_duration(0), Duration::ZERO);
+        assert_eq!(paced_duration(SLOW_CHUNK), Duration::ZERO);
+        assert_eq!(paced_duration(30 * SLOW_CHUNK + 1), SLOW_PAUSE * 30);
+    }
+
+    /// One connection's bytes, and whether another came in while it was open.
+    type Received = (Vec<u8>, bool);
+
+    /// A network printer on 127.0.0.1, one connection at a time. Returns its port and
+    /// a thread giving, per connection, the bytes and whether another
+    /// connection came in while this one was open.
+    fn slow_printer(connections: usize) -> (u16, std::thread::JoinHandle<Vec<Received>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut waiting: Option<TcpStream> = None;
+            for _ in 0..connections {
+                let mut s = match waiting.take() {
+                    Some(s) => s,
+                    None => listener.accept().unwrap().0,
+                };
+                listener.set_nonblocking(true).unwrap();
+                s.set_nonblocking(false).unwrap();
+                s.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+                let (mut buf, mut overlap) = (Vec::new(), false);
+                let mut piece = [0u8; 256];
+                loop {
+                    match std::io::Read::read(&mut s, &mut piece) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&piece[..n]),
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                        Err(e) => panic!("{e}"),
+                    }
+                    if waiting.is_none() {
+                        if let Ok((next, _)) = listener.accept() {
+                            overlap = true;
+                            waiting = Some(next);
+                        }
+                    }
+                }
+                listener.set_nonblocking(false).unwrap();
+                out.push((buf, overlap));
+            }
+            out
+        });
+        (port, reader)
+    }
+
+    #[test]
+    fn slow_network_printer_gets_the_job_in_paced_pieces_without_the_till_waiting() {
+        let (port, reader) = slow_printer(2);
+        let target = PrinterTarget::Network { host: "127.0.0.1".into(), port };
+        let a = PrintJob::new(target.clone(), ticket().to_escpos_font(42, true, true)).paced(true);
+        let b = PrintJob::new(target, b"second job".to_vec()).paced(true);
+        assert!(a.is_paced() && a.bytes().len() > 8 * SLOW_CHUNK);
+        let started = std::time::Instant::now();
+        a.clone().send_in_background().unwrap();
+        // The printer is busy with `a`: `b` queues behind it, no waiting here either.
+        b.clone().send_in_background().unwrap();
+        let returned = started.elapsed();
+        assert!(returned < Duration::from_millis(200), "the till waited {returned:?}");
+        let got = reader.join().unwrap();
+        let took = started.elapsed();
+        assert!(took >= paced_duration(a.bytes().len()), "paced: {took:?}");
+        // The exact bytes, in order, one connection at a time.
+        assert_eq!(got, vec![(a.bytes(), false), (b.bytes(), false)]);
+    }
+
+    #[test]
+    fn jobs_keep_their_place_in_line_and_the_drawer_goes_first() {
+        let (port, reader) = slow_printer(4);
+        let target = PrinterTarget::Network { host: "127.0.0.1".into(), port };
+        let job = |b: &[u8]| PrintJob::new(target.clone(), b.to_vec()).paced(true);
+        // Busy: a job is sending (its turn held here).
+        let busy = Turn::try_take(&target).unwrap();
+        for b in [&b"kitchen A"[..], b"kitchen B"] {
+            job(b).send_in_background().unwrap();
+        }
+        // The drawer: ahead of A and B, which have not started.
+        job(b"drawer").urgent().send_in_background().unwrap();
+        // The threads have had time to run in any order: the line is fixed.
+        std::thread::sleep(Duration::from_millis(100));
+        drop(busy);
+        job(b"receipt").send_in_background().unwrap();
+        let got: Vec<Vec<u8>> = reader.join().unwrap().into_iter().map(|(b, overlap)| {
+            assert!(!overlap);
+            b
+        }).collect();
+        assert_eq!(got, [&b"drawer"[..], b"kitchen A", b"kitchen B", b"receipt"]);
+        assert!(wait_for_prints(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn waiting_for_prints_in_flight() {
+        let f = InFlight::new();
+        assert!(f.wait(Duration::ZERO), "nothing running");
+        let started = std::time::Instant::now();
+        std::thread::scope(|sc| {
+            let a = f.start();
+            let b = f.start();
+            assert_eq!(f.running(), 2);
+            sc.spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                drop(a);
+                std::thread::sleep(Duration::from_millis(100));
+                drop(b);
+            });
+            assert!(f.wait(Duration::from_secs(5)), "both finished");
+        });
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(f.running(), 0);
+        // One that never ends: give up after the limit.
+        let stuck = f.start();
+        let started = std::time::Instant::now();
+        assert!(!f.wait(Duration::from_millis(100)));
+        assert!(started.elapsed() >= Duration::from_millis(100) && started.elapsed() < Duration::from_secs(2));
+        drop(stuck);
+        assert!(f.wait(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_failure_after_connecting_is_logged_and_shown_on_the_tills() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("print-errors.log");
+        set_print_error_log(Some(log.clone()));
+        let before = print_failures(None).last;
+        // The printer takes the connection, reads a little, then goes away.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let printer = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut piece = [0u8; 100];
+            let _ = std::io::Read::read(&mut s, &mut piece);
+        });
+        let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, vec![0x41; 40 * SLOW_CHUNK]).paced(true).about("Kitchen ticket #94");
+        job.send_in_background().unwrap();
+        printer.join().unwrap();
+        assert!(wait_for_prints(Duration::from_secs(10)));
+        let seen = print_failures(Some(before));
+        let mine: Vec<&PrintFailure> = seen.failures.iter().filter(|f| f.message.contains("#94")).collect();
+        assert_eq!(mine.len(), 1, "{seen:?}");
+        assert!(mine[0].message.starts_with(&format!("Kitchen ticket #94 did not finish printing on the printer at 127.0.0.1:{port}")), "{}", mine[0].message);
+        assert!(seen.last >= mine[0].id);
+        // Asked again after the last one: nothing new.
+        assert!(print_failures(Some(seen.last)).failures.iter().all(|f| !f.message.contains("#94")));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.lines().any(|l| l.contains("Kitchen ticket #94 did not finish printing")), "{text}");
+        // Past the size limit the log starts afresh, the old one kept.
+        std::fs::write(&log, vec![b'x'; MAX_LOG_BYTES as usize + 1]).unwrap();
+        record_failure("Receipt #7", &PrinterTarget::File { path: "COM3".into() }, "gone");
+        assert!(std::fs::read_to_string(&log).unwrap().contains("Receipt #7 did not finish printing on printer COM3 (gone)"));
+        assert!(std::fs::metadata(dir.path().join("print-errors.old.log")).unwrap().len() > MAX_LOG_BYTES);
+        set_print_error_log(None);
+    }
+
+    #[test]
+    fn slow_printer_that_cannot_be_reached_is_still_reported_at_once() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, vec![1; 5000]).paced(true);
+        assert!(job.clone().send_in_background().is_err());
+        assert!(job.send().is_err());
+    }
+
+    #[test]
+    fn send_slowly_is_on_by_default_and_only_for_network_and_port_printers() {
+        // Saved before the setting: on (the cheap printers that need it are common).
+        let cfg: PrinterConfig = serde_json::from_str(r#"{"kind":"network","host":"192.168.1.50","port":9100,"width":42}"#).unwrap();
+        assert!(cfg.slow_send && PrinterConfig::default().slow_send);
+        let route: KitchenRoute = serde_json::from_str(r#"{"label":"Bar","kind":"network","host":"10.0.0.9","port":9100,"drinks":true}"#).unwrap();
+        assert!(route.slow_send);
+        let receipt: crate::ReceiptSettings = serde_json::from_str(r#"{"kind":"file","path":"COM3","auto_print":true}"#).unwrap();
+        assert!(receipt.printer.slow_send);
+        // Switched off: saved and read back.
+        let off = PrinterConfig { slow_send: false, ..cfg };
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains(r#""slow_send":false"#), "{json}");
+        assert!(!serde_json::from_str::<PrinterConfig>(&json).unwrap().slow_send);
+        // Paced: network and ports or shared paths; never Windows printers
+        // (the spooler and USB pace the data) or no printer.
+        let job = |t: PrinterTarget| PrintJob::new(t, vec![1]).paced(true);
+        assert!(job(PrinterTarget::Network { host: "h".into(), port: 9100 }).is_paced());
+        assert!(job(PrinterTarget::File { path: "COM3".into() }).is_paced());
+        assert!(!job(PrinterTarget::Windows { name: "EPSON".into() }).is_paced());
+        assert!(!job(PrinterTarget::None).is_paced());
+        assert!(!PrintJob::new(PrinterTarget::File { path: "COM3".into() }, vec![1]).is_paced());
     }
 
     #[test]

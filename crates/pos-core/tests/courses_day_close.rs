@@ -167,13 +167,18 @@ fn end_of_day_closes_summarises_and_moves_on() {
     pos.add_item(&s, o.id, m.cola.id, 2, None, None, &[]).unwrap();
     pos.pay_order(&s, o.id, PaymentMethod::Card, 0).unwrap();
 
-    // Staff can see the reports and close the day.
+    // Staff see the business day but not the reports, and cannot close it;
+    // a manager can.
     pos.create_user(&s, "Sam", Role::Staff, "2222").unwrap();
+    pos.create_user(&s, "Quinn", Role::Manager, "4646").unwrap();
     let staff = pos.login("2222").unwrap();
+    let manager = pos.login("4646").unwrap();
     assert_eq!(pos.business_day(&staff).unwrap().open_orders, 0);
-    assert_eq!(pos.sales_summary(&staff, day.since, day.since + 86_400 * 2).unwrap().order_count, 2);
+    assert!(matches!(pos.sales_summary(&staff, day.since, day.since + 86_400 * 2), Err(PosError::Forbidden)));
+    assert!(matches!(pos.close_day(&staff), Err(PosError::Forbidden)));
+    assert_eq!(pos.sales_summary(&manager, day.since, day.since + 86_400 * 2).unwrap().order_count, 2);
 
-    let close = pos.close_day(&staff).unwrap();
+    let close = pos.close_day(&manager).unwrap();
     let sum = &close.summary;
     assert_eq!((close.business_date.as_str(), sum.order_count, sum.total_cents), (day.date.as_str(), 2, 2500));
     let cats: Vec<(&str, i64, i64)> = sum.by_category.iter().map(|g| (g.key.as_str(), g.count, g.total_cents)).collect();

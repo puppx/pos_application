@@ -129,13 +129,13 @@ impl Pos {
 
     /// The shift running now, if any (with what should be in the drawer).
     pub fn current_shift(&self, s: &Session) -> Result<Option<Shift>> {
-        s.require(Permission::Sell)?;
+        s.require(Permission::ManageShift)?;
         self.open_shift_id()?.map(|id| self.load_shift(id)).transpose()
     }
 
     /// Start a shift with `float_cents` in the drawer.
     pub fn open_shift(&self, s: &Session, float_cents: i64) -> Result<Shift> {
-        s.require(Permission::Sell)?;
+        s.require(Permission::ManageShift)?;
         if !(0..=100_000_000).contains(&float_cents) {
             return invalid("enter the cash in the drawer");
         }
@@ -152,7 +152,7 @@ impl Pos {
     /// shift, e.g. more change, or paying a supplier. A reason is needed to
     /// take money out.
     pub fn cash_move(&self, s: &Session, kind: &str, amount_cents: i64, reason: &str) -> Result<Shift> {
-        s.require(Permission::Sell)?;
+        s.require(Permission::ManageShift)?;
         let id = self.open_shift_id()?.ok_or_else(|| PosError::Validation("open a shift first".into()))?;
         if kind != "in" && kind != "out" {
             return invalid("choose money in or money out");
@@ -175,7 +175,7 @@ impl Pos {
     /// End the shift: the cash counted in the drawer is kept with what was
     /// expected, so the difference shows in Reports and on the printout.
     pub fn close_shift(&self, s: &Session, counted_cents: i64, note: &str) -> Result<Shift> {
-        s.require(Permission::ViewReports)?;
+        s.require(Permission::ManageShift)?;
         let id = self.open_shift_id()?.ok_or_else(|| PosError::Validation("no shift is open".into()))?;
         if !(0..=100_000_000).contains(&counted_cents) {
             return invalid("enter the cash counted in the drawer");
@@ -192,7 +192,7 @@ impl Pos {
 
     /// Past shifts, newest first.
     pub fn list_shifts(&self, s: &Session, limit: i64) -> Result<Vec<Shift>> {
-        s.require(Permission::ViewReports)?;
+        s.require(Permission::ManageShift)?;
         let ids: Vec<i64> = self
             .conn
             .prepare_cached("SELECT id FROM shifts ORDER BY id DESC LIMIT ?1")?
@@ -263,7 +263,7 @@ impl Pos {
 
     /// The shift report on the receipt printer, or None if there is none.
     pub fn shift_job(&self, s: &Session, sh: &Shift) -> Result<Option<PrintJob>> {
-        s.require(Permission::Sell)?;
+        s.require(Permission::ManageShift)?;
         let cfg = self.receipt_settings()?;
         if cfg.printer.target == PrinterTarget::None {
             return Ok(None);

@@ -14,7 +14,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_updater::UpdaterExt;
 
-use commands::{backup_path, dispatch, newest_regular_backup, prune_backups, unique_backup_path, App, LOCAL};
+use commands::{backup_path, dispatch, newest_regular_backup, prune_backups, require_updates, unique_backup_path, App, LOCAL};
 
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -155,10 +155,11 @@ fn update_error(e: tauri_plugin_updater::Error) -> PosError {
     PosError::Internal(format!("update failed: {e}"))
 }
 
-/// Ask GitHub Releases whether a newer, correctly signed version exists.
+/// Ask GitHub Releases whether a newer, correctly signed version exists
+/// (admins only; for anyone else the UI shows nothing about updates).
 #[tauri::command]
 async fn check_update(app: Cmd<'_>, handle: AppHandle) -> Result<UpdateInfo> {
-    app.with_session(LOCAL, |_, _| Ok(()))?;
+    require_updates(&app, LOCAL)?;
     let update = handle.updater().map_err(update_error)?.check().await.map_err(update_error)?;
     Ok(UpdateInfo {
         current: handle.package_info().version.to_string(),
@@ -170,10 +171,11 @@ async fn check_update(app: Cmd<'_>, handle: AppHandle) -> Result<UpdateInfo> {
 /// Back up the database, download the update (its signature is checked
 /// against the public key built into the app), install it and restart.
 /// On Windows the installer closes the app and reopens it when done.
+/// Admins only.
 #[tauri::command]
 async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
     app.with_session(LOCAL, |pos, s| {
-        s.require(Permission::ManageSettings)?;
+        s.require(Permission::Updates)?;
         pos.backup_unchecked(unique_backup_path(&app.backup_dir, "pos-before-update-").0)?;
         pos.optimize()
     })?;

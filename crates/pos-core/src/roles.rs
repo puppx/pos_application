@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 pub enum Role {
     Admin,
     /// Runs the floor and the menu: everything staff do, plus the menu, the
-    /// floor plan, voids, all orders and the kitchen settings. Cannot delete
-    /// anything, manage staff, back up or change the rest of the settings.
+    /// floor plan, voids, all orders, reports, the shift and the kitchen
+    /// settings. Cannot delete anything, manage staff, back up, install
+    /// updates or change the rest of the settings.
     Manager,
+    /// Sells (tables, orders, kitchen, payment, bills) and uses the kitchen
+    /// screen. Nothing else in Manage: no reports, shift, menu or settings.
     Staff,
 }
 
@@ -43,11 +46,13 @@ impl Role {
                     | Permission::AdjustStock
                     | Permission::ManageFloorPlan
                     | Permission::ViewReports
+                    | Permission::ManageShift
                     | Permission::KitchenSettings
                     | Permission::AnyDiscount
             ),
-            // Staff run the shift: they can see sales reports and close the day.
-            Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnOrders | Permission::ViewReports),
+            // Staff only sell: everything else in Manage (reports, End of
+            // day, the shift, menu, settings) is for managers and admins.
+            Role::Staff => matches!(p, Permission::Sell | Permission::ViewOwnOrders),
         }
     }
 }
@@ -73,11 +78,16 @@ pub enum Permission {
     ManageUsers,
     /// Sales reports and End of day (closing the day, viewing and reprinting past days).
     ViewReports,
+    /// Shift & cash: open and close the till shift, money in / out, past
+    /// shifts and their reports (admins and managers).
+    ManageShift,
     ManageSettings,
     /// The kitchen settings only: drinks / desserts tickets, kitchen teams,
     /// quick notes (admins and managers).
     KitchenSettings,
     Backup,
+    /// Check for a new version of the app and install it (admins only).
+    Updates,
     /// Deleting anything for good: orders, menu items, categories, options,
     /// floors, customers, backups (admins only).
     Delete,

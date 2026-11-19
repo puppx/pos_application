@@ -153,7 +153,7 @@ Categories named "Drinks", "Beverages" or "เครื่องดื่ม" st
 
 ### Shift & cash
 
-Manage → **Shift & cash**: count the drawer and **Open shift** with that float. **Money in / Money out** (with a reason) during the shift. At the end type the cash counted: the POS shows what should be there (float + cash taken + cash tips − change + money in − money out − cash refunds for voids) and whether anything is short or over, and prints the shift report. Card payments and card tips are listed but never count towards the drawer.
+Manage → **Shift & cash** (admins and managers): count the drawer and **Open shift** with that float. **Money in / Money out** (with a reason) during the shift. At the end type the cash counted: the POS shows what should be there (float + cash taken + cash tips − change + money in − money out − cash refunds for voids) and whether anything is short or over, and prints the shift report. Card payments and card tips are listed but never count towards the drawer.
 
 ### Sold out today
 
@@ -181,7 +181,13 @@ Manage → Drinks & desserts switches the own DRINKS and DESSERTS tickets on or 
 
 ### Manage (settings)
 
-The side bar has only **Tables**, **Orders** and **Manage**. Manage opens on big tiles: *Daily work* (History, Customers, Reports, Shift & cash, Kitchen screen, and for admins Menu, Floor plan, Staff) and, for admins, *Settings*. Every page opened from Manage has a **← Manage** button.
+The side bar has only **Tables**, **Orders** and **Manage**. Manage opens on big tiles: *Daily work* (History, Customers, Reports, Shift & cash, Kitchen screen, Menu, Floor plan, Staff) and *Settings*, each showing only what the user may open:
+
+- **Admins**: everything.
+- **Managers**: History, Customers, Reports, Shift & cash, Kitchen screen, Menu, Floor plan; the settings Kitchen printer (kitchen screen card), Drinks & desserts, Orders, Kitchen teams; and About & updates (credits and version only).
+- **Staff**: only **Kitchen screen** and **About & updates** (credits and version only). Selling (Tables, Orders, the order screen, kitchen, payment, bills, cancel with a PIN) is unchanged.
+
+A page someone may not open (e.g. an old link) goes back to the Manage tiles. Every page opened from Manage has a **← Manage** button.
 
 The settings tiles: Restaurant, Bills & receipts, Kitchen printer, Drinks & desserts, Orders, Kitchen teams, Login & staff, Delivery apps, Screen & devices, Backup & data, About & updates. Tap one to see only its settings; **← Manage** goes back.
 
@@ -307,12 +313,20 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 | Cancel an order the kitchen has not got yet | ✔ (no PIN) | ✔ (no PIN) | with their own PIN |
 | Cancel an order that has items in the kitchen | ✔ (no PIN) | ✔ (no PIN) | with a manager's or admin's PIN |
 | Void / refund paid orders | ✔ | ✔ | |
-| Order history | all | all | own |
+| Mark dishes sold out from the order screen | ✔ | ✔ | ✔ |
+| Kitchen screen (tap dishes done) | ✔ | ✔ | ✔ |
+| Manage → About & updates: credits and version | ✔ | ✔ | ✔ |
+| Manage → History (paid orders, reprint) | all orders | all orders | |
+| Manage → Customers | ✔ | ✔ | |
 | Menu, options, stock, floor plan | ✔ | ✔ | |
 | Kitchen settings (drinks / desserts tickets, kitchen teams, quick notes) | ✔ | ✔ | |
-| Reports, End of day, shifts | ✔ | ✔ | ✔ |
+| Reports, End of day | ✔ | ✔ | |
+| Shift & cash (open / close the shift, money in / out) | ✔ | ✔ | |
+| Check for and install updates | ✔ | | |
 | **Delete** anything (orders, menu items, categories, options, floors, customers, backups) | ✔ | | |
 | Staff and PINs, printers, bills, delivery apps, other settings, backup, reset data | ✔ | | |
+
+Staff see only **Kitchen screen** and **About & updates** in Manage; the server refuses them every other Manage command too.
 
 **Cancel** opens a confirm box. Admins and managers just tap **Cancel order** (no PIN); the box says whether the kitchen has the order, and a **CANCELLED** ticket prints for the dishes still cooking. Staff type a PIN in the box: their own for an order the kitchen has not got yet, a manager's or admin's once it has. The PIN only approves the cancel; nobody is logged in or out. The server checks the same rules, and the audit log records who cancelled and whose PIN approved it.
 
@@ -386,7 +400,9 @@ and every 6 hours. When a new version is out, a bar appears at the top:
 *Update x.y.z available*. An admin taps **Install update**: the database is backed up
 (`backups\pos-before-update-*.db`), the app closes, updates and reopens. Orders, menu
 and settings are kept, as they live in `%APPDATA%\com.puppx.pos`. **Manage → About**
-shows the version and has **Check for updates**.
+shows the version and, for admins, has **Check for updates**. Only admins check for,
+see and install updates (the app checks while an admin is logged in); managers and
+staff see the version and credits only, and the till refuses the update commands for them.
 
 Updates are signed: the app only installs files signed with the project's private key,
 so a tampered download is refused. Updates need the repository to be **public**

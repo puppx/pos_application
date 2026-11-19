@@ -558,7 +558,7 @@ const SETTINGS_GROUPS = [
   ['bills', 'receipt', 'Bills & receipts', 'Receipt printer, cash drawer, words on bills, tips'],
   ['kitchen', 'printer', 'Kitchen printer', 'Printer, copies, font, kitchen screen'],
   ['tickets', 'cup', 'Drinks & desserts', 'Own tickets on or off'],
-  ['orders', 'orders', 'Orders', 'Order types, discounts, quick notes'],
+  ['orders', 'orders', 'Orders', 'Order types, discounts, cancelling, quick notes'],
   ['teams', 'chef', 'Kitchen teams', 'Starter, Main, Curry, Rice…'],
   ['login', 'lock', 'Login & staff', 'Start screen, auto logout, PIN'],
   ['delivery', 'bike', 'Delivery apps', 'Uber Eats, Just Eat, Deliveroo…'],
@@ -1585,6 +1585,9 @@ async function renderOrder() {
   const cancelBtn = () => h('button', { class: 'danger', onclick: act(async () => {
     const sent = order.items.some((i) => i.sent_at);
     const noPin = isManager();
+    // Settings → Orders → Cancelling an order: CANCELLED ticket on (default) or off.
+    const prints = await invoke('get_setting', { key: 'print_cancelled_order' }).then((v) => v !== '0').catch(() => true);
+    const kitchenNote = prints ? 'A CANCELLED ticket is printed for any dishes still cooking.' : 'Nothing is printed for the kitchen.';
     let r;
     const submit = async (pin) => {
       try { r = await invoke('cancel_order', { orderId, reason: '', pin }); } catch (e) {
@@ -1603,18 +1606,18 @@ async function renderOrder() {
         hint: [
           h('div', {}, count ? `${count} item${count === 1 ? '' : 's'} · ${money(order.total_cents)}` : 'Nothing on it yet.'),
           h('div', { class: sent ? 'cancel-warn' : '' }, sent
-            ? 'The kitchen already has this order. A CANCELLED ticket is printed for any dishes still cooking.'
+            ? `The kitchen already has this order. ${kitchenNote}`
             : 'The kitchen has not got this order yet: nothing is printed.'),
           h('div', { class: 'muted small' }, 'This cannot be undone.'),
         ],
       })
       : await pinDialog({
         title, okLabel, okClass, keepLabel, submit,
-        hint: sent ? 'The kitchen already has this order. Enter a manager or admin PIN to cancel it.' : 'Enter your PIN to confirm.',
+        hint: sent ? `The kitchen already has this order. Enter a manager or admin PIN to cancel it. ${kitchenNote}` : 'Enter your PIN to confirm.',
       });
     if (!done) return;
     closeOrder();
-    // Dishes still cooking get a CANCELLED ticket.
+    // Dishes still cooking get a CANCELLED ticket (when switched on; else nothing is printed).
     if (r?.error) toast(`Order #${order.id} cancelled, but the CANCELLED ticket did not print (${r.error}). Tell the kitchen.`, true);
     else toast(`Order #${order.id} cancelled` + (r?.attempted ? ' · CANCELLED ticket sent to the kitchen' : ''));
   }) }, 'Cancel');
@@ -4329,7 +4332,7 @@ async function renderSettings() {
     bills: () => [receiptCard(), paymentsCard(), ticketLabelsCard()],
     kitchen: () => [isAdmin() && kitchenPrinterCard(), isAdmin() && routesCard(systemPrinters), kdsCard()],
     tickets: () => [splitCard()],
-    orders: () => [isAdmin() && orderTypesCard(), isAdmin() && discountCard(), courseCard(), isAdmin() && fixSentCard(), quickNotesCard()],
+    orders: () => [isAdmin() && orderTypesCard(), isAdmin() && discountCard(), courseCard(), cancelTicketCard(), isAdmin() && fixSentCard(), quickNotesCard()],
     teams: () => [teamsCard()],
     login: () => [startScreenCard(), autoLogoutCard()],
     delivery: () => [platformsCard()],
@@ -4524,6 +4527,16 @@ function courseCard() {
     settingSwitch('starter_choice', 'When a starter is tapped on a dine-in order, ask "Starter or Main course?"',
       'Starters ask Starter or Main', 'Starters are added as starters'),
     h('div', { class: 'muted' }, 'Main course: the dish waits and goes with the mains. A dish not yet sent can also be changed later: tap ✎ on it, then Starter or Main course.'));
+}
+
+/// Settings card: whether cancelling a whole order prints a CANCELLED kitchen ticket.
+function cancelTicketCard() {
+  return h('div', { class: 'card stack' },
+    h('h3', {}, 'Cancelling an order'),
+    settingSwitch('print_cancelled_order', 'Print a CANCELLED ticket for the kitchen when an order is cancelled',
+      'Cancelling an order prints a CANCELLED ticket', 'Cancelling an order prints nothing for the kitchen'),
+    h('div', { class: 'muted' }, 'On: the ticket lists the dishes still cooking (not yet marked done on the kitchen screen). Off: the order is cancelled the same way, but nothing is printed, so tell the kitchen yourself. ' +
+      'Taking one dish off an order (− or Remove) still prints a CANCELLED ticket for that dish.'));
 }
 
 /// Settings card: who may fix a dish that was already sent.

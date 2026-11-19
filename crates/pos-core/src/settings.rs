@@ -33,7 +33,7 @@ pub(crate) fn validate(key: &str, value: &str) -> Result<()> {
         "start_screen" if !matches!(v, "" | "tables" | "orders" | "takeaway") => {
             invalid("start screen: choose Tables, Orders or New takeaway")
         }
-        "show_takeaway" | "show_collection" | "show_delivery" if !matches!(v, "0" | "1") => invalid("use 1 (show) or 0 (hide)"),
+        "show_takeaway" | "show_collection" | "show_delivery" if !matches!(value, "0" | "1") => invalid("use 1 (show) or 0 (hide)"),
         "button_size" if !matches!(v, "" | "normal" | "large") => invalid("button size: normal or large"),
         "auto_logout_warn_secs" if !whole_in(v, 0, 120) => invalid("warning: whole seconds from 0 to 120"),
         DISCOUNT_LIMIT_KEY if !v.is_empty() && !whole_in(v, 0, 100) => invalid("discount limit: a whole percentage from 0 to 100, or empty for no limit"),
@@ -45,7 +45,9 @@ pub(crate) fn validate(key: &str, value: &str) -> Result<()> {
             "backups kept: a whole number from {} to {}",
             BACKUPS_KEPT_RANGE.0, BACKUPS_KEPT_RANGE.1
         )),
-        "kds_beep" if !matches!(v, "0" | "1") => invalid("use 1 (beep) or 0 (silent)"),
+        "kds_beep" if !matches!(value, "0" | "1") => invalid("use 1 (beep) or 0 (silent)"),
+        // Switches: exactly 1 or 0 (" 0" would read differently on the screen).
+        crate::printing::PRINT_CANCELLED_ORDER_KEY if !matches!(value, "0" | "1") => invalid("use 1 (print) or 0 (do not print)"),
         _ => Ok(()),
     }
 }

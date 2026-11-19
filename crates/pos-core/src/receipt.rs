@@ -9,7 +9,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::printing::{rule, render_escpos, render_text, wrap, Line, Size};
+use crate::printing::{rule, render_escpos, render_escpos_in, render_text, wrap, Line, Size};
 use crate::{Order, OrderItem, OrderType, Permission, Pos, PosError, PrintJob, PrintNames, PrinterConfig, PrinterTarget, Result, Session};
 
 const SETTING_KEY: &str = "_receipt_printer";
@@ -415,6 +415,16 @@ impl Receipt {
     pub fn to_escpos(&self, width: usize, bold: bool) -> Vec<u8> {
         render_escpos(&self.layout(width), width, bold)
     }
+
+    /// The receipt as printer `p` prints it (paper width, bold, image mode).
+    pub fn escpos_for(&self, p: &PrinterConfig) -> Vec<u8> {
+        render_escpos_in(&self.layout(p.width), p.width, p.bold, false, p.image_mode)
+    }
+
+    /// The staff copy as printer `p` prints it.
+    pub fn staff_escpos_for(&self, p: &PrinterConfig) -> Vec<u8> {
+        render_escpos_in(&self.staff_layout(p.width), p.width, p.bold, false, p.image_mode)
+    }
 }
 
 fn lines_of(s: &Option<String>) -> Vec<String> {
@@ -597,7 +607,7 @@ impl Pos {
         let r = self.receipt(s, order_id)?;
         // A bill handed over before payment: no second copy at payment.
         self.conn.execute("UPDATE orders SET bill_printed_at = unixepoch() WHERE id = ?1 AND status = 'open'", [order_id])?;
-        Ok(PrintJob::new(cfg.printer.target.clone(), r.to_escpos(cfg.printer.width, cfg.printer.bold)))
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.escpos_for(&cfg.printer)))
     }
 
     /// Reprint the staff copy of a paid order.
@@ -607,7 +617,7 @@ impl Pos {
             return invalid("no receipt printer is set up (Settings → Receipt printer)");
         }
         let r = self.receipt(s, order_id)?;
-        Ok(PrintJob::new(cfg.printer.target.clone(), r.staff_to_escpos(cfg.printer.width, cfg.printer.bold)))
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.staff_escpos_for(&cfg.printer)))
     }
 
     /// What to print right after a payment: the receipt (if automatic,
@@ -630,12 +640,12 @@ impl Pos {
             .optional()?
             .unwrap_or(false);
         let mut job = match &r {
-            Some(r) if cfg.auto_print && !bill_given => Some(PrintJob::copies(p.target.clone(), lead, r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs)),
+            Some(r) if cfg.auto_print && !bill_given => Some(PrintJob::copies(p.target.clone(), lead, r.escpos_for(p), p.copies, p.copy_delay_secs)),
             _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec())),
         };
         // The staff copy follows the customer's, as one more part of the job.
         if let (Some(r), true) = (&r, cfg.staff_copy && order.status == "paid") {
-            let staff = r.staff_to_escpos(p.width, p.bold);
+            let staff = r.staff_escpos_for(p);
             match &mut job {
                 Some(j) => j.parts.push(staff),
                 None => job = Some(PrintJob::new(p.target.clone(), staff)),
@@ -696,6 +706,6 @@ impl Pos {
             show_staff: cfg.show_staff,
         };
         let p = &cfg.printer;
-        Ok(PrintJob::copies(p.target.clone(), &[], r.to_escpos(p.width, p.bold), p.copies, p.copy_delay_secs))
+        Ok(PrintJob::copies(p.target.clone(), &[], r.escpos_for(p), p.copies, p.copy_delay_secs))
     }
 }

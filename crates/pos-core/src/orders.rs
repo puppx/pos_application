@@ -1399,8 +1399,16 @@ impl Pos {
     }
 
     /// Abandon an open order. If anything was already sent to the kitchen
-    /// this needs an admin and a reason.
+    /// this needs [`Permission::VoidOrder`] (an admin or a manager).
     pub fn cancel_order(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<()> {
+        self.cancel_order_logged(s, s, "", order_id, reason)
+    }
+
+    /// [`Pos::cancel_order`] with `s`'s rights (`s` closes the order), logged
+    /// in the audit log as done by `by` (the user logged in on the till, who
+    /// may differ from `s` when someone else's PIN approved it), with `note`
+    /// (how it was approved) after the reason.
+    pub(crate) fn cancel_order_logged(&mut self, s: &Session, by: &Session, note: &str, order_id: i64, reason: &str) -> Result<()> {
         s.require(Permission::Sell)?;
         let reason = reason.trim();
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1422,7 +1430,8 @@ impl Pos {
              WHERE id = ?1",
             params![order_id, s.user_id, (!reason.is_empty()).then_some(reason)],
         )?;
-        audit_tx(&tx, s.user_id, "order.cancel", &format!("{order_id} {reason}"))?;
+        let detail = [order_id.to_string(), reason.to_string(), note.to_string()].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" ");
+        audit_tx(&tx, by.user_id, "order.cancel", &detail)?;
         tx.commit()?;
         Ok(())
     }

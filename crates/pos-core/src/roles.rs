@@ -38,6 +38,7 @@ impl Role {
                     | Permission::ViewOwnOrders
                     | Permission::ViewAllOrders
                     | Permission::VoidOrder
+                    | Permission::CancelWithoutPin
                     | Permission::ManageMenu
                     | Permission::AdjustStock
                     | Permission::ManageFloorPlan
@@ -62,6 +63,10 @@ pub enum Permission {
     ViewAllOrders,
     /// Remove items already sent to the kitchen, cancel such orders, void paid orders.
     VoidOrder,
+    /// Cancel an open order (sent to the kitchen or not) from the till with
+    /// just a confirm box, no PIN (admins and managers). Everyone else types
+    /// a PIN (see `Pos::cancel_order_confirmed`).
+    CancelWithoutPin,
     ManageMenu,
     AdjustStock,
     ManageFloorPlan,

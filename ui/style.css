@@ -809,6 +809,8 @@ button.danger-outline:hover { background: var(--danger-soft); }
 .bulk-row.on { border-color: var(--danger); background: var(--danger-soft); }
 .bulk-row input { width: 20px; height: 20px; }
 .warn-box { padding: 8px 10px; border-radius: var(--radius-sm); background: var(--warn-soft); border: 1px solid var(--warn); color: var(--ink); font-size: 14px; }
+.confirm-hint { gap: 8px; font-size: 17px; }
+.confirm-hint .cancel-warn { color: var(--danger); font-weight: 600; }
 .pin-dots { display: flex; justify-content: center; gap: 12px; padding: 8px 0; }
 .pin-dots span { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--ink-2); }
 .pin-dots span.on { background: var(--ink); }

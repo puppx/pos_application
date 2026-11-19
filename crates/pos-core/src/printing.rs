@@ -1104,6 +1104,37 @@ impl Pos {
     /// sent and not yet marked done on the kitchen screen, routed like any
     /// other ticket. None when there are none or no kitchen printer is set up.
     pub fn cancel_order_for_kitchen(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<Option<PrintJob>> {
+        self.cancel_for_kitchen_logged(s, s, "", order_id, reason)
+    }
+
+    /// The till's Cancel button: `s` (logged in here) cancels the order,
+    /// with a CANCELLED ticket as in [`Pos::cancel_order_for_kitchen`].
+    /// - No `pin` (or an empty one): only for a role with
+    ///   [`Permission::CancelWithoutPin`] (admins and managers), sent to the
+    ///   kitchen or not. Anyone else is refused ([`PosError::Forbidden`]).
+    /// - A `pin`: its owner approves and cancels it with their own rights
+    ///   (see [`Pos::pin_owner_for`]): any PIN for an order the kitchen has
+    ///   not got, a manager's or admin's once it has.
+    ///
+    /// The audit log records `s` as who cancelled it, and the PIN's owner.
+    pub fn cancel_order_confirmed(&mut self, s: &Session, order_id: i64, reason: &str, pin: Option<&str>) -> Result<Option<PrintJob>> {
+        match pin.map(str::trim).filter(|p| !p.is_empty()) {
+            None => {
+                s.require(Permission::CancelWithoutPin)?;
+                let note = format!("(no PIN, {})", s.role.as_str());
+                self.cancel_for_kitchen_logged(s, s, &note, order_id, reason)
+            }
+            Some(p) => {
+                let approver = self.pin_owner_for(p, Some(s.user_id))?;
+                let note = format!("(PIN of {} #{}, {})", approver.name, approver.user_id, approver.role.as_str());
+                self.cancel_for_kitchen_logged(&approver, s, &note, order_id, reason)
+            }
+        }
+    }
+
+    /// [`Pos::cancel_order_for_kitchen`] with `s`'s rights, logged as done by
+    /// `by` (see `cancel_order_logged`).
+    fn cancel_for_kitchen_logged(&mut self, s: &Session, by: &Session, note: &str, order_id: i64, reason: &str) -> Result<Option<PrintJob>> {
         s.require(Permission::Sell)?;
         crate::orders::require_open(&self.conn, order_id)?;
         // Made before cancelling: a cancelled order is not every user's to read.
@@ -1119,7 +1150,7 @@ impl Pos {
             let lines: Vec<OrderItem> = o.items.into_iter().filter(|i| cooking.contains(&i.id)).collect();
             self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?
         };
-        self.cancel_order(s, order_id, reason)?;
+        self.cancel_order_logged(s, by, note, order_id, reason)?;
         Ok(job)
     }
 
@@ -1707,5 +1738,47 @@ mod tests {
         assert!(PrinterConfig { width: 10, ..ok.clone() }.validate().is_err());
         assert!(PrinterConfig { copy_delay_secs: 31, ..ok.clone() }.validate().is_err());
         assert!(PrinterConfig { copy_delay_secs: 0, ..ok }.validate().is_ok());
+    }
+
+    #[test]
+    fn the_audit_log_says_who_cancelled_and_whose_pin_approved_it() {
+        use crate::{NewOrder, NewProduct, OrderDetails, Role};
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        let sam = pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        let quinn = pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+        let curry = pos
+            .create_product(&admin, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap();
+        let new = NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: OrderDetails::default() };
+        let last = |pos: &Pos| -> (i64, String, i64) {
+            pos.conn
+                .query_row(
+                    "SELECT a.user_id, a.detail, o.closed_by FROM audit_log a JOIN orders o ON o.id = CAST(a.detail AS INTEGER)
+                     WHERE a.action = 'order.cancel' ORDER BY a.id DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        // Quinn (manager) with no PIN.
+        let q = pos.login("4646").unwrap();
+        let o = pos.open_order(&q, &new).unwrap();
+        pos.cancel_order_confirmed(&q, o.id, "mistake", None).unwrap();
+        assert_eq!(last(&pos), (quinn.id, format!("{} mistake (no PIN, manager)", o.id), quinn.id));
+        // Sam (staff) sends a dish; Quinn's PIN approves the cancel on Sam's till.
+        let s = pos.login("2222").unwrap();
+        let o = pos.open_order(&s, &new).unwrap();
+        pos.add_item(&s, o.id, curry.id, 1, None, None, &[]).unwrap();
+        pos.send_to_kitchen(&s, o.id).unwrap();
+        pos.cancel_order_confirmed(&s, o.id, "", Some("4646")).unwrap();
+        assert_eq!(last(&pos), (sam.id, format!("{} (PIN of Quinn #{}, manager)", o.id, quinn.id), quinn.id));
+        // Sam's own PIN on an order the kitchen has not got.
+        let o = pos.open_order(&s, &new).unwrap();
+        pos.cancel_order_confirmed(&s, o.id, "", Some("2222")).unwrap();
+        assert_eq!(last(&pos), (sam.id, format!("{} (PIN of Sam #{}, staff)", o.id, sam.id), sam.id));
     }
 }

@@ -1568,24 +1568,39 @@ async function renderOrder() {
         h('button', { onclick: () => setKids(extra) }, 'Close')),
       h('div', { class: 'muted small' }, '"Menu rates" uses each item\'s own tax. A rate here applies to every item on this order, including ones added later.')));
   };
-  // Two taps, no reason: the first asks "Tap again", the second cancels.
-  // Cancel: a confirm box asking for a PIN (a manager's or admin's once the kitchen has the order).
+  // Cancel: admins and managers just confirm (no PIN). Staff type a PIN in
+  // the same box: their own, or a manager's or admin's once the kitchen has
+  // the order. The server checks the same rules (cancel_order).
   const cancelBtn = () => h('button', { class: 'danger', onclick: act(async () => {
     const sent = order.items.some((i) => i.sent_at);
+    const noPin = isManager();
     let r;
-    const done = await pinDialog({
-      title: `Cancel order #${order.id}?`,
-      hint: sent ? 'The kitchen already has this order. Enter a manager or admin PIN to cancel it.' : 'Enter your PIN to confirm.',
-      okLabel: 'Cancel order', okClass: 'danger paybig', keepLabel: 'Keep the order',
-      submit: async (pin) => {
-        try { r = await invoke('cancel_order', { orderId, reason: '', pin }); } catch (e) {
-          const msg = String(e?.message ?? e);
-          if (isDeadOrder(msg, { orderId })) { setTimeout(leaveDeadOrder); return 'This order was closed on another till'; }
-          return /permission/i.test(msg) ? 'This order is already in the kitchen: a manager or admin PIN is needed'
-            : /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
-        }
-      },
-    });
+    const submit = async (pin) => {
+      try { r = await invoke('cancel_order', { orderId, reason: '', pin }); } catch (e) {
+        const msg = String(e?.message ?? e);
+        if (isDeadOrder(msg, { orderId })) { setTimeout(leaveDeadOrder); return 'This order was closed on another till'; }
+        if (/permission/i.test(msg)) return noPin ? 'You can no longer cancel without a PIN: log in again' : sent ? 'This order is already in the kitchen: a manager or admin PIN is needed' : 'A PIN is needed';
+        return /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
+      }
+    };
+    const title = `Cancel order #${order.id}?`, okLabel = 'Cancel order', okClass = 'danger paybig', keepLabel = 'Keep the order';
+    const lines = order.items.filter((i) => i.parent_id == null);
+    const count = lines.reduce((n, i) => n + i.qty, 0);
+    const done = noPin
+      ? await confirmDialog({
+        title, okLabel, okClass, keepLabel, submit: () => submit(null),
+        hint: [
+          h('div', {}, count ? `${count} item${count === 1 ? '' : 's'} · ${money(order.total_cents)}` : 'Nothing on it yet.'),
+          h('div', { class: sent ? 'cancel-warn' : '' }, sent
+            ? 'The kitchen already has this order. A CANCELLED ticket is printed for any dishes still cooking.'
+            : 'The kitchen has not got this order yet: nothing is printed.'),
+          h('div', { class: 'muted small' }, 'This cannot be undone.'),
+        ],
+      })
+      : await pinDialog({
+        title, okLabel, okClass, keepLabel, submit,
+        hint: sent ? 'The kitchen already has this order. Enter a manager or admin PIN to cancel it.' : 'Enter your PIN to confirm.',
+      });
     if (!done) return;
     closeOrder();
     // Dishes still cooking get a CANCELLED ticket.
@@ -1691,6 +1706,54 @@ function pinDialog({ title, hint, okLabel, okClass = 'primary paybig', keepLabel
       else if (e.key === 'Backspace') key('⌫');
       else if (e.key === 'Enter') { e.preventDefault(); go(); }
       else if (e.key === 'Escape') closeModal();
+    };
+    document.addEventListener('keydown', state.modalKeys);
+  });
+}
+
+/// A yes / no box in the same look as pinDialog, for an action that needs
+/// no PIN. `submit()` does the action and returns nothing when it worked, or
+/// a message to show. Resolves true once it worked, false if closed. Taps on
+/// the OK button in the first moment after it opens are ignored (a double tap
+/// on the button that opened it), as are taps while it is working.
+function confirmDialog({ title, hint, okLabel, okClass = 'primary paybig', keepLabel = 'Cancel', submit }) {
+  return new Promise((resolve) => {
+    let busy = false;
+    const armedAt = Date.now() + 500;
+    const err = h('div', { class: 'change short' });
+    const ok = h('button', { class: okClass }, okLabel);
+    const go = async () => {
+      if (busy || Date.now() < armedAt) return;
+      busy = true;
+      ok.disabled = true;
+      err.textContent = '';
+      let msg;
+      try { msg = await submit(); } catch (e) { msg = String(e?.message ?? e); }
+      if (msg) { busy = false; ok.disabled = false; err.textContent = msg; return; }
+      state.onModalClose = null;
+      closeModal();
+      resolve(true);
+    };
+    ok.onclick = go;
+    const keep = h('button', { onclick: () => { if (!busy) closeModal(); } }, keepLabel);
+    showModal(h('h3', {}, title), h('div', { class: 'stack confirm-hint' }, hint), err,
+      ok, h('div', { class: 'row' }, h('span', { class: 'grow' }), keep));
+    state.onModalClose = () => resolve(false);
+    document.removeEventListener('keydown', state.modalKeys);
+    document.activeElement?.blur();
+    // Enter confirms only on its own: not the Enter at the end of a
+    // barcode scan (a burst of keys), and not while another button
+    // (Keep the order) has the focus.
+    let lastKey = 0;
+    state.modalKeys = (e) => {
+      if (e.key === 'Escape') { if (!busy) closeModal(); return; }
+      if (e.key !== 'Enter') { lastKey = Date.now(); return; }
+      e.preventDefault();
+      if (e.repeat || Date.now() - lastKey < 300) return;
+      const f = document.activeElement;
+      if (f === keep) { if (!busy) closeModal(); return; }
+      if (f instanceof HTMLButtonElement && f !== ok) return;
+      go();
     };
     document.addEventListener('keydown', state.modalKeys);
   });

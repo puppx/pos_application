@@ -963,18 +963,14 @@ commands! {
         app.with_session(t, |pos, s| pos.remove_payment(s, order_id, payment_id))
     }
 
-    /// Cancel an open order, confirmed with a PIN: the PIN's owner cancels
-    /// it (an order already in the kitchen needs a manager's or admin's PIN).
-    /// The user logged in here counts as the PIN's owner when it is theirs,
-    /// even if they share it. Dishes still cooking get a CANCELLED ticket.
+    /// Cancel an open order. Admins and managers confirm with no PIN
+    /// (`pin` left out or empty); anyone else needs a PIN, whose owner
+    /// cancels it (an order already in the kitchen needs a manager's or
+    /// admin's PIN). The user logged in here counts as the PIN's owner when
+    /// it is theirs, even if they share it. Dishes still cooking get a
+    /// CANCELLED ticket. See `Pos::cancel_order_confirmed`.
     fn cancel_order(app, t, order_id: i64, reason: String, pin: Option<String>) -> PrintOutcome {
-        let job = app.with_session(t, |pos, s| match pin.as_deref() {
-            Some(p) => {
-                let approver = pos.pin_owner_for(p, Some(s.user_id))?;
-                pos.cancel_order_for_kitchen(&approver, order_id, &reason)
-            }
-            None => pos.cancel_order_for_kitchen(s, order_id, &reason),
-        })?;
+        let job = app.with_session(t, |pos, s| pos.cancel_order_confirmed(s, order_id, &reason, pin.as_deref()))?;
         Ok(print(job))
     }
 
@@ -1577,6 +1573,62 @@ mod tests {
         let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
         let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": o["id"], "reason": "" })).unwrap();
         assert_eq!(r, json!({ "attempted": false, "error": null }));
+    }
+
+    #[test]
+    fn the_cancel_command_needs_a_pin_from_staff_only() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+        let curry = pos
+            .create_product(&admin, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap();
+        let path = std::env::temp_dir().join(format!("pos-cancel-no-pin-test-{}.bin", std::process::id()));
+        pos.set_kitchen_printer(&admin, &PrinterConfig {
+            target: PrinterTarget::File { path: path.display().to_string() }, copy_delay_secs: 0, app_font: false, ..Default::default()
+        })
+        .unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        let sent_order = || {
+            let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+            dispatch(&app, LOCAL, "add_item", json!({ "orderId": o["id"], "productId": curry.id, "qty": 1 })).unwrap();
+            dispatch(&app, LOCAL, "send_to_kitchen", json!({ "orderId": o["id"] })).unwrap();
+            o["id"].clone()
+        };
+        let status = |id: &Value| dispatch(&app, LOCAL, "get_order", json!({ "id": id })).unwrap()["status"].clone();
+        // Staff: no PIN (left out or empty) is refused, sent or not.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        let unsent = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap()["id"].clone();
+        let sent = sent_order();
+        for id in [&unsent, &sent] {
+            for args in [json!({ "orderId": id, "reason": "" }), json!({ "orderId": id, "reason": "", "pin": "" }), json!({ "orderId": id, "reason": "", "pin": null })] {
+                assert!(matches!(dispatch(&app, LOCAL, "cancel_order", args), Err(PosError::Forbidden)));
+            }
+            assert_eq!(status(id), "open");
+        }
+        // Their own PIN for the unsent one; a manager's for the sent one.
+        assert!(matches!(dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "", "pin": "2222" })), Err(PosError::Forbidden)));
+        dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": unsent, "reason": "", "pin": "2222" })).unwrap();
+        dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "", "pin": "4646" })).unwrap();
+        assert_eq!((status(&unsent), status(&sent)), (json!("cancelled"), json!("cancelled")));
+        // A manager and an admin: no PIN, even for an order in the kitchen.
+        for pin in ["4646", "1111"] {
+            dispatch(&app, LOCAL, "login", json!({ "pin": pin })).unwrap();
+            let sent = sent_order();
+            let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "" })).unwrap();
+            assert_eq!(r, json!({ "attempted": true, "error": null }), "the kitchen is told");
+            assert_eq!(status(&sent), "cancelled");
+            let sent = sent_order();
+            dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "", "pin": "" })).unwrap();
+            assert_eq!(status(&sent), "cancelled");
+        }
+        let printed = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(printed.contains("CANCELLED") && printed.contains("Green curry"), "{printed}");
     }
 
     #[test]

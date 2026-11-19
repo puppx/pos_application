@@ -1635,6 +1635,16 @@ mod tests {
         let printed = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
         let _ = std::fs::remove_file(&path);
         assert!(printed.contains("CANCELLED") && printed.contains("Green curry"), "{printed}");
+        // CANCELLED ticket switched off (a manager may): cancelled, nothing printed.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "4646" })).unwrap();
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "print_cancelled_order", "value": "0" })).unwrap();
+        let sent = sent_order();
+        let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "" })).unwrap();
+        assert_eq!(r, json!({ "attempted": false, "error": null }));
+        assert_eq!(status(&sent), "cancelled");
+        let printed = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(printed.contains("NEW ORDER") && !printed.contains("CANCELLED"), "only the order went to the kitchen: {printed}");
     }
 
     #[test]

@@ -331,7 +331,9 @@ pub fn system_printers() -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketItem {
     /// The set menu this dish belongs to ("SET A"); its dishes print together
-    /// under the set's name, each section under its own rule.
+    /// under the set's name, each section under its own rule. Laid out by
+    /// course (see `KitchenTicket::by_course`): every set on the ticket, one
+    /// per line ("2 x LUNCH SET\nDINNER SET"), and the course as `category`.
     pub set: Option<String>,
     /// The team header to print above this dish when every team shares one
     /// ticket (separate team tickets switched off).
@@ -367,6 +369,11 @@ pub struct KitchenTicket {
     /// The team's name as a big white-on-black header, at the very top
     /// (name, then "\n" and the Thai name when shown).
     pub banner: Option<String>,
+    /// Set dishes grouped by course rather than set by set: two or more sets
+    /// sent with their starters and mains at once (see `Pos::sets_by_course`).
+    /// The sets' names head the dishes, then all the starters together, then
+    /// all the mains, identical dishes on one line.
+    pub by_course: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -559,6 +566,28 @@ pub(crate) fn kitchen_only(items: &[OrderItem]) -> Vec<OrderItem> {
     items.iter().filter(|i| !i.is_set).cloned().collect()
 }
 
+/// The courses of set dishes on a ticket laid out by course, in print order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Course {
+    Drinks,
+    Starters,
+    Mains,
+    Desserts,
+}
+
+impl Course {
+    /// The rule over the course's dishes, as on the test ticket ("Starters / อาหารเรียกน้ำย่อย").
+    fn label(self, names: PrintNames) -> String {
+        let (en, th) = match self {
+            Course::Drinks => ("Drinks", "เครื่องดื่ม"),
+            Course::Starters => ("Starters", "อาหารเรียกน้ำย่อย"),
+            Course::Mains => ("Mains", "อาหารจานหลัก"),
+            Course::Desserts => ("Desserts", "ของหวาน"),
+        };
+        names.inline(en, Some(th))
+    }
+}
+
 /// The ESC/POS bytes of several tickets one after another (each ends with a cut).
 fn escpos_all(tickets: &[KitchenTicket], cfg: &PrinterConfig) -> Vec<u8> {
     tickets.iter().flat_map(|t| t.to_escpos_font(cfg.width, cfg.bold, cfg.app_font)).collect()
@@ -638,6 +667,8 @@ impl KitchenTicket {
                 push(gap());
                 push(gap());
                 team = it.team.as_deref();
+                // Each team's set dishes under their set's name again.
+                set = None;
                 current = None;
                 first = true;
             }
@@ -648,7 +679,10 @@ impl KitchenTicket {
                         push(gap());
                         push(gap());
                     }
-                    push(Line::new(small, true, true, titled_rule(&format!("SET: {name}"), '=', width)));
+                    // By course: one rule per set on the ticket.
+                    for one in name.lines() {
+                        push(Line::new(small, true, true, titled_rule(&format!("SET: {one}"), '=', width)));
+                    }
                     push(gap());
                 }
                 set = it.set.as_deref();
@@ -734,6 +768,10 @@ pub(crate) fn cp437(c: char) -> u8 {
         _ => b'?',
     }
 }
+
+/// Setting: cancelling a whole order prints a CANCELLED kitchen ticket
+/// ("1", the default) or not ("0"). See [`Pos::prints_cancelled_order`].
+pub const PRINT_CANCELLED_ORDER_KEY: &str = "print_cancelled_order";
 
 /// What the tickets call each kind of order, editable in Settings
 /// (settings `label_dine_in`, `label_takeaway`, `label_collection`,
@@ -896,6 +934,25 @@ impl Pos {
     /// Ticket for the given lines of an order (normally what was just sent).
     pub fn kitchen_ticket(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool) -> Result<KitchenTicket> {
         let items = &kitchen_only(items);
+        self.ticket_for(s, order_id, items, reprint, self.sets_by_course(items))
+    }
+
+    /// Two or more sets whose starters and mains go to the kitchen at once
+    /// ("All courses together", a takeaway, a reprint...): their dishes are
+    /// then printed course by course, not set by set (`KitchenTicket::by_course`).
+    /// Worked out from the whole send, so every printer's and team's ticket
+    /// is laid out the same. One set, or one course at a time: set by set.
+    /// Drinks are no course here (they go with the starters anyway).
+    pub(crate) fn sets_by_course(&self, items: &[OrderItem]) -> bool {
+        let food: Vec<&OrderItem> = items.iter().filter(|i| i.parent_id.is_some() && !i.is_set && !self.is_drink(i.product_id)).collect();
+        let mut sets: Vec<i64> = food.iter().filter_map(|i| i.parent_id).collect();
+        sets.sort_unstable();
+        sets.dedup();
+        sets.len() > 1 && food.iter().any(|i| i.starter) && food.iter().any(|i| !i.starter)
+    }
+
+    /// [`Pos::kitchen_ticket`], its set dishes by course or set by set.
+    fn ticket_for(&self, s: &Session, order_id: i64, items: &[OrderItem], reprint: bool, by_course: bool) -> Result<KitchenTicket> {
         let o = self.get_order(s, order_id)?;
         let first_round = !reprint && o.items.iter().filter(|i| !i.is_set).all(|i| i.sent_at.is_none() || items.iter().any(|x| x.id == i.id));
         let mut details = Vec::new();
@@ -938,22 +995,24 @@ impl Pos {
             order_id,
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: s.name.clone(),
-            items: self.ticket_items(items, names)?,
+            items: self.ticket_items(items, names, by_course)?,
             footer: (!reprint && waiting > 0).then(|| format!("MAINS TO FOLLOW: {waiting}")),
             brief: false,
             large: self.kitchen_printer()?.large_text,
             banner: None,
+            by_course,
         })
     }
 
     /// The dishes of a ticket, grouped by menu category.
     /// Dishes in menu order, then each set's dishes together under the
-    /// set's name, section by section.
-    fn ticket_items(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<TicketItem>> {
+    /// set's name, section by section; or, `by_course`, all the sets' dishes
+    /// course by course (see [`KitchenTicket::by_course`]).
+    fn ticket_items(&self, items: &[OrderItem], names: PrintNames, by_course: bool) -> Result<Vec<TicketItem>> {
         let (dishes, in_sets): (Vec<OrderItem>, Vec<OrderItem>) = kitchen_only(items).into_iter().partition(|i| i.parent_id.is_none());
         let item = |i: &OrderItem, category: Option<String>, set: Option<String>| {
             let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-            TicketItem {
+            let mut t = TicketItem {
                 team: None,
                 set,
                 category,
@@ -962,27 +1021,116 @@ impl Pos {
                 name_alt: name_alt.map(str::to_string),
                 options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
                 note: i.note.clone(),
+            };
+            // A set dish: what it comes with, under the dish like an option.
+            if let Some(w) = &i.with_name {
+                t.options.insert(0, format!("with {}", names.inline(w, i.with_alt.as_deref())));
             }
+            t
         };
         let mut out: Vec<TicketItem> = self.by_category(&dishes, names)?.into_iter().map(|(c, i)| item(i, c, None)).collect();
         let mut parents: Vec<i64> = in_sets.iter().filter_map(|i| i.parent_id).collect();
         parents.dedup();
         let mut stmt = self.conn.prepare_cached("SELECT name, name_alt, qty FROM order_items WHERE id = ?1")?;
+        // By course: (set's name, how many) for the heading, and each dish
+        // with its course and its section's place among that course's sections.
+        let mut sets: Vec<(String, i64)> = Vec::new();
+        let mut courses: Vec<(Course, usize, Option<String>, TicketItem)> = Vec::new();
+        // Section headings under MAINS, in the order first met (one block each).
+        let mut headings: Vec<String> = Vec::new();
         for parent in parents {
             let (name, alt, qty): (String, Option<String>, i64) = stmt.query_row([parent], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             let label = names.inline(&name.to_uppercase(), alt.as_deref());
-            let set = if qty > 1 { format!("{qty} x {label}") } else { label };
-            for i in in_sets.iter().filter(|i| i.parent_id == Some(parent)) {
-                let section = i.section_name.as_deref().map(|n| names.inline(&n.to_uppercase(), i.section_alt.as_deref()));
-                let mut t = item(i, section, Some(set.clone()));
-                // What it comes with, under the dish like an option.
-                if let Some(w) = &i.with_name {
-                    t.options.insert(0, format!("with {}", names.inline(w, i.with_alt.as_deref())));
+            let children = in_sets.iter().filter(|i| i.parent_id == Some(parent));
+            if by_course {
+                match sets.iter_mut().find(|s| s.0 == label) {
+                    Some(s) => s.1 += qty,
+                    None => sets.push((label, qty)),
                 }
-                out.push(t);
+                // The set's own main section: the first of its sections (over the
+                // whole set, not just this ticket's dishes) whose dishes are mains.
+                let main_section = self.main_section_of(parent)?;
+                for i in children {
+                    let course = self.course_of(i)?;
+                    // Under MAINS, a set's other sections (sides, or a "Drinks"
+                    // or "Dessert" section whose dishes are not ticked as such)
+                    // keep their own heading, so a dessert is never read as a main.
+                    let own = (course == Course::Mains && i.section_name != main_section)
+                        .then(|| i.section_name.as_deref().map(|n| names.inline(&n.to_uppercase(), i.section_alt.as_deref())))
+                        .flatten();
+                    if let Some(h) = &own {
+                        if !headings.contains(h) {
+                            headings.push(h.clone());
+                        }
+                    }
+                    let rank = own.as_ref().and_then(|h| headings.iter().position(|x| x == h)).map_or(0, |p| p + 1);
+                    courses.push((course, rank, own, item(i, None, None)));
+                }
+                continue;
+            }
+            let set = if qty > 1 { format!("{qty} x {label}") } else { label };
+            for i in children {
+                let section = i.section_name.as_deref().map(|n| names.inline(&n.to_uppercase(), i.section_alt.as_deref()));
+                out.push(item(i, section, Some(set.clone())));
             }
         }
+        if courses.is_empty() {
+            return Ok(out);
+        }
+        let heading = sets.iter().map(|(l, q)| if *q > 1 { format!("{q} x {l}") } else { l.clone() }).collect::<Vec<_>>().join("\n");
+        // Course by course; under MAINS the mains first, then each other
+        // section's block. A stable sort keeps the dishes in set order.
+        courses.sort_by_key(|c| (c.0, c.1));
+        let mut merged: Vec<(Course, Option<String>, TicketItem)> = Vec::new();
+        for (course, _, own, t) in courses {
+            // The same dish, options and note from another set: one line.
+            let same = |m: &&mut (Course, Option<String>, TicketItem)| {
+                m.0 == course && m.1 == own && m.2.name == t.name && m.2.name_alt == t.name_alt && m.2.options == t.options && m.2.note == t.note
+            };
+            match merged.iter_mut().find(same) {
+                Some(m) => m.2.qty += t.qty,
+                None => merged.push((course, own, t)),
+            }
+        }
+        for (course, own, mut t) in merged {
+            t.set = Some(heading.clone());
+            t.category = Some(own.unwrap_or_else(|| course.label(names)));
+            out.push(t);
+        }
         Ok(out)
+    }
+
+    /// The section of set line `parent` that holds its mains: the first
+    /// section, in the set's order, with a dish that is neither a starter
+    /// nor ticked Drink or Dessert. Looked at over all the set's dishes, so a
+    /// team's ticket that has only the sides still knows they are sides.
+    fn main_section_of(&self, parent: i64) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT i.section_name FROM order_items i LEFT JOIN products p ON p.id = i.product_id
+             WHERE i.parent_id = ?1 AND i.starter = 0 AND COALESCE(p.drink, 0) = 0 AND COALESCE(p.dessert, 0) = 0
+             ORDER BY i.id LIMIT 1",
+        )?;
+        Ok(stmt.query_row([parent], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
+    }
+
+    /// A set dish's course on a ticket laid out by course: drinks and
+    /// desserts (as ticked on the menu) apart, else starter or main.
+    fn course_of(&self, i: &OrderItem) -> Result<Course> {
+        let (drink, dessert): (bool, bool) = self
+            .conn
+            .prepare_cached("SELECT drink, dessert FROM products WHERE id = ?1")?
+            .query_row([i.product_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?
+            .unwrap_or_default();
+        Ok(if drink {
+            Course::Drinks
+        } else if i.starter {
+            Course::Starters
+        } else if dessert {
+            Course::Desserts
+        } else {
+            Course::Mains
+        })
     }
 
     /// `items` split by the team that cooks them, in team order; items with
@@ -1030,12 +1178,13 @@ impl Pos {
     /// like any other ticket so the right team gets it. One copy.
     pub fn kitchen_change_job(&self, s: &Session, order_id: i64, title: &str, items: &[OrderItem]) -> Result<Option<PrintJob>> {
         let items = kitchen_only(items);
+        let by_course = self.sets_by_course(&items);
         let mut jobs = Vec::new();
         for (cfg, group) in self.route_items(&items)? {
             if cfg.target == PrinterTarget::None {
                 continue;
             }
-            let mut base = self.kitchen_ticket(s, order_id, &group, false)?;
+            let mut base = self.ticket_for(s, order_id, &group, false, by_course)?;
             base.title = title.to_string();
             base.footer = None;
             let tickets = self.split_for_kitchen(base, &group)?;
@@ -1102,7 +1251,9 @@ impl Pos {
 
     /// [`Pos::cancel_order`], with a CANCELLED ticket for the dishes already
     /// sent and not yet marked done on the kitchen screen, routed like any
-    /// other ticket. None when there are none or no kitchen printer is set up.
+    /// other ticket. None when there are none, no kitchen printer is set up,
+    /// or the ticket is switched off (setting `print_cancelled_order` = "0",
+    /// see [`Pos::prints_cancelled_order`]).
     pub fn cancel_order_for_kitchen(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<Option<PrintJob>> {
         self.cancel_for_kitchen_logged(s, s, "", order_id, reason)
     }
@@ -1143,7 +1294,7 @@ impl Pos {
             .prepare_cached("SELECT id FROM order_items WHERE order_id = ?1 AND sent_at IS NOT NULL AND kitchen_done_at IS NULL")?
             .query_map([order_id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let job = if cooking.is_empty() {
+        let job = if cooking.is_empty() || !self.prints_cancelled_order()? {
             None
         } else {
             let o = self.get_order(s, order_id)?;
@@ -1152,6 +1303,14 @@ impl Pos {
         };
         self.cancel_order_logged(s, by, note, order_id, reason)?;
         Ok(job)
+    }
+
+    /// Whether cancelling a whole order prints a CANCELLED ticket for the
+    /// dishes still cooking (setting `print_cancelled_order`: "1" or "0";
+    /// not set = "1", as before the setting). Removing or reducing one dish
+    /// already sent always prints one.
+    pub fn prints_cancelled_order(&self) -> Result<bool> {
+        Ok(self.setting(PRINT_CANCELLED_ORDER_KEY)?.as_deref().map(str::trim) != Some("0"))
     }
 
     /// Drinks first and desserts last on tickets of their own (each when
@@ -1177,7 +1336,7 @@ impl Pos {
         }
         let label = self.team_label()?;
         let own = |group: &[OrderItem], en: &str, th: &str, base: &KitchenTicket| -> Result<KitchenTicket> {
-            Ok(KitchenTicket { items: self.ticket_items(group, names)?, banner: Some(label(en, Some(th))), footer: None, ..base.clone() })
+            Ok(KitchenTicket { items: self.ticket_items(group, names, base.by_course)?, banner: Some(label(en, Some(th))), footer: None, ..base.clone() })
         };
         let mut out = Vec::new();
         if !drinks.is_empty() {
@@ -1185,7 +1344,7 @@ impl Pos {
         }
         let last = (!desserts.is_empty()).then(|| own(&desserts, "Desserts", "ของหวาน", &base)).transpose()?;
         if !food.is_empty() {
-            base.items = self.ticket_items(&food, names)?;
+            base.items = self.ticket_items(&food, names, base.by_course)?;
             out.extend(self.split_by_team(base, &food, names)?);
         }
         out.extend(last);
@@ -1238,7 +1397,7 @@ impl Pos {
             let mut t = base.clone();
             t.items = Vec::new();
             for (banner, group) in groups {
-                let mut part = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names)? };
+                let mut part = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names, base.by_course)? };
                 for it in &mut part {
                     it.team = banner.clone();
                 }
@@ -1250,7 +1409,7 @@ impl Pos {
             .into_iter()
             .map(|(banner, group)| {
                 let mut t = base.clone();
-                t.items = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names)? };
+                t.items = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names, base.by_course)? };
                 t.banner = banner;
                 Ok(t)
             })
@@ -1285,7 +1444,7 @@ impl Pos {
                 continue;
             }
             // One ticket per team, printed one after another as a single job.
-            let mut base = self.kitchen_ticket(s, order_id, &group, reprint)?;
+            let mut base = self.ticket_for(s, order_id, &group, reprint, whole.by_course)?;
             base.title = whole.title.clone();
             let tickets = self.split_for_kitchen(base, &group)?;
             let copies = if reprint {
@@ -1400,6 +1559,7 @@ impl Pos {
             brief: true,
             large: self.kitchen_printer()?.large_text,
             banner: None,
+            by_course: false,
         })
     }
 
@@ -1452,6 +1612,7 @@ impl Pos {
                     brief: false,
                     large: cfg.large_text,
                     banner: Some(label(&t.name, t.name_alt.as_deref())),
+                    by_course: false,
                 }
             })
             .collect();
@@ -1499,6 +1660,7 @@ impl Pos {
             brief: false,
             large: cfg.large_text,
             banner: None,
+            by_course: false,
         };
         Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos_font(cfg.width, cfg.bold, cfg.app_font), cfg.copies, cfg.copy_delay_secs))
     }
@@ -1618,6 +1780,7 @@ mod tests {
             brief: false,
             large: false,
             banner: None,
+            by_course: false,
         }
     }
 

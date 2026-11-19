@@ -201,6 +201,7 @@ More settings (admins). Not set = the behaviour before they existed, except the 
 - **Customer receipts** (Bills & receipts → Receipt printer): **Show the VAT / tax breakdown** (off) adds the TAX / NET / VAT / GROSS table under the total of bills and receipts, with "Prices include tax" when it is inside the prices. **Show "Served by"** (on) can take the staff name off customer bills and receipts; the staff copy always has it. The name, address lines and bottom message were already editable there. With both left as they are, receipts print exactly as before.
 - **Payment names** (Bills & receipts → Payments): **Call Cash** and **Call Card** rename how the two methods are shown on the till (Finish & Pay buttons, the payment button, part payments, the change screen), on receipts and the staff copy, in History, Reports, the shift screen and report, and the end-of-day report, e.g. `เงินสด` and `QR / Card`. Display only: payments are still stored and counted as cash and card. Up to 24 characters; empty = Cash / Card, and then receipts print exactly as before. Settings `pay_name_cash`, `pay_name_card`.
 - **Keep the last N backups** (Backup & data): how many full backups stay in the backup folder, 3 to 90 (default 14, as before; empty = 14). The copies taken before an update, a reset or a restore, and files loaded with *Restore everything from a file…*, are kept apart (the newest 3 of each, and any from the last 7 days) and other files in the folder are never touched. Lowering it deletes the oldest daily backups at the next backup (startup or **Back up everything now**). Setting `backups_kept`.
+- **Cancelling an order** (Orders; managers too): **Print a CANCELLED ticket for the kitchen when an order is cancelled** (on). Off: **Cancel** works exactly the same (same PIN rules, same audit log), but nothing is printed; the confirm box and the PIN box say "Nothing is printed for the kitchen." Taking one sent dish off (− or Remove) still prints its CANCELLED ticket. Setting `print_cancelled_order` (`1` / `0`, default `1`).
 - **Menu button size** (Screen & devices): *Normal* or *Large*. Large makes the menu tiles, categories and the order screen's Send, Finish & Pay, tool and +/− buttons bigger on every device, with no sideways scrolling at 1024 × 600 or on a phone. Setting `button_size` = `normal` / `large`. This card also shows on phones and tablets; full screen and the local server stay on the main till.
 
 ### Set menus
@@ -214,6 +215,21 @@ A section can also say what its dishes **come with** (e.g. Main: with rice or no
 
 On the order screen the set's tile opens a picker; the order shows the set with its dishes under it.
 The bill and receipt show only the set and its price. Kitchen tickets print the dishes under `SET: <name>` between `=` rules, each section under a `-` rule, still split by team, drinks and course like any other dish.
+
+**Two or more sets sent with all their courses at once** (*All courses together*, a takeaway, a reprint, or cancelling them) print course by course instead of set by set: the sets' names on top (`SET: 2 x DINNER SET`, `SET: LUNCH SET`), then every starter under `STARTERS`, then every main and side under `MAINS` (drinks under `DRINKS` and desserts under `DESSERTS` when they print with the food). The same dish from different sets, with the same options and note, is one line (`2 x Soup`). Every team's, printer's, DRINKS and DESSERTS ticket of that send is laid out the same way. One set (even `2 x` one set), or courses sent one at a time (starters, then *Call mains*), print set by set as before.
+
+```
+========== SET: 2 x DINNER SET ===========
+============= SET: LUNCH SET =============
+
+---------------- STARTERS ----------------
+2 x Soup
+1 x Satay
+----------------- MAINS ------------------
+2 x Green curry
+1 x Pad Thai
+3 x Jasmine rice
+```
 
 Dishes with choices (e.g. chicken or beef) or options (how cooked, extras) can go in a set. When the set is added to an order, each such dish shows its choices right under it; required ones must be picked before **Add to order**. The choice keeps the set price; options with a price (e.g. + cheese) are added to the set's price, and the kitchen ticket shows the choice and options under the dish.
 
@@ -328,7 +344,7 @@ cargo test --release -p pos-core --test perf -- --ignored --nocapture
 
 Staff see only **Kitchen screen** and **About & updates** in Manage; the server refuses them every other Manage command too (they can still find, add and edit a customer while taking an order).
 
-**Cancel** opens a confirm box. Admins and managers just tap **Cancel order** (no PIN); the box says whether the kitchen has the order, and a **CANCELLED** ticket prints for the dishes still cooking. Staff type a PIN in the box: their own for an order the kitchen has not got yet, a manager's or admin's once it has. The PIN only approves the cancel; nobody is logged in or out. The server checks the same rules, and the audit log records who cancelled and whose PIN approved it.
+**Cancel** opens a confirm box. Admins and managers just tap **Cancel order** (no PIN); the box says whether the kitchen has the order, and a **CANCELLED** ticket prints for the dishes still cooking (unless switched off in Manage → Orders → *Cancelling an order*). Staff type a PIN in the box: their own for an order the kitchen has not got yet, a manager's or admin's once it has. The PIN only approves the cancel; nobody is logged in or out. The server checks the same rules, and the audit log records who cancelled and whose PIN approved it.
 
 **Delete several at once** (admins): History, Menu (items, categories, option groups), Customers, Floor plan (floors) and Manage → Backup & data (full backups and menu backups) each have a **Delete several…** button: tick what to delete (or **All**), tap Delete, then tap again to confirm. Single backups can also be deleted from their row.
 

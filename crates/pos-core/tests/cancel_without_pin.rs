@@ -151,3 +151,45 @@ fn a_part_paid_order_is_still_refused_without_a_pin() {
     assert!(matches!(k.pos.cancel_order_confirmed(&quinn, id, "", None), Err(PosError::Validation(_))));
     assert_eq!(status(&k, id), "open");
 }
+
+#[test]
+fn the_cancelled_ticket_for_a_whole_order_can_be_switched_off() {
+    let mut k = setup();
+    let (quinn, sam) = (k.manager.clone(), k.staff.clone());
+    // Not set: printed, as before the setting.
+    assert!(k.pos.prints_cancelled_order().unwrap());
+    let id = order_with_curry(&mut k, &quinn, true);
+    assert!(k.pos.cancel_order_confirmed(&quinn, id, "", None).unwrap().is_some());
+
+    // A kitchen setting: managers may change it, staff may not; 1 or 0 only.
+    assert!(matches!(k.pos.set_setting(&sam, PRINT_CANCELLED_ORDER_KEY, "0"), Err(PosError::Forbidden)));
+    assert!(matches!(k.pos.set_setting(&quinn, PRINT_CANCELLED_ORDER_KEY, "off"), Err(PosError::Validation(_))));
+    k.pos.set_setting(&quinn, PRINT_CANCELLED_ORDER_KEY, "0").unwrap();
+    assert!(!k.pos.prints_cancelled_order().unwrap());
+
+    // Off: cancelling works exactly the same, with nothing to print.
+    let id = order_with_curry(&mut k, &quinn, true);
+    assert!(k.pos.cancel_order_confirmed(&quinn, id, "", None).unwrap().is_none());
+    assert_eq!(status(&k, id), "cancelled");
+    let id = order_with_curry(&mut k, &sam, true);
+    // Staff still need a manager's or admin's PIN once the kitchen has it.
+    assert!(matches!(k.pos.cancel_order_confirmed(&sam, id, "", Some("2222")), Err(PosError::Forbidden)));
+    assert!(k.pos.cancel_order_confirmed(&sam, id, "", Some("4646")).unwrap().is_none());
+    assert_eq!(status(&k, id), "cancelled");
+    let id = order_with_curry(&mut k, &quinn, true);
+    assert!(k.pos.cancel_order_for_kitchen(&quinn, id, "").unwrap().is_none());
+    assert_eq!(status(&k, id), "cancelled");
+    assert!(k.pos.kitchen_board(&k.admin, "all").unwrap().is_empty());
+
+    // Taking one sent dish off still tells the kitchen.
+    let id = order_with_curry(&mut k, &quinn, true);
+    let line = k.pos.get_order(&quinn, id).unwrap().items[0].id;
+    let (_, job) = k.pos.update_item_for_kitchen(&quinn, line, &ItemUpdate { qty: 0, discount_cents: 0, note: None }).unwrap();
+    assert!(String::from_utf8_lossy(&job.expect("a CANCELLED ticket").bytes()).contains("CANCELLED"));
+
+    // Back on.
+    k.pos.set_setting(&quinn, PRINT_CANCELLED_ORDER_KEY, "1").unwrap();
+    let id = order_with_curry(&mut k, &quinn, true);
+    let job = k.pos.cancel_order_confirmed(&quinn, id, "", None).unwrap().expect("a CANCELLED ticket");
+    assert!(String::from_utf8_lossy(&job.bytes()).contains("CANCELLED"));
+}

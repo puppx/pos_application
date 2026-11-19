@@ -13,6 +13,12 @@ use crate::{Permission, Pos, PosError, Result, Session};
 
 const MAX_TEAMS: usize = 20;
 
+/// Setting: the teams a dish can be moved to when it is ordered ("Which team
+/// makes this?"), as team ids in a comma list, e.g. "1,2". Empty or not set:
+/// off, and "Starter or Main course?" (`starter_choice`) asks as before.
+/// A kitchen setting: managers may change it.
+pub const TEAM_CHOICE_KEY: &str = "team_choice";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Team {
     pub id: i64,
@@ -82,6 +88,7 @@ impl Pos {
         for id in existing.difference(&keep) {
             tx.execute("UPDATE products SET team_id = NULL WHERE team_id = ?1", [id])?;
             tx.execute("UPDATE categories SET team_id = NULL WHERE team_id = ?1", [id])?;
+            tx.execute("UPDATE order_items SET team_id = NULL WHERE team_id = ?1", [id])?;
             tx.execute("UPDATE teams SET active = 0 WHERE id = ?1", [id])?;
         }
         // Park names first so renames that swap names don't collide.
@@ -165,6 +172,42 @@ impl Pos {
         };
         self.audit(Some(s.user_id), "category.drink", &format!("{id} drink={drink} moved={moved}"))?;
         Ok(moved)
+    }
+
+    /// The teams staff may move a dish to (setting [`TEAM_CHOICE_KEY`]), in
+    /// team order. Removed teams are left out; empty = the picker is off
+    /// (also while kitchen teams are switched off).
+    pub fn team_choice(&self) -> Result<Vec<i64>> {
+        if self.setting("teams_on")?.as_deref() == Some("0") {
+            return Ok(Vec::new());
+        }
+        let raw = self.setting(TEAM_CHOICE_KEY)?.unwrap_or_default();
+        let ids: Vec<i64> = raw.split([',', ' ']).filter_map(|p| p.trim().parse().ok()).collect();
+        let picked: Vec<i64> = load_teams(&self.conn)?.into_iter().map(|t| t.id).filter(|id| ids.contains(id)).collect();
+        // One team left is no choice.
+        Ok(if picked.len() < 2 { Vec::new() } else { picked })
+    }
+
+    /// A [`TEAM_CHOICE_KEY`] value checked and tidied: "" (off), or two or
+    /// more existing teams, saved as "1,2" in team order.
+    pub(crate) fn clean_team_choice(&self, value: &str) -> Result<String> {
+        let parts: Vec<&str> = value.split([',', ' ']).map(str::trim).filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            return Ok(String::new());
+        }
+        let mut ids = HashSet::new();
+        for p in &parts {
+            let id: i64 = p.parse().map_err(|_| PosError::Validation("teams to choose from: team numbers separated by commas".into()))?;
+            self.check_team(Some(id))?;
+            if !ids.insert(id) {
+                return invalid("a team is listed twice");
+            }
+        }
+        if ids.len() < 2 {
+            return invalid("tick at least two teams to choose from (or none to switch it off)");
+        }
+        let order: Vec<String> = load_teams(&self.conn)?.into_iter().filter(|t| ids.contains(&t.id)).map(|t| t.id.to_string()).collect();
+        Ok(order.join(","))
     }
 
     pub(crate) fn check_team(&self, id: Option<i64>) -> Result<()> {

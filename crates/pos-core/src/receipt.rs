@@ -607,7 +607,7 @@ impl Pos {
         let r = self.receipt(s, order_id)?;
         // A bill handed over before payment: no second copy at payment.
         self.conn.execute("UPDATE orders SET bill_printed_at = unixepoch() WHERE id = ?1 AND status = 'open'", [order_id])?;
-        Ok(PrintJob::new(cfg.printer.target.clone(), r.escpos_for(&cfg.printer)))
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.escpos_for(&cfg.printer)).paced(cfg.printer.slow_send).about(format!("Bill #{order_id}")))
     }
 
     /// Reprint the staff copy of a paid order.
@@ -617,7 +617,7 @@ impl Pos {
             return invalid("no receipt printer is set up (Settings → Receipt printer)");
         }
         let r = self.receipt(s, order_id)?;
-        Ok(PrintJob::new(cfg.printer.target.clone(), r.staff_escpos_for(&cfg.printer)))
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.staff_escpos_for(&cfg.printer)).paced(cfg.printer.slow_send).about(format!("Staff copy #{order_id}")))
     }
 
     /// What to print right after a payment: the receipt (if automatic,
@@ -639,22 +639,32 @@ impl Pos {
             .query_row("SELECT bill_printed_at IS NOT NULL FROM orders WHERE id = ?1", [order.id], |r| r.get(0))
             .optional()?
             .unwrap_or(false);
+        // Sent slowly, the drawer pulse goes on its own, ahead of kitchen
+        // tickets still waiting for a shared printer; the receipt follows.
+        let apart = drawer && p.slow_send;
+        let lead: &[u8] = if apart { &[] } else { lead };
         let mut job = match &r {
-            Some(r) if cfg.auto_print && !bill_given => Some(PrintJob::copies(p.target.clone(), lead, r.escpos_for(p), p.copies, p.copy_delay_secs)),
-            _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec())),
+            Some(r) if cfg.auto_print && !bill_given => Some(PrintJob::copies(p.target.clone(), lead, r.escpos_for(p), p.copies, p.copy_delay_secs).paced(p.slow_send)),
+            _ if apart => None,
+            _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec()).paced(p.slow_send).urgent()),
         };
         // The staff copy follows the customer's, as one more part of the job.
         if let (Some(r), true) = (&r, cfg.staff_copy && order.status == "paid") {
             let staff = r.staff_escpos_for(p);
             match &mut job {
                 Some(j) => j.parts.push(staff),
-                None => job = Some(PrintJob::new(p.target.clone(), staff)),
+                None => job = Some(PrintJob::new(p.target.clone(), staff).paced(p.slow_send)),
             }
+        }
+        if apart {
+            let mut pulse = PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec()).paced(true).urgent();
+            pulse.more.extend(job.take());
+            job = Some(pulse);
         }
         if drawer {
             self.audit(Some(s.user_id), "drawer.open", &format!("cash payment, order {}", order.id))?;
         }
-        Ok(job)
+        Ok(job.map(|j| j.about(format!("Receipt #{}", order.id))))
     }
 
     /// "Open drawer" button (no sale). Logged, so it can be checked later.
@@ -665,7 +675,7 @@ impl Pos {
             return invalid("no receipt printer is set up, so the drawer cannot be opened");
         }
         self.audit(Some(s.user_id), "drawer.open", "no sale")?;
-        Ok(PrintJob::new(cfg.printer.target, DRAWER_KICK.to_vec()))
+        Ok(PrintJob::new(cfg.printer.target, DRAWER_KICK.to_vec()).paced(cfg.printer.slow_send).urgent().about("Cash drawer"))
     }
 
     /// Check the settings: a sample receipt (with the configured copies), or
@@ -674,7 +684,7 @@ impl Pos {
         s.require(Permission::ManageSettings)?;
         cfg.validate()?;
         if drawer_only {
-            return Ok(PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()));
+            return Ok(PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()).paced(cfg.printer.slow_send).urgent().about("Cash drawer"));
         }
         let thai = matches!(cfg.printer.names, Some(PrintNames::Both | PrintNames::Thai));
         let alt = |t: &str| thai.then(|| t.to_string());
@@ -706,6 +716,6 @@ impl Pos {
             show_staff: cfg.show_staff,
         };
         let p = &cfg.printer;
-        Ok(PrintJob::copies(p.target.clone(), &[], r.escpos_for(p), p.copies, p.copy_delay_secs))
+        Ok(PrintJob::copies(p.target.clone(), &[], r.escpos_for(p), p.copies, p.copy_delay_secs).paced(p.slow_send).about("Test receipt"))
     }
 }

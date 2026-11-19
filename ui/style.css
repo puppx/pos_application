@@ -624,6 +624,7 @@ tr.bad-row td { background: var(--danger-soft); }
 .quick-notes button { min-height: 40px; padding: 4px 12px; border-radius: 6px; font-size: 14px; }
 .quick-notes button.on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .badge.prep { background: var(--sun); border-color: var(--sun); color: var(--ink); }
+.badge.team { background: var(--ink); border-color: var(--ink); color: #fff; }
 
 /* ---------- on-screen keyboard (keyboard.js) ---------- */
 :root { --kb-h: 0px; }
@@ -820,6 +821,9 @@ button.danger-outline:hover { background: var(--danger-soft); }
 .course-pick button { min-height: 110px; font-size: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
 .course-pick button small { font-size: 14px; font-weight: 500; opacity: .85; }
 .course-pick button.main { background: var(--held); border-color: var(--held); }
+/* Which team makes this? One big button per team; the dish's usual team is filled in. */
+.course-pick.team-pick { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.course-pick.team-pick button { min-height: 96px; font-size: 22px; }
 .course-row { margin-bottom: 6px; }
 .course-row .seg button { min-height: 40px; }
 

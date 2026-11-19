@@ -47,7 +47,7 @@ fn kitchen_and_route_printers_each_use_their_own_mode() {
     assert_eq!(pos.kitchen_printer().unwrap().image_mode, ImageMode::Column);
     let bar = KitchenRoute {
         label: "Bar".into(), target: file("pos-image-mode-b.bin"), width: 32, copies: 1, team_ids: vec![], drinks: true, desserts: false,
-        image_mode: ImageMode::RasterSmall,
+        image_mode: ImageMode::RasterSmall, slow_send: false,
     };
     pos.set_kitchen_routes(&s, std::slice::from_ref(&bar)).unwrap();
     assert_eq!(pos.route_config(&bar).unwrap().image_mode, ImageMode::RasterSmall);

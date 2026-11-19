@@ -73,6 +73,8 @@ Rust, so the UI can change without touching them.
 
 **Starter or main course?** On a dine-in order, tapping a starter asks **Starter** or **Main course** (Manage → Orders → *Starter or main course* switches the question off). A dish not yet sent can be changed later: tap ✎ on it, then Starter or Main course.
 
+**Which team makes this?** Manage → Kitchen teams → *Which team makes this?*: tick two or more teams (e.g. Starter and Main). On a dine-in order, tapping a dish whose team is one of them shows a big button per ticked team (its usual team filled in); one tap adds it, made by that team for this order: it prints under that team's bar, on that team's printer, and shows under that team on the Kitchen screen. Cancel adds nothing. Dishes of other teams, takeaways and deliveries are added straight away. This question replaces *Starter or Main course?*; the dish stays a starter or a main as the menu says. With no teams ticked, *Starter or Main course?* works as before. A dish not yet sent can be moved later: tap ✎ on it, then **Team**. The team stays with the dish when it is moved to another table, joined onto another bill, reprinted or cancelled. Managers may change the setting.
+
 **A dish not on the menu:** tap **+ Other dish** above the menu, type its name and price (and how many, starter or main, a note). It is taxed at the main tax rate and prints on the kitchen ticket like any dish.
 
 **Copies of kitchen tickets (dine-in):** *Starters ticket copies* for starters sent first (or a table that orders only starters for now); *Mains ticket copies* for "Call mains" and for the first mains sent after the starters, also when the mains were ordered later; *Additional ticket copies* for more dishes after the mains (1 unless set).
@@ -263,6 +265,24 @@ Thai text)**, then save. Each printer keeps its own mode. *Standard* is the defa
 prints exactly as before. The other two modes also switch off the Chinese character mode
 that many Chinese printers start in.
 
+**Junk or skipped lines, mostly near the top of a ticket?** Cheap network printers
+(the same "POS80" clones) can lose data when a whole ticket arrives at once: their small
+buffer overflows while they print the first pictures, a picture command is lost and its
+dots print as rows of junk characters. **Send slowly (for printers that print junk or
+skip lines)**, on every printer's settings, sends each job in 1 KB pieces 50 ms apart
+(about 20 KB a second, slower than such a printer prints). It is **on by default**, also for
+printers saved before it existed. The till never waits for it: the app connects (so an
+offline printer is still reported at once) and the rest goes out in the background, one job
+at a time per printer, in order. A one-dish kitchen ticket in the app's font is about 30 KB
+(1.5 s); a three-ticket order about 90 KB (4.5 s), roughly as long as the paper takes to
+print. The cash drawer goes ahead of tickets still waiting for a shared printer (never into
+the middle of one being sent). Closing the app, or restarting it for an update, waits up to
+15 seconds for tickets still going out. A ticket that fails after it started (the printer
+switched off half way) shows on every till ("Kitchen ticket #94 did not finish printing…:
+print it again") and is written to `print-errors.log` in the data folder. Untick it for a
+fast printer that never printed junk. Printers installed in Windows (USB) are never paced:
+the spooler and USB already pace the data.
+
 Printing happens after the order is saved and never blocks the till. A printer
 that is off or unreachable gives up after 4 seconds and shows an error.
 
@@ -380,6 +400,7 @@ How it works:
 - `pos.db`: the database
 - `backups\pos-<timestamp>.db`: daily and manual backups
 - `backups\pos-before-update-*.db`, `pos-before-reset-*.db`, `pos-before-restore-*.db`: safety copies taken before an update, a reset or a restore (the newest 3 of each are kept, and any from the last 7 days)
+- `print-errors.log`: prints that failed after they started (the previous one kept as `print-errors.old.log` past 256 KB)
 - `backups\pos-imported-*.db`: backups loaded with *Restore everything from a file…* (the newest 3 are kept, and any from the last 7 days)
 
 To restore a backup, use **Manage → Backup & data → Restore** (below). By hand: close the app, delete `pos.db-wal` and `pos.db-shm` if they are there, and copy the backup over `pos.db`.

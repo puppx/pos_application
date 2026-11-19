@@ -49,7 +49,10 @@ pub use menu::{Category, FLAG_OFF_DESSERT, FLAG_OFF_DRINK, FLAG_OFF_PREP, FLAG_O
 pub use menu_tools::{ImportReport, ImportRow};
 pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
-pub use printing::{system_printers, KitchenRoute, PRINT_CANCELLED_ORDER_KEY, ImageMode, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
+pub use printing::{
+    paced_duration, print_failures, set_print_error_log, system_printers, wait_for_prints, write_paced, ImageMode, InFlight, PrintFailure, PrintFailures, KitchenRoute, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem,
+    PRINT_CANCELLED_ORDER_KEY, SLOW_CHUNK, SLOW_PAUSE,
+};
 pub use orders::{
     ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, OPEN_ITEM_SKU,
 };
@@ -63,7 +66,7 @@ pub use settings::{
 };
 pub use shifts::{CashMove, Shift};
 pub use sets::{SetChoice, SetPick, SetSection, SetSectionInput};
-pub use teams::{Team, TeamInput};
+pub use teams::{Team, TeamInput, TEAM_CHOICE_KEY};
 pub use roles::{Permission, Role, Session};
 pub use users::User;
 pub use variants::{Variant, VariantInput};
@@ -101,6 +104,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0024_shared_pins.sql"),
     include_str!("migrations/0025_sub_categories.sql"),
     include_str!("migrations/0026_sub_category_off.sql"),
+    include_str!("migrations/0027_item_team.sql"),
 ];
 /// The schema this app creates; backups up to this version can be restored.
 pub const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
@@ -160,13 +164,22 @@ impl Pos {
 
     pub fn set_setting(&self, s: &Session, key: &str, value: &str) -> Result<()> {
         // Managers may change the kitchen settings; the rest is for admins.
-        const KITCHEN: &[&str] = &["drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes", "starter_choice",
-            "kds_slow_mins", "kds_late_mins", "kds_refresh_secs", "kds_paid_hours", "kds_beep", printing::PRINT_CANCELLED_ORDER_KEY];
+        const KITCHEN: &[&str] = &[
+            "drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes", "starter_choice", teams::TEAM_CHOICE_KEY,
+            "kds_slow_mins", "kds_late_mins", "kds_refresh_secs", "kds_paid_hours", "kds_beep", printing::PRINT_CANCELLED_ORDER_KEY,
+        ];
         s.require(if KITCHEN.contains(&key) { Permission::KitchenSettings } else { Permission::ManageSettings })?;
         if key.starts_with('_') {
             return error::invalid("reserved setting key");
         }
         settings::validate(key, value)?;
+        let tidy;
+        let value = if key == teams::TEAM_CHOICE_KEY {
+            tidy = self.clean_team_choice(value)?;
+            tidy.as_str()
+        } else {
+            value
+        };
         self.conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",

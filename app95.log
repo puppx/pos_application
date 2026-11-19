@@ -1,0 +1,8 @@
+libEGL warning: DRI3 error: Could not get DRI3 device
+libEGL warning: Ensure your X server supports DRI3 to get accelerated rendering
+libEGL warning: DRI3 error: Could not get DRI3 device
+libEGL warning: Ensure your X server supports DRI3 to get accelerated rendering
+printer: Kitchen ticket #611 did not finish printing on the printer at 127.0.0.1:9100 (Broken pipe (os error 32)): print it again
+libEGL warning: DRI3 error: Could not get DRI3 device
+libEGL warning: Ensure your X server supports DRI3 to get accelerated rendering
+printer: Kitchen ticket #611 did not finish printing on the printer at 127.0.0.1:9100 (Broken pipe (os error 32)): print it again

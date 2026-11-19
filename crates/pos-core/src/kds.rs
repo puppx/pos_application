@@ -38,7 +38,8 @@ pub struct BoardOrder {
 }
 
 impl Pos {
-    /// Orders with dishes still to do. `filter`: "all", "team:<id>",
+    /// Orders with dishes still to do. `filter`: "all", "team:<id>" (a dish
+    /// moved to another team on its order shows under that team),
     /// "drinks", "desserts" or "food" (everything but drinks).
     pub fn kitchen_board(&self, s: &Session, filter: &str) -> Result<Vec<BoardOrder>> {
         s.require(Permission::Sell)?;
@@ -47,7 +48,7 @@ impl Pos {
         let paid_secs = self.kds_paid_hours()? * 3600;
         let mut stmt = self.conn.prepare_cached(
             "SELECT i.id, i.order_id, i.qty, i.name, i.name_alt, i.note, i.sent_at, i.with_name, par.name, i.kitchen_done_at IS NOT NULL,
-                    p.team_id, p.drink, p.dessert
+                    COALESCE(i.team_id, p.team_id), p.drink, p.dessert
              FROM order_items i
              JOIN orders o ON o.id = i.order_id
              JOIN products p ON p.id = i.product_id

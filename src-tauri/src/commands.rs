@@ -932,6 +932,13 @@ commands! {
         app.with_session(t, |pos, s| pos.set_kitchen_routes(s, &routes))
     }
 
+    /// "Test Thai printing": the Thai sample in every image mode on one page,
+    /// for any printer form (kitchen, receipt, other kitchen printers).
+    fn test_thai_printer(app, t, config: PrinterConfig) -> PrintOutcome {
+        let job = app.with_session(t, |pos, s| pos.thai_test_job(s, &config))?;
+        Ok(print(Some(job)))
+    }
+
     fn test_route_printer(app, t, route: KitchenRoute) -> PrintOutcome {
         let job = app.with_session(t, |pos, s| {
             let cfg = pos.route_config(&route)?;

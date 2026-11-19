@@ -49,7 +49,7 @@ pub use menu::{Category, FLAG_OFF_DESSERT, FLAG_OFF_DRINK, FLAG_OFF_PREP, FLAG_O
 pub use menu_tools::{ImportReport, ImportRow};
 pub use options::{ItemOption, MenuOptions, OptionChoice, OptionGroup, OptionInput, ProductGroupLink};
 pub use receipt::{Receipt, ReceiptLine, ReceiptSettings};
-pub use printing::{system_printers, KitchenRoute, PRINT_CANCELLED_ORDER_KEY, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
+pub use printing::{system_printers, KitchenRoute, PRINT_CANCELLED_ORDER_KEY, ImageMode, KitchenTicket, PrintJob, PrintNames, PrinterConfig, PrinterTarget, TicketItem};
 pub use orders::{
     ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, OPEN_ITEM_SKU,
 };

@@ -254,6 +254,15 @@ the bundled Sarabun font (SIL Open Font License, `crates/pos-core/fonts/`) and s
 a raster image, which every ESC/POS printer can print. The screens stay in English;
 the Thai name is shown small under the item on the order screen.
 
+**Thai text doesn't print?** Some cheap printers (often unbranded "POS80" models) cannot
+print the standard image. Tap **Test Thai printing** on that printer's settings (kitchen
+printer, receipt printer or another kitchen printer). It prints one short page with the
+same Thai sample in each **Image mode**: *1. Compatible (older printers)*, *2. Small
+pieces*, *3. Standard*. Choose the mode whose Thai prints clearly under **Image mode (for
+Thai text)**, then save. Each printer keeps its own mode. *Standard* is the default and
+prints exactly as before. The other two modes also switch off the Chinese character mode
+that many Chinese printers start in.
+
 Printing happens after the order is saved and never blocks the till. A printer
 that is off or unreachable gives up after 4 seconds and shows an error.
 

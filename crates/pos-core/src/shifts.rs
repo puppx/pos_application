@@ -12,7 +12,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::error::invalid;
-use crate::printing::{render_escpos, render_text, Line, Size};
+use crate::printing::{render_escpos_in, render_text, Line, Size};
 use crate::receipt::{local_time, money, two_col};
 use crate::{PaymentNames, Permission, Pos, PosError, PrintJob, PrinterTarget, Result, Session};
 
@@ -268,7 +268,8 @@ impl Pos {
         if cfg.printer.target == PrinterTarget::None {
             return Ok(None);
         }
-        let bytes = render_escpos(&self.shift_layout(sh, &cfg.currency, cfg.printer.width)?, cfg.printer.width, cfg.printer.bold);
+        let p = &cfg.printer;
+        let bytes = render_escpos_in(&self.shift_layout(sh, &cfg.currency, p.width)?, p.width, p.bold, false, p.image_mode);
         Ok(Some(PrintJob::new(cfg.printer.target, bytes)))
     }
 }

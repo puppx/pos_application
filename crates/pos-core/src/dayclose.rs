@@ -9,7 +9,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::error::invalid;
-use crate::printing::{render_escpos, render_text, wrap, Line, Size};
+use crate::printing::{render_escpos_in, render_text, wrap, Line, Size};
 use crate::receipt::{local_time, money, two_col};
 use crate::{PaymentNames, Permission, Pos, PosError, PrintJob, PrinterTarget, Result, SalesSummary, Session};
 
@@ -290,7 +290,7 @@ impl Pos {
         }
         let store = self.setting("store_name")?.unwrap_or_else(|| "POS".into());
         let layout = d.layout(&store, &cfg.currency, cfg.printer.width, &self.payment_names()?);
-        let bytes = render_escpos(&layout, cfg.printer.width, cfg.printer.bold);
+        let bytes = render_escpos_in(&layout, cfg.printer.width, cfg.printer.bold, false, cfg.printer.image_mode);
         Ok(Some(PrintJob::new(cfg.printer.target, bytes)))
     }
 }

@@ -3749,6 +3749,16 @@ function platformsCard() {
   return card;
 }
 
+/// Printer "Image mode" choices (saved value, label), numbered as on the
+/// Thai test page so "the one marked 2" is the one to pick. Standard is the default.
+const IMAGE_MODES = [['column', '1. Compatible (older printers)'], ['raster_small', '2. Small pieces'], ['raster', '3. Standard (default)']];
+
+/// "Test Thai printing" for a printer form: one page with the Thai sample in every image mode.
+const thaiTestButton = (form) => h('button', { onclick: act(async () => {
+  if (form.none()) return toast('Choose a printer first', true);
+  printResult(await call('test_thai_printer', { config: form.config() }), 'Thai test page sent: choose the mode whose Thai prints clearly');
+}) }, 'Test Thai printing');
+
 /// Connection, paper and copies for one printer (kitchen or receipt).
 /// `names`: [[value, label]...] for "Names on tickets"; the first is the default.
 /// `courses`: also offer copies for starters and mains tickets (kitchen).
@@ -3783,6 +3793,9 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
   const copiesOf = (el) => (el.value.trim() ? Math.min(9, Math.max(1, parseInt(el.value, 10) || 1)) : null);
   const lang = h('select', {}, names.map(([v, label]) => h('option', { value: v }, label)));
   lang.value = names.some(([v]) => v === cfg.names) ? cfg.names : names[0][0];
+  // How Thai text (drawn as an image) is sent; "Test Thai printing" prints every mode.
+  const imageMode = h('select', { 'aria-label': 'Image mode (for Thai text)' }, IMAGE_MODES.map(([v, label]) => h('option', { value: v }, label)));
+  imageMode.value = IMAGE_MODES.some(([v]) => v === cfg.image_mode) ? cfg.image_mode : 'raster';
   const fields = h('div', { class: 'row' });
   const drawFields = () => setKids(fields, ...{
     none: [],
@@ -3805,6 +3818,9 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
       !simple && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
         h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
       !simple && h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)'),
+      // Label above the select: stays readable on a phone.
+      h('label', { class: 'field-col', style: 'gap:4px;align-self:flex-start;max-width:100%;color:var(--ink-2)' }, 'Image mode (for Thai text)', imageMode),
+      h('div', { class: 'muted small' }, 'Thai text (and all kitchen text in the app\'s font) prints as pictures. If it doesn\'t print, tap Test Thai printing and choose the number that prints clearly.'),
       courses && h('label', { class: 'check' }, appFont, ' Print tickets in the app\'s font (the same as the team names); off = the printer\'s own font'),
       courses && h('label', { class: 'check' }, tableOnly, ' "Call mains again" prints only the table, in huge letters (no dishes)'),
       courses && h('label', { class: 'check' }, large, ' Large text for dishes, options and notes (fewer letters per line)')),
@@ -3814,6 +3830,7 @@ function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, sim
       copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
       names: lang.value,
       bold: bold.checked,
+      image_mode: imageMode.value,
       ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), additional_copies: copiesOf(additionalCopies), large_text: large.checked, call_table_only: tableOnly.checked, app_font: appFont.checked }),
       ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
       ...(kind.value === 'windows' && { name: winName.value }),
@@ -4203,6 +4220,7 @@ async function renderSettings() {
         if (kitchen.none()) return toast('Choose a printer first', true);
         printResult(await call('test_kitchen_printer', { config: kitchen.config() }), 'Test ticket sent');
       }) }, 'Print test ticket'),
+      thaiTestButton(kitchen),
       h('button', { class: 'primary', onclick: act(async () => {
         await call('set_kitchen_printer', { config: kitchen.config() });
         toast('Kitchen printer saved');
@@ -4226,6 +4244,7 @@ async function renderSettings() {
         if (receipt.none()) return toast('Choose a printer first', true);
         printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: false }), 'Test receipt sent');
       }) }, 'Print test receipt'),
+      thaiTestButton(receipt),
       h('button', { onclick: act(async () => {
         if (receipt.none()) return toast('Choose a printer first', true);
         printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: true }), 'Drawer opened');
@@ -4395,13 +4414,14 @@ function routesCard(systemPrinters) {
         const teamBoxes = teams.map((t) => ({ t, box: h('input', { type: 'checkbox', checked: (r.team_ids ?? []).includes(t.id) }) }));
         const value = () => {
           const c = pf.config();
-          return { label: label.value.trim(), kind: c.kind, host: c.host, port: c.port, name: c.name, path: c.path, width: c.width, copies: c.copies,
+          return { label: label.value.trim(), kind: c.kind, host: c.host, port: c.port, name: c.name, path: c.path, width: c.width, copies: c.copies, image_mode: c.image_mode,
             drinks: drinks.checked, desserts: desserts.checked, team_ids: teamBoxes.filter((x) => x.box.checked).map((x) => x.t.id) };
         };
         forms.push(value);
         return h('div', { class: 'card stack route-card' },
           h('div', { class: 'row' }, label, h('span', { style: 'flex:1' }),
             h('button', { onclick: act(async () => printResult(await call('test_route_printer', { route: value() }), 'Test ticket sent')) }, 'Print test'),
+            thaiTestButton(pf),
             h('button', { class: 'danger', onclick: () => { rows = forms.map((f) => f()); rows.splice(i, 1); draw(); } }, 'Remove')),
           pf.el,
           h('div', { class: 'row' }, h('strong', {}, 'Prints:'),

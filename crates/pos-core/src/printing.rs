@@ -14,6 +14,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
+pub use crate::raster::ImageMode;
 use crate::{ItemUpdate, Order, OrderItem, OrderType, Permission, Pos, PosError, Result, Session};
 
 const SETTING_KEY: &str = "_kitchen_printer";
@@ -79,6 +80,10 @@ pub struct PrinterConfig {
     /// letters, without the dishes (on by default).
     #[serde(default = "yes")]
     pub call_table_only: bool,
+    /// How this printer is sent images (Thai text, the app's font, team
+    /// bars). Saved settings without it print as before (standard raster).
+    #[serde(default)]
+    pub image_mode: ImageMode,
 }
 
 fn yes() -> bool {
@@ -108,6 +113,9 @@ pub struct KitchenRoute {
     pub drinks: bool,
     #[serde(default)]
     pub desserts: bool,
+    /// This printer's own way of printing images (see [`PrinterConfig`]).
+    #[serde(default)]
+    pub image_mode: ImageMode,
 }
 
 /// Language of item names on a printout. Items without a Thai name always
@@ -169,6 +177,7 @@ impl Default for PrinterConfig {
             additional_copies: None,
             app_font: true,
             call_table_only: true,
+            image_mode: ImageMode::Raster,
         }
     }
 }
@@ -460,6 +469,13 @@ pub(crate) fn render_escpos(lines: &[Line], width: usize, bold: bool) -> Vec<u8>
 /// Rules ("=====", "--- SET ---") and blank lines stay the printer's, so
 /// they still run edge to edge.
 pub(crate) fn render_escpos_font(lines: &[Line], width: usize, bold: bool, app_font: bool) -> Vec<u8> {
+    render_escpos_in(lines, width, bold, app_font, ImageMode::Raster)
+}
+
+/// As [`render_escpos_font`], with images sent in `mode` (the printer's
+/// "Image mode" setting).
+pub(crate) fn render_escpos_in(lines: &[Line], width: usize, bold: bool, app_font: bool, mode: ImageMode) -> Vec<u8> {
+    let dots = width * crate::raster::DOTS_PER_CHAR;
     let is_rule = |t: &str| {
         let t = t.trim();
         t.is_empty() || ((t.starts_with('=') || t.starts_with('-')) && !crate::raster::needs_raster(t))
@@ -467,9 +483,10 @@ pub(crate) fn render_escpos_font(lines: &[Line], width: usize, bold: bool, app_f
     // Init, code page 437, and the USA character set: printers set to the UK
     // set print "#" as "£", which turned "#12" into "£12".
     let mut b = vec![0x1B, b'@', 0x1B, b't', 0, 0x1B, b'R', 0];
+    b.extend_from_slice(mode.init_extra());
     for l in lines {
         if l.inverse {
-            b.extend(crate::raster::escpos_banner(&l.text, width * crate::raster::DOTS_PER_CHAR));
+            b.extend(crate::raster::escpos_banner_in(&l.text, dots, mode));
             continue;
         }
         // A heading inside a rule ("------ MAIN ------") in the app's font: the
@@ -480,12 +497,12 @@ pub(crate) fn render_escpos_font(lines: &[Line], width: usize, bold: bool, app_f
             if t.chars().any(char::is_alphanumeric) {
                 let inner = t.trim_matches(c).trim();
                 let short = c.to_string().repeat(3);
-                b.extend(crate::raster::escpos_line(&format!("{short} {inner} {short}"), l.size, true, width * crate::raster::DOTS_PER_CHAR));
+                b.extend(crate::raster::escpos_line_in(&format!("{short} {inner} {short}"), l.size, true, dots, mode));
                 continue;
             }
         }
         if crate::raster::needs_raster(&l.text) || (app_font && !is_rule(&l.text)) {
-            b.extend(crate::raster::escpos_line(l.text.trim_end(), l.size, l.center, width * crate::raster::DOTS_PER_CHAR));
+            b.extend(crate::raster::escpos_line_in(l.text.trim_end(), l.size, l.center, dots, mode));
             continue;
         }
         b.extend_from_slice(&[0x1B, b'a', u8::from(l.center)]);
@@ -590,7 +607,7 @@ impl Course {
 
 /// The ESC/POS bytes of several tickets one after another (each ends with a cut).
 fn escpos_all(tickets: &[KitchenTicket], cfg: &PrinterConfig) -> Vec<u8> {
-    tickets.iter().flat_map(|t| t.to_escpos_font(cfg.width, cfg.bold, cfg.app_font)).collect()
+    tickets.iter().flat_map(|t| t.escpos_for(cfg)).collect()
 }
 
 impl KitchenTicket {
@@ -751,6 +768,12 @@ impl KitchenTicket {
     pub fn to_escpos_font(&self, width: usize, bold: bool, app_font: bool) -> Vec<u8> {
         render_escpos_font(&self.lines(width), width, bold, app_font)
     }
+
+    /// The ticket as `cfg`'s printer prints it: its paper width, bold, font
+    /// and image mode.
+    pub fn escpos_for(&self, cfg: &PrinterConfig) -> Vec<u8> {
+        render_escpos_in(&self.lines(cfg.width), cfg.width, cfg.bold, cfg.app_font, cfg.image_mode)
+    }
 }
 
 /// Map a character to code page 437, the default on ESC/POS printers.
@@ -879,6 +902,7 @@ impl Pos {
             mains_copies: None,
             prep_copies: None,
             additional_copies: Some(r.copies),
+            image_mode: r.image_mode,
             ..self.kitchen_printer()?
         })
     }
@@ -1662,8 +1686,56 @@ impl Pos {
             banner: None,
             by_course: false,
         };
-        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.to_escpos_font(cfg.width, cfg.bold, cfg.app_font), cfg.copies, cfg.copy_delay_secs))
+        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.escpos_for(cfg), cfg.copies, cfg.copy_delay_secs))
     }
+
+    /// "Test Thai printing": one short page with the Thai sample in every
+    /// image mode (see [`thai_test_page`]), to see which this printer takes.
+    pub fn thai_test_job(&self, s: &Session, cfg: &PrinterConfig) -> Result<PrintJob> {
+        s.require(Permission::ManageSettings)?;
+        cfg.validate()?;
+        Ok(PrintJob::new(cfg.target.clone(), thai_test_page(cfg.width)))
+    }
+}
+
+/// Thai sample on the test page.
+pub(crate) const THAI_SAMPLE: &str = "ทดสอบภาษาไทย ผัดไทย 120.00";
+
+/// The Thai test page, `width` characters wide: an ASCII header, then for
+/// each mode in [`ImageMode::TEST_ORDER`] an ASCII label ("1. Compatible
+/// (older printers)", the name in the settings) and the Thai sample drawn in that mode,
+/// then a cut. Each mode starts from a fresh init (ESC @ and the code page,
+/// plus FS . to leave Chinese mode), so one the printer cannot take upsets
+/// the next as little as possible; the standard raster mode, the one that
+/// prints junk when it fails, comes last.
+pub(crate) fn thai_test_page(width: usize) -> Vec<u8> {
+    // The same start as a real job; each sample adds what its mode adds
+    // (FS . for the new modes), so "3. Standard" prints exactly as Standard does.
+    const INIT: [u8; 8] = [0x1B, b'@', 0x1B, b't', 0, 0x1B, b'R', 0];
+    let dots = width * crate::raster::DOTS_PER_CHAR;
+    let text = |b: &mut Vec<u8>, bold: bool, t: &str| {
+        b.extend_from_slice(&[0x1B, b'a', 0, 0x1D, b'!', 0, 0x1B, b'E', u8::from(bold)]);
+        for l in wrap(t, width, "", "") {
+            b.extend(l.chars().map(cp437));
+            b.push(b'\n');
+        }
+    };
+    let mut b = INIT.to_vec();
+    text(&mut b, true, "Thai test - pick the mode that prints clearly");
+    text(&mut b, false, "Then choose it under Image mode (for Thai text) in this printer's settings.");
+    for (i, mode) in ImageMode::TEST_ORDER.into_iter().enumerate() {
+        b.push(b'\n');
+        b.extend_from_slice(&INIT);
+        b.extend_from_slice(mode.init_extra());
+        text(&mut b, true, &format!("{}. {}", i + 1, mode.label()));
+        b.extend(crate::raster::escpos_line_in(THAI_SAMPLE, Size::Normal, false, dots, mode));
+    }
+    b.push(b'\n');
+    b.extend_from_slice(&INIT);
+    text(&mut b, false, "End of test");
+    b.extend_from_slice(&[0x1B, b'd', 4]); // feed past the cutter
+    b.extend_from_slice(&[0x1D, b'V', 66, 0]); // partial cut
+    b
 }
 
 // ------------------------------------------------------- Windows spooler
@@ -1901,6 +1973,90 @@ mod tests {
         assert!(PrinterConfig { width: 10, ..ok.clone() }.validate().is_err());
         assert!(PrinterConfig { copy_delay_secs: 31, ..ok.clone() }.validate().is_err());
         assert!(PrinterConfig { copy_delay_secs: 0, ..ok }.validate().is_ok());
+    }
+
+    #[test]
+    fn old_settings_load_with_the_standard_image_mode() {
+        let cfg: PrinterConfig = serde_json::from_str(r#"{"kind":"network","host":"192.168.1.50","port":9100,"width":42,"bold":true}"#).unwrap();
+        assert_eq!(cfg.image_mode, ImageMode::Raster);
+        let route: KitchenRoute = serde_json::from_str(r#"{"label":"Bar","kind":"windows","name":"Bar","width":32,"copies":1,"drinks":true}"#).unwrap();
+        assert_eq!(route.image_mode, ImageMode::Raster);
+        let receipt: crate::ReceiptSettings = serde_json::from_str(r#"{"kind":"file","path":"COM3","auto_print":true}"#).unwrap();
+        assert_eq!(receipt.printer.image_mode, ImageMode::Raster);
+        // The names saved and sent by the settings screen.
+        for (mode, name) in [(ImageMode::Raster, "raster"), (ImageMode::Column, "column"), (ImageMode::RasterSmall, "raster_small")] {
+            let json = serde_json::to_string(&PrinterConfig { image_mode: mode, ..PrinterConfig::default() }).unwrap();
+            assert!(json.contains(&format!(r#""image_mode":"{name}""#)), "{json}");
+            assert_eq!(serde_json::from_str::<PrinterConfig>(&json).unwrap().image_mode, mode);
+        }
+        assert!(serde_json::from_str::<PrinterConfig>(r#"{"kind":"none","image_mode":"bogus"}"#).is_err());
+    }
+
+    #[test]
+    fn every_image_on_a_ticket_follows_the_image_mode() {
+        let mut t = ticket();
+        t.items[0].name_alt = Some("เบอร์เกอร์".into());
+        t.banner = Some("CURRY / แกง".into());
+        let gs_v0 = |b: &[u8]| b.windows(4).filter(|w| *w == [0x1D, b'v', b'0', 0]).count();
+        let esc_star = |b: &[u8]| b.windows(3).filter(|w| *w == [0x1B, b'*', 33]).count();
+        for (width, bold, app_font) in [(42, true, true), (32, false, false), (48, true, false)] {
+            let cfg = PrinterConfig { width, bold, app_font, ..PrinterConfig::default() };
+            // The default is exactly what the ticket always printed.
+            assert_eq!(t.escpos_for(&cfg), t.to_escpos_font(width, bold, app_font));
+            let std = t.escpos_for(&cfg);
+            assert!(gs_v0(&std) > 0 && esc_star(&std) == 0);
+            assert!(!std.windows(2).any(|w| w == [0x1C, b'.']));
+            // Compatible: no raster command left, the bar and Thai as column images.
+            let col = t.escpos_for(&PrinterConfig { image_mode: ImageMode::Column, ..cfg.clone() });
+            assert_eq!(&col[..10], &[0x1B, b'@', 0x1B, b't', 0, 0x1B, b'R', 0, 0x1C, b'.']);
+            assert_eq!(gs_v0(&col), 0);
+            assert!(esc_star(&col) >= 2, "bar and Thai name");
+            assert!(col.ends_with(&[0x1D, b'V', 66, 0]));
+            // Small pieces: more, smaller raster commands.
+            let small = t.escpos_for(&PrinterConfig { image_mode: ImageMode::RasterSmall, ..cfg });
+            assert_eq!(&small[8..10], &[0x1C, b'.']);
+            assert!(gs_v0(&small) > gs_v0(&std));
+            assert_eq!(esc_star(&small), 0);
+        }
+    }
+
+    #[test]
+    fn thai_test_page_has_every_mode_safest_first() {
+        const INIT: [u8; 8] = [0x1B, b'@', 0x1B, b't', 0, 0x1B, b'R', 0];
+        for width in [32, 42, 48] {
+            let b = thai_test_page(width);
+            let find = |needle: &[u8]| b.windows(needle.len()).position(|w| w == needle).unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(needle)));
+            assert!(b.starts_with(&INIT));
+            let head = find(b"Thai test - pick the mode");
+            let labels = ["1. Compatible (older printers)", "2. Small pieces", "3. Standard"].map(|l| find(l.as_bytes()));
+            let end = find(b"End of test");
+            assert!(head < labels[0] && labels[0] < labels[1] && labels[1] < labels[2] && labels[2] < end);
+            assert!(b.ends_with(&[0x1B, b'd', 4, 0x1D, b'V', 66, 0]));
+            // Each mode starts afresh, so one that fails upsets the next one less.
+            // Standard gets no FS ., exactly like a real Standard job.
+            for (&l, mode) in labels.iter().zip(ImageMode::TEST_ORDER) {
+                assert!(b[..l].ends_with(&[INIT.as_slice(), mode.init_extra(), &[0x1B, b'a', 0, 0x1D, b'!', 0, 0x1B, b'E', 1]].concat()), "{mode:?}");
+            }
+            // The header and the end start like a real Standard job too (no FS .).
+            assert!(b[INIT.len()..].starts_with(&[0x1B, b'a', 0]));
+            assert!(b[..end].ends_with(&[INIT.as_slice(), &[0x1B, b'a', 0, 0x1D, b'!', 0, 0x1B, b'E', 0]].concat()));
+            // The sample under each label is drawn in that label's mode.
+            let dots = width * crate::raster::DOTS_PER_CHAR;
+            let sections = [&b[labels[0]..labels[1]], &b[labels[1]..labels[2]], &b[labels[2]..end]];
+            for (mode, sec) in ImageMode::TEST_ORDER.into_iter().zip(sections) {
+                let img = crate::raster::escpos_line_in(THAI_SAMPLE, Size::Normal, false, dots, mode);
+                assert!(sec.windows(img.len()).any(|w| w == img.as_slice()), "{mode:?} at {width}");
+            }
+            assert_eq!(ImageMode::TEST_ORDER, [ImageMode::Column, ImageMode::RasterSmall, ImageMode::Raster]);
+            // Nothing but the images is outside plain ASCII.
+            let mut text = b.clone();
+            for mode in ImageMode::TEST_ORDER {
+                let img = crate::raster::escpos_line_in(THAI_SAMPLE, Size::Normal, false, dots, mode);
+                let at = text.windows(img.len()).position(|w| w == img.as_slice()).unwrap();
+                text.drain(at..at + img.len());
+            }
+            assert!(text.is_ascii());
+        }
     }
 
     #[test]

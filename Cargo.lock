@@ -2551,12 +2551,15 @@ dependencies = [
 name = "pos-app"
 version = "0.12.3"
 dependencies = [
+ "base64 0.22.1",
  "pos-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-updater",
+ "tempfile",
  "tiny_http",
 ]
 

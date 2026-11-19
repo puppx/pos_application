@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use tauri::{AppHandle, Manager};
 use tiny_http::{Header, Method, Request, Response};
 
-use crate::commands::{dispatch, App};
+use crate::commands::{backup_download, dispatch, App};
 
 const WORKERS: usize = 4;
 const MAX_BODY: u64 = 1 << 20;
@@ -47,7 +47,11 @@ impl Server {
                 let (http, handle) = (http.clone(), handle.clone());
                 std::thread::spawn(move || {
                     while let Ok(rq) = http.recv() {
-                        respond(&handle, rq);
+                        // A bug in one request must not take this worker down.
+                        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| respond(&handle, rq)));
+                        if ok.is_err() {
+                            eprintln!("server: a request failed unexpectedly");
+                        }
                     }
                 })
             })
@@ -83,30 +87,53 @@ pub fn urls(port: u16) -> Vec<String> {
     out
 }
 
-fn header(name: &str, value: &str) -> Header {
-    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("valid header")
+/// Adding headers never panics: a value is made plain ASCII first, and a
+/// header that still cannot be built is left out.
+trait Headers: Sized {
+    fn header(self, name: &str, value: &str) -> Self;
+}
+
+impl<R: Read> Headers for Response<R> {
+    fn header(self, name: &str, value: &str) -> Self {
+        let value: String = value.chars().map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '_' }).collect();
+        match Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            Ok(h) => self.with_header(h),
+            Err(_) => self,
+        }
+    }
+}
+
+/// `attachment` with the file name: an ASCII fallback and the exact UTF-8
+/// name (RFC 6266), e.g. for "pos-café.db".
+fn attachment(name: &str) -> String {
+    let ascii: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect();
+    let exact: String = name
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{exact}")
 }
 
 fn file(body: &'static [u8], kind: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_data(body)
-        .with_header(header("Content-Type", kind))
-        .with_header(header("Cache-Control", "no-cache"))
-        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .header("Content-Type", kind)
+        .header("Cache-Control", "no-cache")
+        .header("X-Content-Type-Options", "nosniff")
 }
 
 /// Fonts never change within a version, so browsers may keep them for a day.
 fn font(body: &'static [u8]) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_data(body)
-        .with_header(header("Content-Type", "font/ttf"))
-        .with_header(header("Cache-Control", "max-age=86400"))
-        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .header("Content-Type", "font/ttf")
+        .header("Cache-Control", "max-age=86400")
+        .header("X-Content-Type-Options", "nosniff")
 }
 
 fn json(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(body)
         .with_status_code(status)
-        .with_header(header("Content-Type", "application/json; charset=utf-8"))
-        .with_header(header("Cache-Control", "no-store"))
+        .header("Content-Type", "application/json; charset=utf-8")
+        .header("Cache-Control", "no-store")
 }
 
 fn error(status: u16, msg: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -131,6 +158,10 @@ fn respond(handle: &AppHandle, mut rq: Request) {
         (Method::Get, "/fonts/Sarabun-Regular.ttf") => rq.respond(font(FONT_REGULAR)),
         (Method::Get, "/fonts/Sarabun-SemiBold.ttf") => rq.respond(font(FONT_SEMIBOLD)),
         (Method::Get, "/fonts/Sarabun-Bold.ttf") => rq.respond(font(FONT_BOLD)),
+        (Method::Post, "/backup-file") => match download(handle, &mut rq) {
+            Ok(r) => rq.respond(r),
+            Err(r) => rq.respond(r),
+        },
         (Method::Post, p) if p.starts_with("/api/") => {
             let cmd = p["/api/".len()..].to_string();
             let response = api(handle, &mut rq, &cmd);
@@ -163,5 +194,42 @@ fn api(handle: &AppHandle, rq: &mut Request, cmd: &str) -> Response<std::io::Cur
     match dispatch(&app, &terminal, cmd, args) {
         Ok(v) => json(200, v.to_string()),
         Err(e) => error(400, &e.to_string()),
+    }
+}
+
+/// A full backup as a file download (Settings → Backup & data → Download),
+/// e.g. to copy it to a USB stick from a laptop. `POST {"name": …}` with
+/// the terminal header, like the API, so other web pages cannot fetch it.
+fn download(handle: &AppHandle, rq: &mut Request) -> Result<Response<std::fs::File>, Response<std::io::Cursor<Vec<u8>>>> {
+    let terminal = terminal_id(rq).ok_or_else(|| error(400, "missing terminal id; reload the page"))?;
+    let mut body = Vec::new();
+    if rq.as_reader().take(4096).read_to_end(&mut body).is_err() {
+        return Err(error(400, "bad request"));
+    }
+    let name = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("name")?.as_str().map(str::to_string))
+        .ok_or_else(|| error(400, "which backup?"))?;
+    let app = handle.state::<App>();
+    let path = backup_download(&app, &terminal, &name).map_err(|e| error(400, &e.to_string()))?;
+    let file = std::fs::File::open(&path).map_err(|_| error(404, "not found"))?;
+    Ok(Response::from_file(file)
+        .header("Content-Type", "application/vnd.sqlite3")
+        .header("Content-Disposition", &attachment(&name))
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn any_backup_name_makes_a_safe_download_header() {
+        assert_eq!(attachment("pos-1.db"), "attachment; filename=\"pos-1.db\"; filename*=UTF-8''pos-1.db");
+        assert_eq!(attachment("pos-café.db"), "attachment; filename=\"pos-caf_.db\"; filename*=UTF-8''pos-caf%C3%A9.db");
+        // Odd values never panic: they are made ASCII (or the header is left out).
+        let r = Response::from_string("x").header("Content-Disposition", "a\r\nb é").header("Bad Name\u{e9}", "v");
+        assert!(r.headers().iter().any(|h| h.field.equiv("Content-Disposition") && h.value.as_str() == "a__b _"));
     }
 }

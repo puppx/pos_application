@@ -6,7 +6,7 @@ mod server;
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use pos_core::*;
 use serde::Serialize;
@@ -14,7 +14,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_updater::UpdaterExt;
 
-use commands::{backup_path, dispatch, list_backups, prune_backups, App, LOCAL};
+use commands::{backup_path, dispatch, newest_regular_backup, prune_backups, unique_backup_path, App, LOCAL};
 
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -91,6 +91,32 @@ fn set_server(
     status(&app, &srv)
 }
 
+// ---- backup folder (desktop only) ----
+
+/// "Open backup folder": show the full backups in Explorer, to copy one to
+/// a USB stick (e.g. to move to a new PC). Admins only.
+#[tauri::command(async)]
+fn open_backup_folder(app: Cmd<'_>) -> Result<()> {
+    app.with_session(LOCAL, |_, s| {
+        s.require(Permission::Backup)?;
+        s.require(Permission::ManageSettings)
+    })?;
+    let dir = &app.backup_dir;
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    // Explorer's exit code means nothing, so only a failure to start counts.
+    let mut child = cmd
+        .arg(dir)
+        .spawn()
+        .map_err(|e| PosError::Validation(format!("Cannot open the folder here ({e}). Open it yourself: {}", dir.display())))?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 // ---- full screen (desktop only) ----
 
 /// Setting (admin, Settings > Display): "1" opens the window full screen.
@@ -148,8 +174,7 @@ async fn check_update(app: Cmd<'_>, handle: AppHandle) -> Result<UpdateInfo> {
 async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
     app.with_session(LOCAL, |pos, s| {
         s.require(Permission::ManageSettings)?;
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        pos.backup_unchecked(app.backup_dir.join(format!("pos-before-update-{ts}.db")))?;
+        pos.backup_unchecked(unique_backup_path(&app.backup_dir, "pos-before-update-").0)?;
         pos.optimize()
     })?;
     let update = handle
@@ -165,10 +190,8 @@ async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
 
 /// Daily safety copy, taken at startup when the newest one is over a day old.
 fn auto_backup(pos: &Pos, dir: &Path) {
-    let fresh = list_backups(dir)
-        .first()
-        .and_then(|(t, _)| t.elapsed().ok())
-        .is_some_and(|age| age < AUTO_BACKUP_EVERY);
+    // Only daily and manual backups count: a restore or a loaded file is not one.
+    let fresh = newest_regular_backup(dir).and_then(|t| t.elapsed().ok()).is_some_and(|age| age < AUTO_BACKUP_EVERY);
     if !fresh && !pos.needs_setup().unwrap_or(true) {
         if let Err(e) = pos.backup_unchecked(backup_path(dir)) {
             eprintln!("auto backup failed: {e}");
@@ -208,6 +231,7 @@ fn main() {
             server_status,
             set_server,
             toggle_fullscreen,
+            open_backup_folder,
             quit_app,
             check_update,
             install_update,

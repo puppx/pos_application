@@ -23,6 +23,13 @@ const IDLE_LOGOUT: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_TERMINALS: usize = 64;
 /// Menu-only backups kept (each is a small JSON file).
 const MENU_BACKUPS_KEPT: usize = 30;
+/// Largest full backup that can be loaded from a file.
+const MAX_UPLOAD: u64 = 2 << 30;
+/// Largest piece of an upload per call (base64 of it stays well under the
+/// local server's 1 MB request limit).
+const UPLOAD_CHUNK: usize = 512 * 1024;
+/// What the admin types to confirm a restore.
+const RESTORE_WORD: &str = "RESTORE";
 
 struct Login {
     session: Session,
@@ -57,6 +64,12 @@ impl App {
     /// Run `f` as the user logged in on terminal `t`, re-validated against
     /// the database so a deactivated or demoted user loses access at once.
     pub fn with_session<T>(&self, t: &str, f: impl FnOnce(&mut Pos, &Session) -> Result<T>) -> Result<T> {
+        self.with_session_inner(t, |inner, s| f(&mut inner.pos, s))
+    }
+
+    /// [`App::with_session`] with all of [`Inner`], e.g. to log every
+    /// terminal out in the same lock as the change that requires it.
+    fn with_session_inner<T>(&self, t: &str, f: impl FnOnce(&mut Inner, &Session) -> Result<T>) -> Result<T> {
         let mut g = self.lock();
         let inner = &mut *g;
         let current = match inner.logins.get(t) {
@@ -70,7 +83,7 @@ impl App {
         match inner.pos.refresh_session(&current) {
             Ok(s) => {
                 inner.logins.insert(t.to_string(), Login { session: s.clone(), last_used: Instant::now() });
-                f(&mut inner.pos, &s)
+                f(inner, &s)
             }
             Err(_) => {
                 inner.logins.remove(t);
@@ -81,6 +94,13 @@ impl App {
 }
 
 impl Inner {
+    /// Everyone on every terminal (till, browsers, kitchen screens) must log in again.
+    fn log_everyone_out(&mut self) {
+        self.logins.clear();
+        self.network_throttle = LoginThrottle::default();
+        self.local_throttle = LoginThrottle::default();
+    }
+
     fn sign_in(&mut self, t: &str, s: &Session) {
         if self.logins.len() >= MAX_TERMINALS && !self.logins.contains_key(t) {
             let oldest = self
@@ -111,6 +131,9 @@ pub struct AppStatus {
     auto_pin_on: bool,
     /// Log in as soon as this many digits are typed (no OK needed).
     auto_pin: Option<usize>,
+    /// Changes when a backup is restored: the UI reloads to drop what it
+    /// remembers from the old data.
+    db_id: String,
 }
 
 /// Result of a print attempt. Printing problems never undo the action
@@ -204,6 +227,23 @@ pub struct BulkResult {
     errors: Vec<String>,
 }
 
+#[derive(Serialize)]
+pub struct RestoreResult {
+    /// What is in the till now.
+    summary: BackupSummary,
+    /// The backup that was restored.
+    restored: String,
+    /// Safety copy of the data from before the restore, in the backup folder.
+    safety_copy: String,
+}
+
+/// A file loaded with "Restore from a file…", checked and saved in the backup folder.
+#[derive(Serialize)]
+pub struct UploadedBackup {
+    file: BackupFile,
+    summary: BackupSummary,
+}
+
 /// A full backup file in the backup folder.
 #[derive(Serialize)]
 pub struct BackupFile {
@@ -213,9 +253,97 @@ pub struct BackupFile {
     modified: i64,
 }
 
-/// "pos-....db" in the backup folder only: never a path.
+/// "pos-....db" in the backup folder only: never a path. Daily and manual
+/// backups ("pos-<time>.db"), the safety copies made before an update, a
+/// reset or a restore, and files loaded from elsewhere ("pos-imported-…").
 fn is_full_backup_name(name: &str) -> bool {
     name.starts_with("pos-") && name.ends_with(".db") && !name.contains(['/', '\\']) && !name.contains("..")
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A fresh scratch file for checking a backup (see `Pos::prepare_restore`);
+/// never the same twice, so two checks at once cannot share one.
+fn work_path(dir: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!("restore-work-{}-{}-{n}.tmp", unix_now(), std::process::id()))
+}
+
+/// An upload in progress: "upload-<id>.part" (the id is the browser's own random hex).
+fn upload_path(dir: &Path, upload: &str) -> Result<PathBuf> {
+    if !(16..=64).contains(&upload.len()) || !upload.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(PosError::Validation("bad upload id".into()));
+    }
+    Ok(dir.join(format!("upload-{upload}.part")))
+}
+
+/// Uploads nobody finished (closed page, lost network) and scratch files
+/// left by a crash: untouched for an hour (a live upload writes every few
+/// seconds, so another admin's upload in progress is left alone).
+fn remove_stale_uploads(dir: &Path) {
+    let day = Duration::from_secs(60 * 60);
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > day);
+        if old && ((name.starts_with("upload-") && name.ends_with(".part")) || (name.starts_with("restore-work-") && name.ends_with(".tmp"))) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// A backup file name "<prefix><time>.db" not used yet (two in the same
+/// second never overwrite each other). Returns (path, name).
+pub fn unique_backup_path(dir: &Path, prefix: &str) -> (PathBuf, String) {
+    let mut ts = unix_now();
+    loop {
+        let name = format!("{prefix}{ts}.db");
+        let path = dir.join(&name);
+        if !path.exists() {
+            return (path, name);
+        }
+        ts += 1;
+    }
+}
+
+/// "<kind><digits>.db", e.g. kind "pos-" for the daily and manual backups.
+fn is_kind(name: &str, kind: &str) -> bool {
+    name.strip_prefix(kind)
+        .and_then(|r| r.strip_suffix(".db"))
+        .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Disk full as the plain message, whatever reported it.
+fn disk_full(e: PosError) -> PosError {
+    if is_disk_full(&e) { PosError::Validation(DISK_FULL.into()) } else { e }
+}
+
+/// Who may load and restore full backups: admins (settings and backups).
+fn require_restore(s: &Session) -> Result<()> {
+    s.require(Permission::ManageSettings)?;
+    s.require(Permission::Backup)
+}
+
+fn backup_file(path: &Path) -> Option<BackupFile> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    Some(BackupFile { name, size: meta.len(), modified })
+}
+
+/// A full backup's path, for downloading it in a browser (admins only).
+pub fn backup_download(app: &App, t: &str, name: &str) -> Result<PathBuf> {
+    app.with_session(t, |_, s| require_restore(s))?;
+    if !is_full_backup_name(name) {
+        return Err(PosError::Validation("that is not a backup".into()));
+    }
+    let path = app.backup_dir.join(name);
+    if !path.is_file() {
+        return Err(PosError::NotFound);
+    }
+    Ok(path)
 }
 
 /// Menu backups in `dir`, newest first.
@@ -249,8 +377,16 @@ fn is_menu_backup_name(name: &str) -> bool {
 }
 
 pub fn backup_path(dir: &Path) -> PathBuf {
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    dir.join(format!("pos-{ts}.db"))
+    unique_backup_path(dir, "pos-").0
+}
+
+/// The newest daily or manual backup ("pos-<time>.db"), for the automatic
+/// daily backup: safety copies and loaded files do not count.
+pub fn newest_regular_backup(dir: &Path) -> Option<SystemTime> {
+    list_backups(dir)
+        .into_iter()
+        .find(|(_, p)| p.file_name().is_some_and(|n| is_kind(&n.to_string_lossy(), "pos-")))
+        .map(|(t, _)| t)
 }
 
 pub fn list_backups(dir: &Path) -> Vec<(SystemTime, PathBuf)> {
@@ -265,29 +401,29 @@ pub fn list_backups(dir: &Path) -> Vec<(SystemTime, PathBuf)> {
     v
 }
 
-/// Safety copies made before an update or a reset: the newest few of each
-/// kind always stay, whatever `backups_kept` says.
+/// Safety copies made before an update, a reset or a restore, and files
+/// loaded from elsewhere: the newest few of each kind always stay,
+/// whatever `backups_kept` says, and so does any younger than
+/// [`SAFETY_COPIES_MIN_AGE`].
 pub const SAFETY_COPIES_KEPT: usize = 3;
+pub const SAFETY_COPIES_MIN_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Keep the newest `keep` regular backups ("pos-<time>.db", Settings →
 /// Backup & data, `backups_kept`) and the newest [`SAFETY_COPIES_KEPT`]
-/// before-update and before-reset copies. Nothing else is ever deleted.
+/// before-update, before-reset, before-restore and imported copies (plus
+/// safety copies under a week old). Nothing else is ever deleted.
 pub fn prune_backups(dir: &Path, keep: usize) {
     let all = list_backups(dir);
     let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let of_kind = |kind: &'static str| {
-        all.iter().map(|(_, p)| p).filter(move |p| {
-            let n = name(p);
-            n.strip_prefix(kind)
-                .and_then(|r| r.strip_suffix(".db"))
-                .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
-        })
-    };
-    let gone = of_kind("pos-")
-        .skip(keep.max(1))
-        .chain(of_kind("pos-before-update-").skip(SAFETY_COPIES_KEPT))
-        .chain(of_kind("pos-before-reset-").skip(SAFETY_COPIES_KEPT));
-    for old in gone {
+    let of_kind = |kind: &'static str| all.iter().filter(move |(_, p)| is_kind(&name(p), kind));
+    let old_enough = |(t, _): &&(SystemTime, PathBuf)| t.elapsed().is_ok_and(|age| age > SAFETY_COPIES_MIN_AGE);
+    let safety = ["pos-before-update-", "pos-before-reset-", "pos-before-restore-"]
+        .into_iter()
+        .flat_map(|kind| of_kind(kind).skip(SAFETY_COPIES_KEPT).filter(old_enough));
+    // Files loaded from elsewhere are copies of data kept somewhere else:
+    // just the newest few, so repeated uploads cannot fill the disk.
+    let imported = of_kind("pos-imported-").skip(SAFETY_COPIES_KEPT);
+    for (_, old) in of_kind("pos-").skip(keep.max(1)).chain(safety).chain(imported) {
         let _ = std::fs::remove_file(old);
     }
 }
@@ -334,6 +470,7 @@ commands! {
             remote: t != LOCAL,
             auto_pin: g.pos.auto_login_length()?,
             auto_pin_on: g.pos.pin_auto_login()?,
+            db_id: g.pos.database_id()?,
         })
     }
 
@@ -975,9 +1112,11 @@ commands! {
         app.with_session(t, |pos, s| {
             s.require(Permission::ManageSettings)?;
             pos.verify_pin(s, &pin)?;
-            let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let backup = app.backup_dir.join(format!("pos-before-reset-{ts}.db"));
-            pos.backup_unchecked(&backup)?;
+            let (backup, _) = unique_backup_path(&app.backup_dir, "pos-before-reset-");
+            if let Err(e) = pos.backup_unchecked(&backup) {
+                let _ = std::fs::remove_file(&backup);
+                return Err(disk_full(e));
+            }
             let report = pos.reset_data(s, &options)?;
             Ok(ResetResult { report, backup: backup.display().to_string() })
         })
@@ -1104,16 +1243,7 @@ commands! {
     /// Full backups in the backup folder, newest first.
     fn list_full_backups(app, t) -> Vec<BackupFile> {
         app.with_session(t, |_, s| s.require(Permission::Backup))?;
-        Ok(list_backups(&app.backup_dir)
-            .into_iter()
-            .filter_map(|(at, p)| {
-                let name = p.file_name()?.to_string_lossy().to_string();
-                let size = std::fs::metadata(&p).ok()?.len();
-                let modified = at.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
-                Some(BackupFile { name, size, modified })
-            })
-            .filter(|b| is_full_backup_name(&b.name))
-            .collect())
+        Ok(list_backups(&app.backup_dir).into_iter().filter_map(|(_, p)| backup_file(&p)).filter(|b| is_full_backup_name(&b.name)).collect())
     }
 
     /// Delete full backups by name (admins only).
@@ -1162,11 +1292,140 @@ commands! {
         prune_backups(&app.backup_dir, keep);
         Ok(path.display().to_string())
     }
+
+    /// Where the full backups are, so they can be copied to a USB stick.
+    fn backup_folder(app, t) -> String {
+        app.with_session(t, |_, s| s.require(Permission::Backup))?;
+        Ok(app.backup_dir.display().to_string())
+    }
+
+    /// What a full backup in the folder holds, checked as for a restore
+    /// (nothing is changed). Admins only.
+    fn inspect_backup(app, t, name: String) -> BackupSummary {
+        app.with_session(t, |_, s| require_restore(s))?;
+        if !is_full_backup_name(&name) {
+            return Err(PosError::Validation("that is not a backup".into()));
+        }
+        Pos::check_backup(app.backup_dir.join(&name), work_path(&app.backup_dir))
+    }
+
+    /// "Restore everything from a file…": the file arrives in pieces of at most
+    /// [`UPLOAD_CHUNK`] bytes (base64), in order, under a random `upload`
+    /// id. Returns the bytes received so far. Admins only.
+    fn upload_backup_chunk(app, t, upload: String, offset: u64, data: String) -> u64 {
+        use base64::Engine as _;
+        app.with_session(t, |_, s| require_restore(s))?;
+        let path = upload_path(&app.backup_dir, &upload)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| PosError::Validation("the file did not arrive intact; try again".into()))?;
+        if bytes.len() > UPLOAD_CHUNK {
+            return Err(PosError::Validation("upload piece too large".into()));
+        }
+        let end = offset.checked_add(bytes.len() as u64).filter(|&n| n <= MAX_UPLOAD);
+        let Some(end) = end else {
+            let _ = std::fs::remove_file(&path);
+            return Err(PosError::Validation("This file is too large to be a POS backup.".into()));
+        };
+        let io = |e: std::io::Error| io_error(&e, "cannot save the file");
+        let mut f = if offset == 0 {
+            remove_stale_uploads(&app.backup_dir);
+            std::fs::File::create(&path).map_err(io)?
+        } else {
+            let f = std::fs::OpenOptions::new().append(true).open(&path).map_err(|_| PosError::Validation("the upload was interrupted; try again".into()))?;
+            if f.metadata().map_err(io)?.len() != offset {
+                return Err(PosError::Validation("the upload was interrupted; try again".into()));
+            }
+            f
+        };
+        let written = std::io::Write::write_all(&mut f, &bytes).and_then(|_| f.sync_all());
+        if let Err(e) = written {
+            // Do not leave half a file filling the disk.
+            drop(f);
+            let _ = std::fs::remove_file(&path);
+            return Err(io(e));
+        }
+        Ok(end)
+    }
+
+    /// Check an uploaded file and keep it in the backup folder as
+    /// "pos-imported-<time>.db", ready to restore. A file that is not a
+    /// good POS backup is deleted again and the error says why.
+    fn finish_backup_upload(app, t, upload: String) -> UploadedBackup {
+        app.with_session(t, |_, s| require_restore(s))?;
+        let part = upload_path(&app.backup_dir, &upload)?;
+        if !part.is_file() {
+            return Err(PosError::Validation("the upload was interrupted; try again".into()));
+        }
+        let summary = match Pos::check_backup(&part, work_path(&app.backup_dir)) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(e);
+            }
+        };
+        let (dest, _) = unique_backup_path(&app.backup_dir, "pos-imported-");
+        std::fs::rename(&part, &dest).map_err(|e| io_error(&e, "cannot save the file"))?;
+        let file = backup_file(&dest).ok_or(PosError::NotFound)?;
+        let keep = app.with_session(t, |pos, s| {
+            pos.audit_event(s, "backup.import", &file.name)?;
+            pos.backups_kept()
+        })?;
+        // Older loaded files beyond the newest few go (never this one: it is the newest).
+        prune_backups(&app.backup_dir, keep);
+        Ok(UploadedBackup { file, summary })
+    }
+
+    /// Replace ALL data with a full backup from the backup folder: orders,
+    /// menu, customers, staff and PINs, settings. Admins only, with their
+    /// PIN and RESTORE typed. The backup is checked first; then the current
+    /// data is saved as "pos-before-restore-<time>.db" and replaced. Every
+    /// terminal is logged out: the staff and PINs now come from the backup.
+    fn restore_backup(app, t, name: String, pin: String, confirm: String) -> RestoreResult {
+        if confirm.trim() != RESTORE_WORD {
+            return Err(PosError::Validation(format!("type {RESTORE_WORD} to confirm")));
+        }
+        if !is_full_backup_name(&name) {
+            return Err(PosError::Validation("that is not a backup".into()));
+        }
+        let src = app.backup_dir.join(&name);
+        let (restored, keep) = app.with_session_inner(t, |inner, s| {
+            require_restore(s)?;
+            inner.pos.verify_pin(s, &pin)?;
+            if !src.is_file() {
+                return Err(PosError::NotFound);
+            }
+            // Check and migrate a copy first: a bad file never touches the live data.
+            let prepared = inner.pos.prepare_restore(&src, work_path(&app.backup_dir))?;
+            let (safety_path, safety_copy) = unique_backup_path(&app.backup_dir, "pos-before-restore-");
+            if let Err(e) = inner.pos.backup_unchecked(&safety_path) {
+                let _ = std::fs::remove_file(&safety_path);
+                return Err(disk_full(e));
+            }
+            let summary = match inner.pos.restore(s, prepared) {
+                // The copy did not happen: nothing changed, everyone stays
+                // logged in, and this attempt's safety copy goes (so failed
+                // attempts never push older safety copies out).
+                Err(e) => {
+                    let _ = std::fs::remove_file(&safety_path);
+                    return Err(e);
+                }
+                Ok(summary) => summary,
+            };
+            // The data is replaced: sessions from the old staff list are void.
+            inner.log_everyone_out();
+            let keep = inner.pos.backups_kept().unwrap_or(BACKUPS_KEPT_DEFAULT);
+            Ok((RestoreResult { summary, restored: name, safety_copy }, keep))
+        })?;
+        prune_backups(&app.backup_dir, keep);
+        Ok(restored)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use serde_json::json;
 
     fn app() -> App {
@@ -1184,21 +1443,31 @@ mod tests {
         let mut names: Vec<String> = (0..6).map(|i| format!("pos-{}.db", 1_700_000_000 + i)).collect();
         names.extend((0..5).map(|i| format!("pos-before-update-{}.db", 1_600_000_000 + i)));
         names.extend((0..2).map(|i| format!("pos-before-reset-{}.db", 1_500_000_000 + i)));
+        names.extend((0..4).map(|i| format!("pos-before-restore-{}.db", 1_400_000_000 + i)));
+        names.extend((0..4).map(|i| format!("pos-imported-{}.db", 1_300_000_000 + i)));
         names.extend(["pos-notes.txt".to_string(), "pos-mine.db".to_string()]);
-        let t0 = SystemTime::now() - std::time::Duration::from_secs(10_000);
+        // A month old: only the newest few safety copies of each kind stay.
+        let t0 = SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 60 * 60);
         for (i, n) in names.iter().enumerate() {
             let f = std::fs::File::create(dir.join(n)).unwrap();
             // Newer timestamp in the name = newer file.
             let ts: u64 = n.chars().filter(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
             f.set_modified(t0 + std::time::Duration::from_secs(ts % 10_000 + i as u64)).unwrap();
         }
+        // Four safety copies from this week: all stay, more than the newest 3.
+        for i in 0..4 {
+            let f = std::fs::File::create(dir.join(format!("pos-before-reset-{}.db", 1_500_000_100 + i))).unwrap();
+            f.set_modified(SystemTime::now() - std::time::Duration::from_secs(86_400 - i * 60)).unwrap();
+        }
         prune_backups(&dir, 3);
         let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         left.sort();
         assert_eq!(left, [
             "pos-1700000003.db", "pos-1700000004.db", "pos-1700000005.db",
-            "pos-before-reset-1500000000.db", "pos-before-reset-1500000001.db",
+            "pos-before-reset-1500000100.db", "pos-before-reset-1500000101.db", "pos-before-reset-1500000102.db", "pos-before-reset-1500000103.db",
+            "pos-before-restore-1400000001.db", "pos-before-restore-1400000002.db", "pos-before-restore-1400000003.db",
             "pos-before-update-1600000002.db", "pos-before-update-1600000003.db", "pos-before-update-1600000004.db",
+            "pos-imported-1300000001.db", "pos-imported-1300000002.db", "pos-imported-1300000003.db",
             "pos-mine.db", "pos-notes.txt",
         ]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1337,5 +1606,250 @@ mod tests {
         assert_eq!(o["discount_cents"], 300);
         // Sam is still the one logged in.
         assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
+    }
+
+    fn curry(name: &str) -> NewProduct {
+        NewProduct {
+            category_id: None, sku: None, barcode: None, name: name.into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+            stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+        }
+    }
+
+    /// A full backup from "the other PC" (its own staff, PINs, menu, an order), saved in `dir` as `name`.
+    fn other_pc_backup(dir: &Path, name: &str) {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let nok = pos.setup_first_admin("Nok", "4321").unwrap();
+        pos.create_user(&nok, "Ben", Role::Staff, "5555").unwrap();
+        pos.set_setting(&nok, "store_name", "Old Shop").unwrap();
+        let p = pos.create_product(&nok, curry("Massaman")).unwrap();
+        let o = pos.open_order(&nok, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+        pos.add_item(&nok, o.id, p.id, 2, None, None, &[]).unwrap();
+        pos.backup_unchecked(dir.join(name)).unwrap();
+    }
+
+    /// This till: Owner (admin, 1111) and Sam (staff, 2222), a Pad thai, backups in `dir`.
+    fn till(dir: &Path) -> App {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.create_product(&admin, curry("Pad thai")).unwrap();
+        App::new(pos, dir.to_path_buf())
+    }
+
+    fn files(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    fn menu_names(app: &App, t: &str) -> Vec<String> {
+        let v = dispatch(app, t, "menu", json!({})).unwrap();
+        v.as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn restoring_a_full_backup_replaces_everything_and_logs_everyone_out() {
+        let dir = tempfile::tempdir().unwrap();
+        other_pc_backup(dir.path(), "pos-1700000000.db");
+        let app = till(dir.path());
+        let tablet = "web-0123456789abcdef0123456789abcdef";
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, tablet, "login", json!({ "pin": "2222" })).unwrap();
+        let restore = |t: &str, pin: &str, confirm: &str| {
+            dispatch(&app, t, "restore_backup", json!({ "name": "pos-1700000000.db", "pin": pin, "confirm": confirm }))
+        };
+        // Staff can neither look inside nor restore.
+        assert!(matches!(dispatch(&app, tablet, "inspect_backup", json!({ "name": "pos-1700000000.db" })), Err(PosError::Forbidden)));
+        assert!(matches!(restore(tablet, "2222", "RESTORE"), Err(PosError::Forbidden)));
+        // The admin sees what is in it.
+        let info = dispatch(&app, LOCAL, "inspect_backup", json!({ "name": "pos-1700000000.db" })).unwrap();
+        assert_eq!((info["store_name"].clone(), info["orders"].clone(), info["menu_items"].clone(), info["staff"].clone()), (json!("Old Shop"), json!(1), json!(1), json!(2)));
+        // RESTORE must be typed and the admin's own PIN given.
+        assert_eq!(restore(LOCAL, "1111", "restore please").unwrap_err().to_string(), "type RESTORE to confirm");
+        assert!(matches!(restore(LOCAL, "", "RESTORE"), Err(PosError::InvalidPin)));
+        assert!(matches!(restore(LOCAL, "9999", "RESTORE"), Err(PosError::InvalidPin)));
+        assert!(matches!(restore(LOCAL, "2222", "RESTORE"), Err(PosError::InvalidPin)));
+        let err = dispatch(&app, LOCAL, "restore_backup", json!({ "name": "../pos.db", "pin": "1111", "confirm": "RESTORE" })).unwrap_err();
+        assert_eq!(err.to_string(), "that is not a backup");
+        // None of that changed anything or logged anyone out.
+        assert_eq!(menu_names(&app, LOCAL), ["Pad thai"]);
+        assert_eq!(dispatch(&app, tablet, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
+        assert_eq!(files(dir.path()), ["pos-1700000000.db"]);
+
+        let r = restore(LOCAL, "1111", " RESTORE ").unwrap();
+        assert_eq!(r["summary"]["orders"], 1);
+        assert_eq!(r["restored"], "pos-1700000000.db");
+        let safety = r["safety_copy"].as_str().unwrap().to_string();
+        assert!(safety.starts_with("pos-before-restore-") && safety.ends_with(".db"), "{safety}");
+        assert_eq!(files(dir.path()), ["pos-1700000000.db".to_string(), safety.clone()]);
+        // Everyone is logged out, everywhere.
+        for t in [LOCAL, tablet] {
+            assert!(dispatch(&app, t, "app_status", Value::Null).unwrap()["session"].is_null());
+            assert!(matches!(dispatch(&app, t, "list_open_orders", json!({})), Err(PosError::NotLoggedIn)));
+        }
+        // The staff and PINs are the other PC's now.
+        assert!(matches!(dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })), Err(PosError::InvalidPin)));
+        assert_eq!(dispatch(&app, tablet, "login", json!({ "pin": "5555" })).unwrap()["name"], "Ben");
+        assert_eq!(dispatch(&app, LOCAL, "login", json!({ "pin": "4321" })).unwrap()["name"], "Nok");
+        assert_eq!(menu_names(&app, LOCAL), ["Massaman"]);
+        assert_eq!(dispatch(&app, LOCAL, "list_open_orders", json!({})).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(dispatch(&app, LOCAL, "get_setting", json!({ "key": "store_name" })).unwrap(), "Old Shop");
+        // The safety copy undoes it.
+        dispatch(&app, LOCAL, "restore_backup", json!({ "name": safety, "pin": "4321", "confirm": "RESTORE" })).unwrap();
+        assert_eq!(dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap()["name"], "Owner");
+        assert_eq!(menu_names(&app, LOCAL), ["Pad thai"]);
+        // A second safety copy, even within the same second (never overwritten).
+        assert_eq!(files(dir.path()).iter().filter(|n| n.starts_with("pos-before-restore-")).count(), 2);
+    }
+
+    #[test]
+    fn a_bad_file_is_refused_and_the_live_data_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pos-1.db"), b"not a database, just some text that is long enough").unwrap();
+        other_pc_backup(dir.path(), "pos-2.db");
+        Connection::open(dir.path().join("pos-2.db")).unwrap().pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+        let app = till(dir.path());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let restore = |name: &str| dispatch(&app, LOCAL, "restore_backup", json!({ "name": name, "pin": "1111", "confirm": "RESTORE" }));
+        assert!(restore("pos-1.db").unwrap_err().to_string().contains("not a POS backup"));
+        assert!(restore("pos-2.db").unwrap_err().to_string().contains("newer version of the app: update this PC first"));
+        assert!(matches!(restore("pos-3.db"), Err(PosError::NotFound)));
+        // Still logged in, same data, no safety copy and no scratch files.
+        assert_eq!(menu_names(&app, LOCAL), ["Pad thai"]);
+        assert_eq!(files(dir.path()), ["pos-1.db", "pos-2.db"]);
+    }
+
+    #[test]
+    fn a_file_from_another_pc_is_uploaded_in_pieces_then_restored() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let src = tempfile::tempdir().unwrap();
+        other_pc_backup(src.path(), "pos-1700000000.db");
+        let bytes = std::fs::read(src.path().join("pos-1700000000.db")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let app = till(dir.path());
+        let id = "00112233445566778899aabbccddeeff";
+        let chunk = |t: &str, offset: usize, data: &[u8]| dispatch(&app, t, "upload_backup_chunk", json!({ "upload": id, "offset": offset, "data": b64(data) }));
+        // Admins only.
+        assert!(matches!(chunk(LOCAL, 0, &bytes[..10]), Err(PosError::NotLoggedIn)));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        assert!(matches!(chunk(LOCAL, 0, &bytes[..10]), Err(PosError::Forbidden)));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        // A bad id is not a path.
+        let err = dispatch(&app, LOCAL, "upload_backup_chunk", json!({ "upload": "../../x", "offset": 0, "data": "" })).unwrap_err();
+        assert_eq!(err.to_string(), "bad upload id");
+        // Three pieces, in order; a piece out of place is refused.
+        let third = bytes.len() / 3;
+        assert_eq!(chunk(LOCAL, 0, &bytes[..third]).unwrap(), third);
+        assert!(chunk(LOCAL, third + 5, &bytes[third..2 * third]).unwrap_err().to_string().contains("interrupted"));
+        chunk(LOCAL, third, &bytes[third..2 * third]).unwrap();
+        assert_eq!(chunk(LOCAL, 2 * third, &bytes[2 * third..]).unwrap(), bytes.len());
+        let up = dispatch(&app, LOCAL, "finish_backup_upload", json!({ "upload": id })).unwrap();
+        let name = up["file"]["name"].as_str().unwrap().to_string();
+        assert!(name.starts_with("pos-imported-"), "{name}");
+        assert_eq!(up["file"]["size"], bytes.len());
+        assert_eq!(up["summary"]["store_name"], "Old Shop");
+        assert_eq!(std::fs::read(dir.path().join(&name)).unwrap(), bytes);
+        // It is in the list like any backup, and restores like one.
+        let list = dispatch(&app, LOCAL, "list_full_backups", json!({})).unwrap();
+        assert_eq!(list[0]["name"], name.as_str());
+        dispatch(&app, LOCAL, "restore_backup", json!({ "name": name, "pin": "1111", "confirm": "RESTORE" })).unwrap();
+        assert_eq!(dispatch(&app, LOCAL, "login", json!({ "pin": "4321" })).unwrap()["name"], "Nok");
+
+        // Not a backup: refused, and the uploaded piece is not kept.
+        chunk(LOCAL, 0, b"PK\x03\x04 a zip file, say").unwrap();
+        let err = dispatch(&app, LOCAL, "finish_backup_upload", json!({ "upload": id })).unwrap_err();
+        assert!(err.to_string().contains("not a POS backup"), "{err}");
+        assert!(!files(dir.path()).iter().any(|n| n.starts_with("upload-") || n.starts_with("restore-work-")), "{:?}", files(dir.path()));
+        // Downloading (browsers): admins only, backups only.
+        assert!(backup_download(&app, LOCAL, &name).unwrap().is_file());
+        assert!(backup_download(&app, LOCAL, "../pos.db").is_err());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "5555" })).unwrap();
+        assert!(matches!(backup_download(&app, LOCAL, &name), Err(PosError::Forbidden)));
+    }
+
+    #[test]
+    fn a_restore_that_could_not_copy_changes_nothing_and_keeps_everyone_logged_in() {
+        let dir = tempfile::tempdir().unwrap();
+        other_pc_backup(dir.path(), "pos-1700000000.db");
+        let live = dir.path().join("live.db");
+        let mut pos = Pos::open(&live).unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.create_product(&admin, curry("Pad thai")).unwrap();
+        let backups = dir.path().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::rename(dir.path().join("pos-1700000000.db"), backups.join("pos-1700000000.db")).unwrap();
+        let app = App::new(pos, backups.clone());
+        let tablet = "web-0123456789abcdef0123456789abcdef";
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, tablet, "login", json!({ "pin": "2222" })).unwrap();
+        let id = dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["db_id"].clone();
+        // Another program holds the database for writing.
+        let other = Connection::open(&live).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let err = dispatch(&app, LOCAL, "restore_backup", json!({ "name": "pos-1700000000.db", "pin": "1111", "confirm": "RESTORE" })).unwrap_err();
+        assert!(err.to_string().contains("busy"), "{err}");
+        other.execute_batch("ROLLBACK;").unwrap();
+        // Nothing changed: same data, same logins, no safety copy left behind.
+        assert_eq!(menu_names(&app, LOCAL), ["Pad thai"]);
+        assert_eq!(dispatch(&app, tablet, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["db_id"], id);
+        assert_eq!(files(&backups), ["pos-1700000000.db"]);
+        // Once the other program lets go, it works (and the data id changes).
+        dispatch(&app, LOCAL, "restore_backup", json!({ "name": "pos-1700000000.db", "pin": "1111", "confirm": "RESTORE" })).unwrap();
+        let after = dispatch(&app, LOCAL, "app_status", Value::Null).unwrap();
+        assert!(after["session"].is_null());
+        assert_ne!(after["db_id"], id);
+        assert_eq!(files(&backups).iter().filter(|n| n.starts_with("pos-before-restore-")).count(), 1);
+    }
+
+    #[test]
+    fn uploads_tidy_up_after_themselves() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let src = tempfile::tempdir().unwrap();
+        other_pc_backup(src.path(), "pos-1.db");
+        let bytes = std::fs::read(src.path().join("pos-1.db")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let month_ago = SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+        let old = |name: &str, age: SystemTime| std::fs::File::create(dir.path().join(name)).unwrap().set_modified(age).unwrap();
+        for i in 0..4 {
+            old(&format!("pos-imported-{}.db", 1_600_000_000 + i), month_ago + Duration::from_secs(i));
+        }
+        old("upload-ffffffffffffffffffffffffffffffff.part", SystemTime::now() - Duration::from_secs(2 * 60 * 60));
+        old("upload-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.part", SystemTime::now());
+        old("restore-work-1-2-3.tmp", SystemTime::now() - Duration::from_secs(2 * 60 * 60));
+        let app = till(dir.path());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let id = "00112233445566778899aabbccddeeff";
+        // A piece that would overflow is refused, not a crash.
+        let err = dispatch(&app, LOCAL, "upload_backup_chunk", json!({ "upload": id, "offset": u64::MAX, "data": b64(b"xx") })).unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+        dispatch(&app, LOCAL, "upload_backup_chunk", json!({ "upload": id, "offset": 0, "data": b64(&bytes) })).unwrap();
+        let up = dispatch(&app, LOCAL, "finish_backup_upload", json!({ "upload": id })).unwrap();
+        let name = up["file"]["name"].as_str().unwrap().to_string();
+        // Stale pieces and scratch files are gone, another upload in progress stays,
+        // and only the newest 3 loaded files are kept (the new one first).
+        let left = files(dir.path());
+        assert_eq!(left, [
+            "pos-imported-1600000002.db".to_string(), "pos-imported-1600000003.db".into(), name, "upload-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.part".into(),
+        ]);
+    }
+
+    #[test]
+    fn safety_copies_never_overwrite_each_other_and_do_not_count_as_daily_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, _) = unique_backup_path(dir.path(), "pos-before-restore-");
+        std::fs::write(&a, b"1").unwrap();
+        let (b, name) = unique_backup_path(dir.path(), "pos-before-restore-");
+        assert_ne!(a, b);
+        assert!(name.starts_with("pos-before-restore-"));
+        // Only "pos-<digits>.db" makes the daily backup unnecessary.
+        assert!(newest_regular_backup(dir.path()).is_none());
+        std::fs::write(dir.path().join("pos-imported-5.db"), b"1").unwrap();
+        assert!(newest_regular_backup(dir.path()).is_none());
+        std::fs::write(dir.path().join("pos-5.db"), b"1").unwrap();
+        assert!(newest_regular_backup(dir.path()).is_some());
     }
 }

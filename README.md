@@ -45,7 +45,7 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Auto logout**: after 5 minutes without a touch or key press (Manage → Auto logout: never, 1–60 minutes), with a 30-second warning. Applies to the till and every device on the local server; open orders are kept
 - **Delete mistakes (admin)**: History → an order → **Delete order** removes an order entered by mistake from history and reports for good (stock is put back); use Void for real refunds. In Menu, **Delete item** and **Delete category** remove them for good (items named on past orders are hidden everywhere, and those orders keep their own copy of the name and price)
 - **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items. History's **Today** is the open business day (from the last day close, as in the header), so orders after midnight before the day is closed are still under Today; **Yesterday** is the business day closed last and **Last 7 days** the business days dated in the last week. The **Day** picker shows calendar days (midnight to midnight). The line under the buttons says which times are shown
-- **Backups**: automatic daily copy at startup (the last 14 kept, or as set in Backup & data), plus "Back up everything now"
+- **Backups**: automatic daily copy at startup (the last 14 kept, or as set in Backup & data), plus "Back up everything now". **Restore** any full backup from the list or from a file (*Restore everything from a file…*), e.g. to move to a new PC: see [Moving to a new PC](#moving-to-a-new-pc)
 - **Menu backup**: Manage → Menu backup saves just the menu (categories, items, choices, options, prices) to restore later or load on another till (*Restore from a file…*)
 - **Reset data (admin, danger zone)**: tick what to delete (sales history, all or before a date; customers; menu; floor plan; staff; settings) and keep the rest. Needs your PIN and typing RESET, and a full backup is saved automatically first
 - **Audit log** of logins, voids, discounts, removed items, menu, floor and user changes
@@ -194,7 +194,7 @@ More settings (admins). Not set = the behaviour before they existed, except the 
 - **Discounts** (Orders): **Buttons**, up to 8 percentages (default 5, 10, 15, 20; empty = none), show when you tap ✎ on an order line, and one tap saves that much off the line. The discount box also takes a percentage such as `10%`. **Staff can give up to N %** without a manager PIN (empty = no limit, the default). Above it, the till asks for a manager's or admin's PIN to approve it (nobody is logged in or out, and the approval is in the audit log). The server checks the limit too. Managers and admins are never limited, and lowering or removing a discount never needs a PIN. Settings `discount_presets` and `discount_staff_max_pct`.
 - **Customer receipts** (Bills & receipts → Receipt printer): **Show the VAT / tax breakdown** (off) adds the TAX / NET / VAT / GROSS table under the total of bills and receipts, with "Prices include tax" when it is inside the prices. **Show "Served by"** (on) can take the staff name off customer bills and receipts; the staff copy always has it. The name, address lines and bottom message were already editable there. With both left as they are, receipts print exactly as before.
 - **Payment names** (Bills & receipts → Payments): **Call Cash** and **Call Card** rename how the two methods are shown on the till (Finish & Pay buttons, the payment button, part payments, the change screen), on receipts and the staff copy, in History, Reports, the shift screen and report, and the end-of-day report, e.g. `เงินสด` and `QR / Card`. Display only: payments are still stored and counted as cash and card. Up to 24 characters; empty = Cash / Card, and then receipts print exactly as before. Settings `pay_name_cash`, `pay_name_card`.
-- **Keep the last N backups** (Backup & data): how many full backups stay in the backup folder, 3 to 90 (default 14, as before; empty = 14). The copies taken before an update or a reset are kept apart (the newest 3 of each) and other files in the folder are never touched. Lowering it deletes the oldest daily backups at the next backup (startup or **Back up everything now**). Setting `backups_kept`.
+- **Keep the last N backups** (Backup & data): how many full backups stay in the backup folder, 3 to 90 (default 14, as before; empty = 14). The copies taken before an update, a reset or a restore, and files loaded with *Restore everything from a file…*, are kept apart (the newest 3 of each, and any from the last 7 days) and other files in the folder are never touched. Lowering it deletes the oldest daily backups at the next backup (startup or **Back up everything now**). Setting `backups_kept`.
 - **Menu button size** (Screen & devices): *Normal* or *Large*. Large makes the menu tiles, categories and the order screen's Send, Finish & Pay, tool and +/− buttons bigger on every device, with no sideways scrolling at 1024 × 600 or on a phone. Setting `button_size` = `normal` / `large`. This card also shows on phones and tablets; full screen and the local server stay on the main till.
 
 ### Set menus
@@ -339,8 +339,31 @@ How it works:
 `%APPDATA%\com.puppx.pos\`
 - `pos.db`: the database
 - `backups\pos-<timestamp>.db`: daily and manual backups
+- `backups\pos-before-update-*.db`, `pos-before-reset-*.db`, `pos-before-restore-*.db`: safety copies taken before an update, a reset or a restore (the newest 3 of each are kept, and any from the last 7 days)
+- `backups\pos-imported-*.db`: backups loaded with *Restore everything from a file…* (the newest 3 are kept, and any from the last 7 days)
 
-To restore a backup, close the app and copy the backup over `pos.db`.
+To restore a backup, use **Manage → Backup & data → Restore** (below). By hand: close the app, delete `pos.db-wal` and `pos.db-shm` if they are there, and copy the backup over `pos.db`.
+
+## Moving to a new PC
+
+A full backup holds everything: orders and sales history, menu, customers, floor plan, staff and their PINs, and settings (printers, receipt text, delivery apps…).
+
+On the **old PC**:
+1. Log in as an admin, open **Manage → Backup & data** and tap **Back up everything now**.
+2. Tap **Open backup folder**: Explorer opens the folder (its path is shown in the card). Copy the newest `pos-<number>.db` (the top one in the list) to a USB stick. In a browser on the local server, tap **Download** on the backup instead.
+
+On the **new PC**:
+1. Install the POS and open it. If it asks to set up an admin, create a temporary one (it will be replaced).
+2. Open **Manage → Backup & data → Restore everything from a file…** (not the Menu backup card's *Restore from a file…*, which loads only a menu) and choose the file on the USB stick. It works in a browser on the local server too.
+3. The till checks the file (a POS database, not damaged, not from a newer version of the app) and shows what is in it: restaurant name, orders, menu items, customers, staff. Type **RESTORE**, tap **Restore…** and enter your admin PIN (the one on this PC).
+4. Everyone is logged out and every till, tablet and kitchen screen reloads. Log in with a PIN from the old PC.
+
+Good to know:
+- The current data is never lost: before restoring, it is saved as `pos-before-restore-<time>.db`, listed as *Before a restore*. Restore that one to go back.
+- A file that is not a POS backup (including one with extra tables, views or triggers the app does not make), is damaged, or comes from a newer version of the app is refused and nothing changes. If restoring fails for any other reason (another program using the database, a full disk), nothing changes either and nobody is logged out. Update the new PC first if needed; backups from older versions are brought up to date when restored.
+- Use a file made by the POS (a backup), not a copy of `pos.db` taken while the app was open: that can miss the newest changes.
+- Printer names, the local server port and *Start full screen* come from the old PC: check **Kitchen printer** and **Receipt printer** on the new PC.
+- Any full backup in the list can be restored the same way (**Restore** on its row). Admins only.
 
 ## Install and update
 

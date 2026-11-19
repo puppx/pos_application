@@ -238,7 +238,8 @@ impl Pos {
 
     /// A customer's recent orders, newest first (for "same as last time").
     pub fn customer_orders(&self, s: &Session, id: i64, limit: i64) -> Result<Vec<OrderSummary>> {
-        s.require(Permission::Sell)?;
+        // A customer's past orders are on the Customers page (managers and admins).
+        s.require(Permission::ViewAllOrders)?;
         let mut stmt = self.conn.prepare_cached(&format!(
             "{} WHERE o.customer_id = ?1 ORDER BY o.opened_at DESC, o.id DESC LIMIT ?2",
             crate::orders::SUMMARY_SQL

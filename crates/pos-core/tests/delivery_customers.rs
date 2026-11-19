@@ -152,7 +152,9 @@ fn saved_customers_search_and_postcode_list() {
     let o = pos.open_order(&s, &new).unwrap();
     assert_eq!(o.customer_id, Some(ann.id));
     assert_eq!(pos.get_customer(&s, ann.id).unwrap().order_count, 1);
-    assert_eq!(pos.customer_orders(&s, ann.id, 10).unwrap()[0].id, o.id);
+    // A customer's past orders: the Customers page, for managers and admins only.
+    assert_eq!(pos.customer_orders(&admin, ann.id, 10).unwrap()[0].id, o.id);
+    assert!(matches!(pos.customer_orders(&s, ann.id, 10), Err(PosError::Forbidden)));
     // Most recent customer comes first in the default list.
     assert_eq!(pos.search_customers(&s, "", 1).unwrap()[0].id, ann.id);
 

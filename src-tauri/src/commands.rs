@@ -326,6 +326,12 @@ fn require_restore(s: &Session) -> Result<()> {
     s.require(Permission::Backup)
 }
 
+/// Checking for and installing a new version of the app: admins only. The
+/// desktop window's `check_update` and `install_update` call this first.
+pub fn require_updates(app: &App, t: &str) -> Result<()> {
+    app.with_session(t, |_, s| s.require(Permission::Updates))
+}
+
 fn backup_file(path: &Path) -> Option<BackupFile> {
     let name = path.file_name()?.to_string_lossy().to_string();
     let meta = std::fs::metadata(path).ok()?;
@@ -1887,6 +1893,73 @@ mod tests {
         assert_eq!(left, [
             "pos-imported-1600000002.db".to_string(), "pos-imported-1600000003.db".into(), name, "upload-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.part".into(),
         ]);
+    }
+
+    #[test]
+    fn staff_are_refused_every_manage_command_but_still_sell() {
+        let app = app();
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, LOCAL, "create_user", json!({ "name": "Quinn", "role": "manager", "pin": "4646" })).unwrap();
+        let curry = dispatch(&app, LOCAL, "create_product", json!({ "product": {
+            "category_id": null, "sku": null, "barcode": null, "name": "Green curry", "price_cents": 900, "cost_cents": 0, "tax_rate_bp": 0,
+            "stock_qty": 0, "track_stock": false, "starter": false, "name_alt": null, "prep": false, "team_id": null,
+        } }))
+        .unwrap();
+        let till = "web-0123456789abcdef0123456789abcdef";
+        dispatch(&app, till, "login", json!({ "pin": "2222" })).unwrap();
+        let refused = [
+            // Staff could call these before (reports, End of day, Shift & cash).
+            ("sales_summary", json!({ "from": 0, "to": 2_000_000_000 })),
+            ("top_products", json!({ "from": 0, "to": 2_000_000_000, "limit": 10 })),
+            ("close_day", json!({})),
+            ("day_closes", json!({ "limit": 10 })),
+            ("reprint_day_close", json!({ "id": 1 })),
+            ("current_shift", json!({})),
+            ("open_shift", json!({ "floatCents": 10_000 })),
+            ("cash_move", json!({ "kind": "in", "amountCents": 500, "reason": "" })),
+            ("close_shift", json!({ "countedCents": 0, "note": "" })),
+            ("list_shifts", json!({ "limit": 10 })),
+            ("print_shift", json!({ "id": 1 })),
+            // And these stay refused (menu, floor plan, staff, settings, backups).
+            ("list_products", json!({ "includeInactive": true, "limit": 10, "offset": 0 })),
+            ("set_starter", json!({ "id": curry["id"], "starter": true })),
+            ("create_floor", json!({ "name": "Garden" })),
+            ("list_users", json!({})),
+            ("save_teams", json!({ "teams": [] })),
+            ("set_setting", json!({ "key": "store_name", "value": "Mine" })),
+            ("set_setting", json!({ "key": "kds_beep", "value": "1" })),
+            ("save_channels", json!({ "channels": [] })),
+            ("backup_now", json!({})),
+            ("list_full_backups", json!({})),
+        ];
+        for (cmd, args) in refused {
+            let r = dispatch(&app, till, cmd, args);
+            assert!(matches!(r, Err(PosError::Forbidden)), "{cmd}: {r:?}");
+        }
+        // Selling still works from the same till.
+        let o = dispatch(&app, till, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+        dispatch(&app, till, "add_item", json!({ "orderId": o["id"], "productId": curry["id"], "qty": 1, "note": "mild" })).unwrap();
+        dispatch(&app, till, "send_to_kitchen", json!({ "orderId": o["id"] })).unwrap();
+        assert!(!dispatch(&app, till, "kitchen_board", json!({ "filter": "all" })).unwrap().as_array().unwrap().is_empty());
+        let paid = dispatch(&app, till, "pay_order", json!({ "orderId": o["id"], "method": "cash", "tenderedCents": 1000 })).unwrap();
+        assert_eq!(paid["order"]["status"], "paid");
+        // A manager on the same till still has reports and the shift.
+        dispatch(&app, till, "login", json!({ "pin": "4646" })).unwrap();
+        dispatch(&app, till, "open_shift", json!({ "floatCents": 10_000 })).unwrap();
+        dispatch(&app, till, "sales_summary", json!({ "from": 0, "to": 2_000_000_000 })).unwrap();
+    }
+
+    #[test]
+    fn only_admins_check_for_and_install_updates() {
+        let app = app();
+        assert!(matches!(require_updates(&app, LOCAL), Err(PosError::NotLoggedIn)));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        assert!(matches!(require_updates(&app, LOCAL), Err(PosError::Forbidden)));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, LOCAL, "create_user", json!({ "name": "Quinn", "role": "manager", "pin": "4646" })).unwrap();
+        require_updates(&app, LOCAL).unwrap();
+        dispatch(&app, LOCAL, "login", json!({ "pin": "4646" })).unwrap();
+        assert!(matches!(require_updates(&app, LOCAL), Err(PosError::Forbidden)));
     }
 
     #[test]

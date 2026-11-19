@@ -532,15 +532,16 @@ async function openStartScreen() {
 
 // ---------- shell ----------
 
-/// [id, label, admin only, on the side bar]. The rest open from Manage.
+/// [id, label, who may open it (false = everyone, 'manager' or 'admin'), on the side bar].
+/// The rest open from Manage. Staff only get the Kitchen screen there (and About).
 const VIEWS = [
   ['floor', 'Tables', false, true],
   ['orders', 'Orders', false, true],
   ['settings', 'Manage', false, true],
-  ['history', 'History', false],
-  ['customers', 'Customers', false],
-  ['reports', 'Reports', false],
-  ['shift', 'Shift & cash', false],
+  ['history', 'History', 'manager'],
+  ['customers', 'Customers', 'manager'],
+  ['reports', 'Reports', 'manager'],
+  ['shift', 'Shift & cash', 'manager'],
   ['kitchen', 'Kitchen screen', false],
   ['menuAdmin', 'Menu', 'manager'],
   ['plan', 'Floor plan', 'manager'],
@@ -580,8 +581,10 @@ function go(view) {
 
 let updateTimer;
 /// Check GitHub Releases for a newer signed version; show it in the header.
-/// Silent when offline. Returns the check result (or null on failure).
+/// Admins only (the server refuses everyone else). Silent when offline.
+/// Returns the check result (or null on failure).
 async function checkForUpdate(quiet = true) {
+  if (!isAdmin()) return null;
   let info;
   try {
     info = await invoke('check_update');
@@ -594,17 +597,13 @@ async function checkForUpdate(quiet = true) {
   return info;
 }
 
-/// Header bar for an available update; the install button is for admins.
+/// Header bar for an available update, with its install button: admins
+/// only. Managers and staff see nothing about updates.
 function drawUpdateBar() {
   const bar = document.getElementById('update');
   const v = state.update?.available;
-  bar.hidden = !v || !state.session;
-  if (v) {
-    setKids(bar, `Update ${v} available `,
-      isAdmin()
-        ? h('button', { class: 'primary', onclick: installUpdate }, 'Install update')
-        : h('span', { class: 'muted' }, '(ask an admin to install)'));
-  }
+  bar.hidden = !v || !isAdmin();
+  if (v && isAdmin()) setKids(bar, `Update ${v} available `, h('button', { class: 'primary', onclick: installUpdate }, 'Install update'));
 }
 
 const installUpdate = act(async (ev) => {
@@ -618,10 +617,16 @@ const installUpdate = act(async (ev) => {
   }
 });
 
+const UPDATE_EVERY = 6 * 60 * 60 * 1000;
+let lastUpdateCheck = 0, updateChecking = false;
+/// Check now if an admin is logged in and the last check is over 6 hours
+/// old; then look again every hour (nothing happens while others are logged in).
 function startUpdateChecks() {
-  if (updateTimer) return;
-  checkForUpdate();
-  updateTimer = setInterval(checkForUpdate, 6 * 60 * 60 * 1000);
+  if (!updateTimer) updateTimer = setInterval(startUpdateChecks, 60 * 60 * 1000);
+  if (!isAdmin() || updateChecking || Date.now() - lastUpdateCheck < UPDATE_EVERY) return;
+  // Only a check that got an answer counts: offline, it tries again next hour.
+  updateChecking = true;
+  checkForUpdate().then((info) => { if (info) lastUpdateCheck = Date.now(); }).finally(() => { updateChecking = false; });
 }
 
 function renderShell() {
@@ -630,7 +635,11 @@ function renderShell() {
   loadUiSettings();
   clearInterval(state.clockTimer);
   if (!state.remote) startUpdateChecks();
-  if (!VIEWS.some(([id, , need]) => id === state.view && canSee(need))) state.view = 'floor';
+  // A page this user may not open goes back to Manage (or Tables if it is not a page at all).
+  if (!VIEWS.some(([id, , need]) => id === state.view && canSee(need))) {
+    state.view = VIEWS.some(([id]) => id === state.view) ? 'settings' : 'floor';
+    state.settingsTab = null;
+  }
   document.getElementById('bar').hidden = false;
   document.getElementById('rail').hidden = false;
   setKids(document.getElementById('brand'), logoImg());
@@ -1304,8 +1313,10 @@ async function renderOrder() {
       const msg = `Order #${res.id} paid: ${money(res.total_cents)}` + (res.tip_cents ? ` + tip ${money(res.tip_cents)}` : '') +
         (last?.change_cents ? ` · change ${money(last.change_cents)}` : '');
       closeOrder();
-      if (printError) toast(`${msg}. Kitchen ticket did not print (${printError}); reprint it from History.`, true);
-      else if (receipt.error) toast(`${msg}. Receipt/drawer did not work (${receipt.error}); reprint from History.`, true);
+      // History is for managers and admins: staff ask one of them to reprint.
+      const reprint = isManager() ? 'reprint it from History' : 'ask a manager to reprint it from History';
+      if (printError) toast(`${msg}. Kitchen ticket did not print (${printError}); ${reprint}.`, true);
+      else if (receipt.error) toast(`${msg}. Receipt/drawer did not work (${receipt.error}); ${reprint}.`, true);
       else toast(msg);
       return res;
     });
@@ -4232,7 +4243,7 @@ async function renderSettings() {
     h('h3', {}, 'Updates'),
     state.remote
       ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
-      : [h('div', { class: 'muted' }, 'The app checks for updates when it starts and every few hours. Installing one takes about a minute: ' +
+      : [h('div', { class: 'muted' }, 'The app checks for updates every few hours while an admin is logged in on this till. Installing one takes about a minute: ' +
         'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
       h('div', { class: 'row' }, h('button', { onclick: act(async () => {
         const info = await checkForUpdate(false);
@@ -4325,7 +4336,8 @@ async function renderSettings() {
     // Full screen and the local server are this PC's own (not on a phone or tablet).
     screen: () => [buttonSizeCard(), !state.remote && displayCard(), !state.remote && serverCard()],
     data: () => [backupCard(), menuBackupCard(), resetCard()],
-    about: () => [creditsCard(), aboutCard()],
+    // Checking for and installing updates is for admins only.
+    about: () => [creditsCard(), isAdmin() && aboutCard()],
   };
   const group = { id: tab[0], icon: tab[1], title: tab[2], cards: cards[tab[0]] };
   drawTitle(group.title, 'Manage');
@@ -4338,10 +4350,10 @@ async function renderSettings() {
 }
 
 /// The settings areas this user may open: all for admins, the kitchen ones
-/// for managers, none for staff.
+/// and About for managers, only About (credits and version) for staff.
 function settingsGroups() {
   const kitchen = ['kitchen', 'tickets', 'orders', 'teams'];
-  return SETTINGS_GROUPS.filter(([id]) => isAdmin() || (state.session?.role === 'manager' && kitchen.includes(id)));
+  return SETTINGS_GROUPS.filter(([id]) => isAdmin() || id === 'about' || (isManager() && kitchen.includes(id)));
 }
 
 /// Manage: big tiles for the other screens (History, Menu, Staff…) and,

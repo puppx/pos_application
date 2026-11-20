@@ -108,6 +108,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0028_plan_labels.sql"),
     include_str!("migrations/0029_line_menu_price.sql"),
     include_str!("migrations/0030_order_activity.sql"),
+    include_str!("migrations/0031_payment_ids.sql"),
 ];
 /// The schema this app creates; backups up to this version can be restored.
 pub const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;

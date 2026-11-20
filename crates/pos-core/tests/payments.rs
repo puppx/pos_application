@@ -185,3 +185,22 @@ fn move_dishes_and_join_tables() {
     // Nothing cancelled in the reports.
     assert_eq!(k.pos.sales_summary(&k.admin, 0, i64::MAX).unwrap().cancelled_count, 0);
 }
+
+#[test]
+fn a_payment_taken_back_never_gives_its_id_to_a_new_one() {
+    let mut k = setup();
+    let o = open(&mut k);
+    let o = k.pos.add_payment(&k.admin, o.id, &pay(PaymentMethod::Cash, Some(500), 500, 0, None)).unwrap();
+    let o = k.pos.add_payment(&k.admin, o.id, &pay(PaymentMethod::Card, Some(700), 0, 0, None)).unwrap();
+    let (first, last) = (o.payments[0].id, o.payments[1].id);
+    // The newest one taken back: SQLite would hand its id out again.
+    let o = k.pos.remove_payment(&k.admin, o.id, last).unwrap();
+    let o = k.pos.add_payment(&k.admin, o.id, &pay(PaymentMethod::Card, Some(900), 0, 0, None)).unwrap();
+    let newer = o.payments[1].id;
+    assert!(newer > last, "{newer} after {last}");
+    // An undo of the old payment (a stale screen on another till) finds nothing,
+    // and the newer payment on the same order stays.
+    assert!(matches!(k.pos.remove_payment(&k.admin, o.id, last), Err(PosError::NotFound)));
+    let o = k.pos.get_order(&k.admin, o.id).unwrap();
+    assert_eq!(o.payments.iter().map(|p| (p.id, p.amount_cents)).collect::<Vec<_>>(), [(first, 500), (newer, 900)]);
+}

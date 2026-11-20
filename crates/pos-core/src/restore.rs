@@ -554,6 +554,70 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_from_before_unique_payment_ids_restores_with_its_payments() {
+        let dir = tmp();
+        let src = dir.path().join("v30.db");
+        // A database from v0.13.5 (schema v30): payment ids could be reused.
+        let conn = Connection::open(&src).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(30) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as i32 + 1).unwrap();
+        }
+        let salt = [7u8; 16];
+        conn.execute("INSERT INTO settings (key, value) VALUES ('_pin_salt', ?1)", [&salt[..]]).unwrap();
+        let mut hash = vec![0u8; 32];
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, auth::test_params())
+            .hash_password_into(b"2468", &salt, &mut hash)
+            .unwrap();
+        conn.execute("INSERT INTO users (name, role, pin_hash) VALUES ('Old admin', 'admin', ?1)", [&hash]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO orders (id, order_type, opened_by) VALUES (1, 'takeaway', 1);
+             INSERT INTO payments (id, order_id, method, amount_cents, tip_cents, tendered_cents, change_cents, items, paid_by, paid_at, shift_id)
+                 VALUES (3, 1, 'cash', 500, 50, 1000, 450, NULL, 1, 1700000000, NULL),
+                        (7, 1, 'card', 200, 0, 0, 0, '[[1,1]]', 1, 1700000100, NULL);
+             -- Payment 9 was taken back (the newest): its id was free again.
+             INSERT INTO audit_log (user_id, action, detail)
+                 VALUES (1, 'order.payment_removed', 'order 1 payment 9 cash 100 tip 0 taken by Old admin (no PIN, admin)');",
+        )
+        .unwrap();
+        drop(conn);
+        let rows = |c: &Connection| -> Vec<(i64, String, i64, i64, Option<String>, i64)> {
+            c.prepare("SELECT id, method, amount_cents, tip_cents, items, paid_at FROM payments ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let before = rows(&Connection::open(&src).unwrap());
+        let (mut pos, s) = live();
+        let prepared = pos.prepare_restore(&src, dir.path().join("work.db")).unwrap();
+        assert_eq!(prepared.summary.schema_version, 30);
+        pos.restore(&s, prepared).unwrap();
+        let v: i32 = pos.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        // The payments as they were, ids included; the indexes and foreign keys too.
+        assert_eq!(rows(&pos.conn), before);
+        let names = |sql: &str| -> Vec<String> {
+            pos.conn.prepare(sql).unwrap().query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(names("SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'payments' ORDER BY name"), ["payments_order", "payments_paid_at"]);
+        assert_eq!(names("SELECT \"table\" FROM pragma_foreign_key_list('payments') ORDER BY 1"), ["orders", "users"]);
+        let sql: String = pos.conn.query_row("SELECT sql FROM sqlite_schema WHERE name = 'payments'", [], |r| r.get(0)).unwrap();
+        assert!(sql.contains("AUTOINCREMENT"), "{sql}");
+        // A new payment after them all, and after the one taken back.
+        let admin = pos.login_as(None, "2468", &mut Default::default()).unwrap();
+        let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: OrderDetails::default() }).unwrap();
+        let tea = pos.create_product(&admin, product("Tea")).unwrap();
+        let p = pos.add_item(&admin, o.id, tea.id, 1, None, None, &[]).unwrap();
+        let paid = pos
+            .add_payment(&admin, p.id, &crate::PaymentInput { method: crate::PaymentMethod::Card, amount_cents: None, tendered_cents: 0, tip_cents: 0, items: None })
+            .unwrap();
+        assert_eq!(paid.payments[0].id, 10);
+    }
+
+    #[test]
     fn newer_damaged_and_foreign_files_are_refused_and_nothing_changes() {
         let dir = tmp();
         let work = dir.path().join("work.db");

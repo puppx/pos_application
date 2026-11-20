@@ -973,13 +973,25 @@ commands! {
     }
 
     /// Move chosen dishes to another table (a new order there if it is free).
-    fn move_items(app, t, order_id: i64, table_id: i64, items: Vec<(i64, i64)>) -> Order {
-        app.with_session(t, |pos, s| pos.move_items(s, order_id, table_id, &items))
+    /// `pin`: a manager's or admin's PIN when staff move them onto a bill
+    /// with a lower service charge or tax (it only approves).
+    fn move_items(app, t, order_id: i64, table_id: i64, items: Vec<(i64, i64)>, pin: Option<String>) -> Order {
+        let pin = approval_pin(app, pin);
+        app.with_session(t, |pos, s| {
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            pos.move_items_approved(s, approver.as_ref(), order_id, table_id, &items)
+        })
     }
 
     /// Join this order onto another table's bill (or just move there).
-    fn merge_into_table(app, t, order_id: i64, table_id: i64) -> Order {
-        app.with_session(t, |pos, s| pos.merge_into_table(s, order_id, table_id))
+    /// `pin`: a manager's or admin's PIN when staff join a bill with a lower
+    /// service charge or tax (it only approves).
+    fn merge_into_table(app, t, order_id: i64, table_id: i64, pin: Option<String>) -> Order {
+        let pin = approval_pin(app, pin);
+        app.with_session(t, |pos, s| {
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            pos.merge_into_table_approved(s, approver.as_ref(), order_id, table_id)
+        })
     }
 
     /// Kitchen screen: what is still to do, and marking dishes done.
@@ -2116,6 +2128,100 @@ mod tests {
         dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": id, "rateBp": 0 })).unwrap();
         let o = dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": 0 })).unwrap();
         assert_eq!((o["service_bp"].clone(), o["tax_bp"].clone()), (json!(0), json!(0)));
+    }
+
+    #[test]
+    fn staff_need_a_manager_pin_to_move_dishes_onto_a_cheaper_bill() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        let sam = pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        let quinn = pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+        pos.set_service_settings(&admin, &ServiceSettings { rate_bp: 1000, ..Default::default() }).unwrap();
+        let curry = pos.create_product(&admin, NewProduct { tax_rate_bp: Some(700), ..curry("Green curry") }).unwrap();
+        let floor = pos.create_floor(&admin, "Ground").unwrap();
+        let layout: Vec<TableLayout> = (1..=8)
+            .map(|n| TableLayout { is_table: Some(true), id: None, name: n.to_string(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 })
+            .collect();
+        let tables: Vec<i64> = pos.save_floor_layout(&admin, floor.id, &layout).unwrap().into_iter().map(|t| t.id).collect();
+        let app = App::new(pos, std::env::temp_dir());
+        let login = |pin: &str| dispatch(&app, LOCAL, "login", json!({ "pin": pin })).unwrap();
+        // An order on `table` with two curries: (order id, line id).
+        let open = |table: i64| {
+            let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "dine_in", "table_id": table } })).unwrap();
+            let o = dispatch(&app, LOCAL, "add_item", json!({ "orderId": o["id"], "productId": curry.id, "qty": 2 })).unwrap();
+            (o["id"].clone(), o["items"][0]["id"].clone())
+        };
+        // A manager's PIN lowers a bill's service charge or sets its tax.
+        let cut = |id: &Value, cmd: &str| dispatch(&app, LOCAL, cmd, json!({ "orderId": id, "rateBp": 0, "pin": "4646" })).unwrap();
+        // Refused alone, wrong PIN, own PIN; then approved by Quinn's PIN.
+        let check = |cmd: &str, args: Value, needs: &str| {
+            let err = dispatch(&app, LOCAL, cmd, args.clone()).unwrap_err();
+            assert_eq!(err.to_string(), format!("{needs} needs a manager PIN"), "{cmd}");
+            let with = |pin: &str| { let mut a = args.clone(); a["pin"] = json!(pin); a };
+            assert!(matches!(dispatch(&app, LOCAL, cmd, with("9999")).unwrap_err(), PosError::InvalidPin), "{cmd}");
+            assert_eq!(dispatch(&app, LOCAL, cmd, with("2222")).unwrap_err().to_string(), format!("{needs} needs a manager's or admin's PIN"), "{cmd}");
+            dispatch(&app, LOCAL, cmd, with("4646")).unwrap()
+        };
+        let quinn_note = format!("(PIN of Quinn #{}, manager)", quinn.id);
+        let service = "moving dishes to a bill with a lower service charge";
+        let tax = "moving dishes to a bill with a lower tax";
+
+        login("2222");
+        // Table 2's bill has no service charge (a manager took it off).
+        let (a, line) = open(tables[0]);
+        let (b, _) = open(tables[1]);
+        cut(&b, "set_service_charge");
+        let o = check("move_items", json!({ "orderId": a, "tableId": tables[1], "items": [[line, 1]] }), service);
+        assert_eq!((o["id"].clone(), o["service_bp"].clone(), o["service_cents"].clone()), (b.clone(), json!(0), json!(0)));
+        let (user, detail) = last_audit(&app, "order.move_items");
+        assert_eq!(user, Some(sam.id));
+        assert!(detail.ends_with(&format!("-> order {b}: 1 dish(es) {quinn_note}")), "{detail}");
+        let o = check("merge_into_table", json!({ "orderId": a, "tableId": tables[1] }), service);
+        assert_eq!((o["id"].clone(), o["items"].as_array().unwrap().len()), (b.clone(), 3));
+        assert!(last_audit(&app, "order.merge").1.ends_with(&format!("{a} -> order {b} {quinn_note}")));
+        // Table 4's bill is tax-free: the dishes would take its 0%.
+        let (c, line) = open(tables[2]);
+        let (d, _) = open(tables[3]);
+        cut(&d, "set_order_tax");
+        let o = check("move_items", json!({ "orderId": c, "tableId": tables[3], "items": [[line, 1]] }), tax);
+        assert!(o["items"].as_array().unwrap().iter().all(|i| i["tax_rate_bp"] == 0), "{o}");
+        assert_eq!(o["tax_cents"], 0);
+        assert!(last_audit(&app, "order.move_items").1.ends_with(&quinn_note));
+        check("merge_into_table", json!({ "orderId": c, "tableId": tables[3] }), tax);
+
+        // The same or a higher rate stays free: onto a free table (same
+        // rates), from the bills with less onto ones with the full rates.
+        let (e, line) = open(tables[4]);
+        let o = dispatch(&app, LOCAL, "move_items", json!({ "orderId": e, "tableId": tables[5], "items": [[line, 1]] })).unwrap();
+        assert_eq!(o["service_bp"], 1000);
+        let (f, _) = open(tables[6]);
+        let o = dispatch(&app, LOCAL, "merge_into_table", json!({ "orderId": e, "tableId": tables[6] })).unwrap();
+        assert_eq!(o["id"], f);
+        assert!(!last_audit(&app, "order.merge").1.contains("PIN"));
+        let b_line = dispatch(&app, LOCAL, "get_order", json!({ "id": b })).unwrap()["items"][0]["id"].clone();
+        let o = dispatch(&app, LOCAL, "move_items", json!({ "orderId": b, "tableId": tables[6], "items": [[b_line, 1]] })).unwrap();
+        assert_eq!((o["id"].clone(), o["service_bp"].clone()), (f.clone(), json!(1000)));
+        // Off the tax-free bill: the dishes are taxed again, at the menu's rate.
+        let o = dispatch(&app, LOCAL, "merge_into_table", json!({ "orderId": d, "tableId": tables[6] })).unwrap();
+        assert_eq!((o["id"].clone(), o["tax_bp"].clone()), (f.clone(), Value::Null));
+        assert!(o["items"].as_array().unwrap().iter().all(|i| i["tax_rate_bp"] == 700), "{o}");
+        // Sam is still the one logged in.
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
+
+        // Quinn and the owner are never asked.
+        for (pin, note) in [("4646", "(no PIN, manager)"), ("1111", "(no PIN, admin)")] {
+            login(pin);
+            let (g, line) = open(tables[2]);
+            let (h, _) = open(tables[3]);
+            dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": h, "rateBp": 0 })).unwrap();
+            dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": h, "rateBp": 0 })).unwrap();
+            dispatch(&app, LOCAL, "move_items", json!({ "orderId": g, "tableId": tables[3], "items": [[line, 1]] })).unwrap();
+            assert!(last_audit(&app, "order.move_items").1.ends_with(note), "{pin}");
+            let o = dispatch(&app, LOCAL, "merge_into_table", json!({ "orderId": g, "tableId": tables[3] })).unwrap();
+            assert!(last_audit(&app, "order.merge").1.ends_with(note), "{pin}");
+            assert_eq!((o["service_cents"].clone(), o["tax_cents"].clone()), (json!(0), json!(0)));
+            dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": h, "reason": "test" })).unwrap();
+        }
     }
 
     fn curry(name: &str) -> NewProduct {

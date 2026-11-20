@@ -623,6 +623,50 @@ fn copy_line(tx: &Transaction, item: i64, order_id: i64, qty: i64, discount: i64
     Ok(new)
 }
 
+/// Who answers for dishes moving from order `from` onto the bill `to`
+/// when it charges less for them: a lower service charge, or a tax for the
+/// whole bill below `top_tax` (the highest rate of the priced dishes that
+/// go; they take the bill's). A manager's or admin's say-so, as lowering
+/// either on the bill itself is (see [`approved_by`]); None when the move
+/// costs nothing.
+fn move_approval<'a>(tx: &Transaction, s: &'a Session, approver: Option<&'a Session>, from: i64, to: i64, top_tax: Option<i64>) -> Result<Option<&'a Session>> {
+    let rates = |id: i64| tx.query_row("SELECT COALESCE(service_bp, 0), tax_bp FROM orders WHERE id = ?1", [id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)));
+    let ((service_from, _), (service_to, tax_to)) = (rates(from)?, rates(to)?);
+    let what = if service_to < service_from {
+        MOVE_SERVICE_NEEDS_PIN
+    } else if tax_to.zip(top_tax).is_some_and(|(to, top)| to < top) {
+        MOVE_TAX_NEEDS_PIN
+    } else {
+        return Ok(None);
+    };
+    approved_by(s, approver, MONEY_APPROVAL, what).map(Some)
+}
+
+/// For the audit log: " (PIN of Quinn #3, manager)" after a move onto a
+/// bill that charges less ([`move_approval`]); nothing otherwise.
+fn move_note(s: &Session, by: Option<&Session>) -> String {
+    by.map(|by| format!(" {}", approval_note(s, by))).unwrap_or_default()
+}
+
+/// Lines `moved` from order `from` onto order `to` take its tax: its own
+/// rate for the whole order (as dishes added to it do), or the menu's
+/// rates when it has none and `from` had one.
+fn take_order_tax(tx: &Transaction, from: i64, to: i64, moved: &[i64]) -> Result<()> {
+    let tax = |id: i64| tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [id], |r| r.get::<_, Option<i64>>(0));
+    let (was, now) = (tax(from)?, tax(to)?);
+    if was == now {
+        return Ok(());
+    }
+    let mut set = tx.prepare_cached(
+        "UPDATE order_items SET tax_rate_bp = COALESCE(?2, (SELECT p.tax_rate_bp FROM products p WHERE p.id = order_items.product_id), tax_rate_bp)
+         WHERE id = ?1",
+    )?;
+    for id in moved {
+        set.execute(params![id, now])?;
+    }
+    Ok(())
+}
+
 /// Remove an open order with no dishes left (after moving them away).
 fn drop_if_empty(tx: &Transaction, order_id: i64) -> Result<()> {
     let left: i64 = tx.query_row("SELECT COUNT(*) FROM order_items WHERE order_id = ?1", [order_id], |r| r.get(0))?;
@@ -717,6 +761,10 @@ const OPEN_ITEM_NEEDS_PIN: &str = "a dish not on the menu";
 /// A payment by "Other" on an order not from a delivery app: nothing is
 /// taken at the till, so it is a manager's or admin's say-so.
 const OTHER_PAY_NEEDS_PIN: &str = "a payment by Other (not a delivery app)";
+/// Dishes moved (or a bill joined) onto a bill with a lower service charge
+/// or tax: they would take its rate, the same say-so as lowering it there.
+const MOVE_SERVICE_NEEDS_PIN: &str = "moving dishes to a bill with a lower service charge";
+const MOVE_TAX_NEEDS_PIN: &str = "moving dishes to a bill with a lower tax";
 
 impl Pos {
     pub fn open_order(&self, s: &Session, new: &NewOrder) -> Result<Order> {
@@ -904,13 +952,29 @@ impl Pos {
     /// Move dishes to another table: `items` (order line, how many) go to
     /// that table's open order, or a new one if the table is free. A set's
     /// dishes go with it. Sent dishes stay sent (no new kitchen ticket). An
-    /// order left empty is removed. Returns the order they went to.
+    /// order left empty is removed. Returns the order they went to. The
+    /// dishes take that order's service charge and tax: onto a bill that
+    /// charges less for them, staff need a manager's or admin's PIN (see
+    /// [`Pos::move_items_approved`]).
     pub fn move_items(&mut self, s: &Session, order_id: i64, table_id: i64, items: &[(i64, i64)]) -> Result<Order> {
+        self.move_items_approved(s, None, order_id, table_id, items)
+    }
+
+    /// [`Pos::move_items`], with `approver` (the owner of a manager's or
+    /// admin's PIN typed on the till) allowing staff to move dishes onto a
+    /// bill with a lower service charge or tax. The audit log says who
+    /// approved it.
+    pub fn move_items_approved(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, table_id: i64, items: &[(i64, i64)]) -> Result<Order> {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let target = move_target(&tx, s, order_id, table_id)?;
         let lines = load_items(&tx, order_id)?;
+        // The highest tax on the dishes that go (a set's dishes with it).
+        let going = |i: &OrderItem| items.iter().any(|&(id, q)| q > 0 && (i.id == id || i.parent_id == Some(id)));
+        let top_tax = lines.iter().filter(|i| going(i) && i.unit_price_cents > 0).map(|i| i.tax_rate_bp).max();
         let mut moved = 0;
+        // The lines now on the target order.
+        let mut ids = Vec::new();
         for &(item, q) in items {
             if q <= 0 {
                 continue;
@@ -922,8 +986,10 @@ impl Pos {
             let q = q.min(it.qty);
             if q == it.qty {
                 tx.execute("UPDATE order_items SET order_id = ?2 WHERE id = ?1 OR parent_id = ?1", params![item, target])?;
+                ids.extend(lines.iter().filter(|c| c.id == item || c.parent_id == Some(item)).map(|c| c.id));
             } else {
                 let new = copy_line(&tx, item, target, q, it.discount_cents * q / it.qty, None)?;
+                ids.push(new);
                 tx.execute(
                     "UPDATE order_items SET qty = qty - ?2, discount_cents = discount_cents - ?3 WHERE id = ?1",
                     params![item, q, it.discount_cents * q / it.qty],
@@ -931,7 +997,7 @@ impl Pos {
                 // Each dish of a set keeps its count per set.
                 for c in lines.iter().filter(|c| c.parent_id == Some(item)) {
                     let part = c.qty / it.qty * q;
-                    copy_line(&tx, c.id, target, part, 0, Some(new))?;
+                    ids.push(copy_line(&tx, c.id, target, part, 0, Some(new))?);
                     tx.execute("UPDATE order_items SET qty = qty - ?2 WHERE id = ?1", params![c.id, part])?;
                 }
             }
@@ -944,16 +1010,27 @@ impl Pos {
         if count > MAX_ITEMS {
             return invalid("that table's order would have too many lines");
         }
+        let by = move_approval(&tx, s, approver, order_id, target, top_tax)?;
+        take_order_tax(&tx, order_id, target, &ids)?;
         drop_if_empty(&tx, order_id)?;
-        audit_tx(&tx, s.user_id, "order.move_items", &format!("{order_id} -> order {target}: {moved} dish(es)"))?;
+        audit_tx(&tx, s.user_id, "order.move_items", &format!("{order_id} -> order {target}: {moved} dish(es){}", move_note(s, by)))?;
         tx.commit()?;
         self.get_order(s, target)
     }
 
     /// Put a whole order onto another table. If that table already has an
-    /// order, the two become one bill (this order is removed); otherwise the
-    /// order just moves there.
+    /// order, the two become one bill (this order is removed), with that
+    /// bill's service charge and tax: when it charges less, staff need a
+    /// manager's or admin's PIN (see [`Pos::merge_into_table_approved`]).
+    /// Otherwise the order just moves there.
     pub fn merge_into_table(&mut self, s: &Session, order_id: i64, table_id: i64) -> Result<Order> {
+        self.merge_into_table_approved(s, None, order_id, table_id)
+    }
+
+    /// [`Pos::merge_into_table`], with `approver` (the owner of a manager's
+    /// or admin's PIN typed on the till) allowing staff to join a bill with
+    /// a lower service charge or tax. The audit log says who approved it.
+    pub fn merge_into_table_approved(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, table_id: i64) -> Result<Order> {
         s.require(Permission::Sell)?;
         let busy: Option<i64> = self
             .conn
@@ -972,9 +1049,17 @@ impl Pos {
         if count > MAX_ITEMS {
             return invalid("the joined bill would have too many lines");
         }
+        let top_tax: Option<i64> =
+            tx.query_row("SELECT MAX(tax_rate_bp) FROM order_items WHERE order_id = ?1 AND unit_price_cents > 0", [order_id], |r| r.get(0))?;
+        let by = move_approval(&tx, s, approver, order_id, target, top_tax)?;
+        let ids: Vec<i64> = tx
+            .prepare("SELECT id FROM order_items WHERE order_id = ?1")?
+            .query_map([order_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         tx.execute("UPDATE order_items SET order_id = ?2 WHERE order_id = ?1", params![order_id, target])?;
+        take_order_tax(&tx, order_id, target, &ids)?;
         drop_if_empty(&tx, order_id)?;
-        audit_tx(&tx, s.user_id, "order.merge", &format!("{order_id} -> order {target}"))?;
+        audit_tx(&tx, s.user_id, "order.merge", &format!("{order_id} -> order {target}{}", move_note(s, by)))?;
         tx.commit()?;
         self.get_order(s, target)
     }

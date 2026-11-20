@@ -1833,14 +1833,25 @@ async function renderOrder() {
       ok.textContent = !target ? 'Tap a table' : some && !n ? 'Tap the dishes to move'
         : some ? `Move ${n} dish(es) to ${target.name}` : target.order_id ? `Join ${target.name}'s bill` : `Move to ${target.name}`;
     };
+    // Onto a bill with a lower service charge or tax (the dishes take its rate): staff
+    // need a manager's PIN (orders.rs move_approval); the PIN pad takes this dialog's place.
+    const moveCall = async (cmd, args) => {
+      const r = await managerRetry(cmd, args, {
+        hint: `${target.name}'s bill has a lower service charge or tax: the dishes would take it. A manager or admin enters their PIN to approve.`,
+        okLabel: 'Approve move' });
+      if (r?.declined) toast('Not moved (no manager PIN)', true);
+      return r?.result ?? null;
+    };
     ok.onclick = act(async () => {
       if (!some) {
-        const o = await call('merge_into_table', { orderId, tableId: target.id });
+        const o = await moveCall('merge_into_table', { orderId, tableId: target.id });
+        if (!o) return;
         // The answer says what happened (the table may have got a bill meanwhile).
         return goTo(o, o.id !== orderId ? `Joined onto ${o.table_name}: one bill` : `Moved to ${o.table_name}`);
       }
       const all = bill.every((i) => (pick.get(i.id) ?? 0) >= i.qty);
-      const o = await call('move_items', { orderId, tableId: target.id, items: [...pick.entries()] });
+      const o = await moveCall('move_items', { orderId, tableId: target.id, items: [...pick.entries()] });
+      if (!o) return;
       if (all) return goTo(o, `Everything moved to ${o.table_name}`);
       closeModal();
       order = await call('get_order', { id: orderId });

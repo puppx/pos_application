@@ -842,15 +842,26 @@ pub(crate) struct Line {
     /// A big header: white text on a solid black bar, printed as an image.
     /// `text` is the name, then "\n" and a second name when there is one.
     pub inverse: bool,
+    /// Words that must stay on one line (the "MAINS TO FOLLOW" footer):
+    /// in the app's font the first of these that fits prints, as big as it
+    /// fits (double size first). Empty for an ordinary line.
+    pub fit: Vec<String>,
 }
 
 impl Line {
     pub fn new(size: Size, bold: bool, center: bool, text: impl Into<String>) -> Line {
-        Line { size, bold, center, text: text.into(), inverse: false }
+        Line { size, bold, center, text: text.into(), inverse: false, fit: Vec::new() }
+    }
+
+    /// This line on one line in the app's font: the first of `words` that
+    /// fits (see [`Line::fit`]).
+    pub fn fitting(mut self, words: Vec<String>) -> Line {
+        self.fit = words;
+        self
     }
 
     pub fn banner(text: impl Into<String>) -> Line {
-        Line { size: Size::Big, bold: true, center: true, text: text.into(), inverse: true }
+        Line { size: Size::Big, bold: true, center: true, text: text.into(), inverse: true, fit: Vec::new() }
     }
 }
 
@@ -952,6 +963,17 @@ pub(crate) fn render_escpos_in(lines: &[Line], width: usize, bold: bool, app_fon
                 continue;
             }
         }
+        // Words that must stay on one line (the footer): the first that
+        // fits, at the biggest size it fits; else the shortest, normal size.
+        if app_font && !l.fit.is_empty() {
+            let fits = |s: &str, size| crate::raster::fits_line(s, size, dots);
+            let (text, size) = [Size::Big, Size::Tall, Size::Normal]
+                .into_iter()
+                .find_map(|size| l.fit.iter().find(|t| fits(t, size)).map(|t| (t.as_str(), size)))
+                .unwrap_or((l.fit[l.fit.len() - 1].as_str(), Size::Normal));
+            b.extend(crate::raster::escpos_line_in(text, size, l.center, dots, mode));
+            continue;
+        }
         if crate::raster::needs_raster(&l.text) || (app_font && !is_rule(&l.text)) {
             b.extend(crate::raster::escpos_line_in(l.text.trim_end(), l.size, l.center, dots, mode));
             continue;
@@ -1027,6 +1049,21 @@ fn is_mark(c: char) -> bool {
 /// Printed width in characters.
 pub(crate) fn cols(text: &str) -> usize {
     text.chars().filter(|c| !is_mark(*c)).count()
+}
+
+/// The footer of a ticket sent with mains still waiting: "MAINS TO FOLLOW: 3".
+const MAINS_TO_FOLLOW: &str = "MAINS TO FOLLOW: ";
+/// Its shorter form, for narrow paper.
+const MAINS_LATER: &str = "MAINS LATER: ";
+
+/// A ticket footer's words, longest first: "MAINS TO FOLLOW: 11", then
+/// "MAINS LATER: 11" (which fits a double-size line on 58 mm paper).
+fn footer_words(footer: &str) -> Vec<String> {
+    let mut v = vec![footer.to_string()];
+    if let Some(n) = footer.strip_prefix(MAINS_TO_FOLLOW) {
+        v.push(format!("{MAINS_LATER}{n}"));
+    }
+    v
 }
 
 /// The lines the kitchen cooks: everything but a set's own (billing) line.
@@ -1193,8 +1230,20 @@ impl KitchenTicket {
         push(gap());
         push(Line::new(Size::Normal, false, false, rule('=', width)));
         if let Some(f) = &self.footer {
-            for t in wrap(f, big, "", "") {
-                push(Line::new(Size::Big, true, true, t));
+            // On one line, double size when it fits: on 58 mm paper (16
+            // double-size characters) "MAINS TO FOLLOW: 11" becomes
+            // "MAINS LATER: 11"; the app's font picks again when printing.
+            let words = footer_words(f);
+            let pick = [(Size::Big, big), (Size::Tall, width)]
+                .into_iter()
+                .find_map(|(size, room)| words.iter().find(|t| cols(t) <= room).map(|t| (size, t.clone())));
+            match pick {
+                Some((size, t)) => push(Line::new(size, true, true, t).fitting(words)),
+                None => {
+                    for t in wrap(f, big, "", "") {
+                        push(Line::new(Size::Big, true, true, t));
+                    }
+                }
             }
             push(Line::new(Size::Normal, false, false, rule('-', width)));
         }
@@ -1474,7 +1523,7 @@ impl Pos {
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: s.name.clone(),
             items: self.ticket_items(items, names, by_course)?,
-            footer: (!reprint && waiting > 0).then(|| format!("MAINS TO FOLLOW: {waiting}")),
+            footer: (!reprint && waiting > 0).then(|| format!("{MAINS_TO_FOLLOW}{waiting}")),
             brief: false,
             large: self.kitchen_printer()?.large_text,
             banner: None,
@@ -2829,6 +2878,42 @@ mod tests {
             let name = "THE BIG SUNDAY SHARING PLATTER";
             assert!(!crate::raster::fits_line(&format!("SET: {name}"), Size::Tall, dots));
             assert!(has(&print(name), &format!("SET: {name}"), Size::Normal), "{width} {mode:?}");
+        }
+    }
+
+    #[test]
+    fn mains_to_follow_stays_on_one_line_on_58_mm_paper() {
+        // "MAINS TO FOLLOW: 11" took 2-3 lines on 58 mm paper, in both fonts.
+        let footer = |n: i64| KitchenTicket { footer: Some(format!("{MAINS_TO_FOLLOW}{n}")), ..ticket() };
+        let one = |lines: &[Line], text: &str, size| lines.iter().filter(|l| l.text.contains("MAINS")).map(|l| (l.text.as_str(), l.size)).eq([(text, size)]);
+        // The printer's font: double size, the short words when the long ones do not fit.
+        assert!(one(&footer(11).lines(42), "MAINS TO FOLLOW: 11", Size::Big));
+        assert!(one(&footer(11).lines(32), "MAINS LATER: 11", Size::Big));
+        assert!(one(&footer(123).lines(32), "MAINS LATER: 123", Size::Big));
+        assert!(one(&footer(12345).lines(32), "MAINS TO FOLLOW: 12345", Size::Tall));
+        assert!(footer(11).to_text(32).contains("\nMAINS LATER: 11\n"), "{}", footer(11).to_text(32));
+        // The app's font, in each image mode: one image line, as big as it fits.
+        for (width, mode) in [42, 32].into_iter().flat_map(|w| ImageMode::TEST_ORDER.map(|m| (w, m))) {
+            let dots = width * crate::raster::DOTS_PER_CHAR;
+            let has = |b: &[u8], text: &str, size| {
+                let img = crate::raster::escpos_line_in(text, size, true, dots, mode);
+                b.windows(img.len()).any(|w| w == img.as_slice())
+            };
+            // What prints (80 mm is 504 dots, 58 mm 384): the long words at
+            // double size while they fit, then the short ones, then smaller.
+            let expect = [
+                (42, 3, "MAINS TO FOLLOW: 3", Size::Big),
+                (42, 11, "MAINS TO FOLLOW: 11", Size::Big),
+                (42, 123, "MAINS LATER: 123", Size::Big),
+                (32, 3, "MAINS LATER: 3", Size::Big),
+                (32, 11, "MAINS LATER: 11", Size::Big),
+                (32, 123, "MAINS LATER: 123", Size::Tall),
+            ];
+            for &(_, n, text, size) in expect.iter().filter(|e| e.0 == width) {
+                let b = render_escpos_in(&footer(n).lines(width), width, true, true, mode);
+                assert!(has(&b, text, size), "{width} {mode:?} {n}");
+                assert_eq!(crate::raster::line_images(text, size, true, dots).len(), 1, "{width} {n}");
+            }
         }
     }
 }

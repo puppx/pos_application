@@ -61,7 +61,7 @@ pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use restore::{io_error, is_disk_full, BackupSummary, PreparedRestore, DISK_FULL};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
 pub use settings::{
-    discount_presets, PaymentNames, BACKUPS_KEPT_DEFAULT, BACKUPS_KEPT_KEY, BACKUPS_KEPT_RANGE, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS, MAX_PAY_NAME,
+    discount_presets, PaymentNames, BACKUPS_KEPT_DEFAULT, BACKUPS_KEPT_KEY, BACKUPS_KEPT_RANGE, DISCOUNT_LIMIT_DEFAULT, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS, MAX_PAY_NAME,
     PAY_NAME_CARD_KEY, PAY_NAME_CASH_KEY,
 };
 pub use shifts::{CashMove, Shift};
@@ -170,12 +170,21 @@ impl Pos {
     }
 
     pub fn set_setting(&self, s: &Session, key: &str, value: &str) -> Result<()> {
-        // Managers may change the kitchen settings; the rest is for admins.
+        // Managers may change the kitchen settings and the staff discount
+        // limit; the rest is for admins.
         const KITCHEN: &[&str] = &[
             "drinks_split", "desserts_split", "teams_on", "teams_split", "team_names", "quick_notes", "starter_choice", teams::TEAM_CHOICE_KEY,
             "kds_slow_mins", "kds_late_mins", "kds_refresh_secs", "kds_paid_hours", "kds_beep", printing::PRINT_CANCELLED_ORDER_KEY,
         ];
-        s.require(if KITCHEN.contains(&key) { Permission::KitchenSettings } else { Permission::ManageSettings })?;
+        // The staff discount limit: whoever may approve a bigger discount
+        // (managers and admins) may set it.
+        s.require(if KITCHEN.contains(&key) {
+            Permission::KitchenSettings
+        } else if key == settings::DISCOUNT_LIMIT_KEY {
+            Permission::AnyDiscount
+        } else {
+            Permission::ManageSettings
+        })?;
         if key.starts_with('_') {
             return error::invalid("reserved setting key");
         }

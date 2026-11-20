@@ -52,8 +52,10 @@ pub struct NewProduct {
     pub price_cents: i64,
     #[serde(default)]
     pub cost_cents: i64,
+    /// None (left out or null): the category's tax rate, else the main
+    /// default (Settings, `default_tax_bp`), worked out here, never by the till.
     #[serde(default)]
-    pub tax_rate_bp: i64,
+    pub tax_rate_bp: Option<i64>,
     #[serde(default)]
     pub stock_qty: i64,
     /// Off by default: most dishes are not counted; bottled drinks may be.
@@ -83,8 +85,10 @@ pub struct ProductUpdate {
     pub price_cents: i64,
     #[serde(default)]
     pub cost_cents: i64,
+    /// None (left out or null): the item keeps the rate it has (never 0
+    /// because a till left it out).
     #[serde(default)]
-    pub tax_rate_bp: i64,
+    pub tax_rate_bp: Option<i64>,
     #[serde(default)]
     pub track_stock: bool,
     #[serde(default = "yes")]
@@ -162,6 +166,23 @@ pub(crate) fn validate(name: &str, price: i64, cost: i64, tax_bp: i64) -> Result
 }
 
 impl Pos {
+    /// The tax a new item in `category_id` gets when none is given: the
+    /// category's rate, else the main default (Settings, `default_tax_bp`).
+    pub fn new_item_tax(&self, category_id: Option<i64>) -> Result<i64> {
+        let cat: Option<i64> = match category_id {
+            Some(c) => self
+                .conn
+                .query_row("SELECT tax_rate_bp FROM categories WHERE id = ?1", [c], |r| r.get(0))
+                .optional()?
+                .flatten(),
+            None => None,
+        };
+        match cat {
+            Some(t) => Ok(t),
+            None => self.default_tax_bp(),
+        }
+    }
+
     /// Search active products by name/SKU/barcode for the sell screen.
     /// 1-2 characters: indexed name-prefix match. 3+: trigram full-text
     /// substring match. Both stay fast with 100k+ products.
@@ -233,7 +254,11 @@ impl Pos {
 
     pub fn create_product(&mut self, s: &Session, p: NewProduct) -> Result<Product> {
         s.require(Permission::ManageMenu)?;
-        let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
+        let tax_rate_bp = match p.tax_rate_bp {
+            Some(t) => t,
+            None => self.new_item_tax(p.category_id)?,
+        };
+        let name = validate(&p.name, p.price_cents, p.cost_cents, tax_rate_bp)?;
         let name_alt = clean_alt(p.name_alt.as_deref(), 120)?;
         self.check_category(p.category_id)?;
         self.check_team(p.team_id)?;
@@ -248,7 +273,7 @@ impl Pos {
                 name,
                 p.price_cents,
                 p.cost_cents,
-                p.tax_rate_bp,
+                tax_rate_bp,
                 p.stock_qty,
                 p.track_stock,
                 p.category_id,
@@ -276,7 +301,15 @@ impl Pos {
 
     pub fn update_product(&self, s: &Session, id: i64, p: ProductUpdate) -> Result<Product> {
         s.require(Permission::ManageMenu)?;
-        let name = validate(&p.name, p.price_cents, p.cost_cents, p.tax_rate_bp)?;
+        let tax_rate_bp = match p.tax_rate_bp {
+            Some(t) => t,
+            None => self
+                .conn
+                .query_row("SELECT tax_rate_bp FROM products WHERE id = ?1", [id], |r| r.get(0))
+                .optional()?
+                .ok_or(PosError::NotFound)?,
+        };
+        let name = validate(&p.name, p.price_cents, p.cost_cents, tax_rate_bp)?;
         let name_alt = clean_alt(p.name_alt.as_deref(), 120)?;
         self.check_category(p.category_id)?;
         self.check_team(p.team_id)?;
@@ -293,7 +326,7 @@ impl Pos {
                     name,
                     p.price_cents,
                     p.cost_cents,
-                    p.tax_rate_bp,
+                    tax_rate_bp,
                     p.track_stock,
                     p.active,
                     p.category_id,

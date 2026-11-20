@@ -2761,7 +2761,7 @@ mod tests {
         let quinn = pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
         let curry = pos
             .create_product(&admin, NewProduct {
-                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
             })
             .unwrap();

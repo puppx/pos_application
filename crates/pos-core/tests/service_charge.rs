@@ -9,7 +9,7 @@ fn setup() -> (Pos, Session, Product, i64) {
     let steak = pos
         .create_product(&admin, NewProduct {
             category_id: Some(mains.id), sku: None, barcode: None, name: "Steak".into(), price_cents: 2000,
-            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(1000), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap();
     let floor = pos.create_floor(&admin, "Ground").unwrap();
@@ -81,15 +81,19 @@ fn staff_can_change_or_remove_it_on_one_order() {
     let s = pos.login("2222").unwrap();
     let o = pos.open_order(&s, &order(OrderType::DineIn, Some(table))).unwrap();
     pos.add_item(&s, o.id, steak.id, 1, None, None, &[]).unwrap();
-    let o = pos.set_service_charge(&s, o.id, 0).unwrap();
+    // Removing it is a manager's or admin's say-so.
+    let err = pos.set_service_charge(&s, o.id, 0).unwrap_err();
+    assert_eq!(err.to_string(), "removing or lowering the service charge needs a manager PIN");
+    let o = pos.set_service_charge_approved(&s, Some(&admin), o.id, 0).unwrap();
     assert_eq!((o.service_cents, o.total_cents), (0, 2200));
+    // Putting it back, or more, is anyone's.
     let o = pos.set_service_charge(&s, o.id, 1500).unwrap();
     assert_eq!(o.service_cents, 300);
     assert!(pos.set_service_charge(&s, o.id, -1).is_err());
     assert!(pos.set_service_charge(&s, o.id, 3001).is_err());
     let paid = pos.pay_order(&s, o.id, PaymentMethod::Card, 0).unwrap();
     // Closed orders cannot change.
-    assert!(pos.set_service_charge(&s, paid.id, 0).is_err());
+    assert!(pos.set_service_charge(&admin, paid.id, 0).is_err());
     // A new order still gets the default rate.
     let o2 = pos.open_order(&s, &order(OrderType::DineIn, Some(table))).unwrap();
     assert_eq!(o2.service_bp, 1000);

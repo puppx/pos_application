@@ -10,6 +10,9 @@ use crate::{Pos, Result};
 /// The biggest discount, in percent of the line, staff may give without a
 /// manager's or admin's PIN. Not set or empty: no limit.
 pub const DISCOUNT_LIMIT_KEY: &str = "discount_staff_max_pct";
+/// The staff discount limit (percent) when [`DISCOUNT_LIMIT_KEY`] was never
+/// set. "No limit" is stored as an empty value, so it stays no limit.
+pub const DISCOUNT_LIMIT_DEFAULT: i64 = 10;
 
 /// At most this many quick discount buttons.
 pub const MAX_DISCOUNT_PRESETS: usize = 8;
@@ -72,13 +75,18 @@ pub fn discount_presets(v: &str) -> Result<Vec<i64>> {
         .collect()
 }
 
-/// The staff discount limit in percent, if one is set.
+/// The staff discount limit in percent: None for "No limit" (stored as an
+/// empty value); [`DISCOUNT_LIMIT_DEFAULT`] when never set (or unreadable).
 pub(crate) fn discount_limit(conn: &Connection) -> Result<Option<i64>> {
     let raw: Option<String> = conn
         .prepare_cached("SELECT value FROM settings WHERE key = ?1")?
         .query_row([DISCOUNT_LIMIT_KEY], |r| r.get(0))
         .optional()?;
-    Ok(raw.and_then(|v| v.trim().parse::<i64>().ok()).filter(|n| (0..=100).contains(n)))
+    Ok(match raw.as_deref().map(str::trim) {
+        Some("") => None,
+        Some(v) => Some(v.parse::<i64>().ok().filter(|n| (0..=100).contains(n)).unwrap_or(DISCOUNT_LIMIT_DEFAULT)),
+        None => Some(DISCOUNT_LIMIT_DEFAULT),
+    })
 }
 
 /// The names shown for the payment methods (see [`PAY_NAME_CASH_KEY`]).

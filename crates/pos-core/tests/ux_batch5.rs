@@ -8,7 +8,7 @@ fn setup() -> (Pos, Session, Product, i64) {
     let steak = pos
         .create_product(&admin, NewProduct {
             category_id: None, sku: None, barcode: None, name: "Steak".into(), price_cents: 2000,
-            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(1000), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap();
     let floor = pos.create_floor(&admin, "Ground").unwrap();

@@ -14,7 +14,7 @@ fn setup() -> Kit {
     // Prices include tax (the default): the menu price is what is paid.
     let item = |pos: &mut Pos, name: &str, price: i64| {
         pos.create_product(&admin, NewProduct {
-            category_id: None, sku: None, barcode: None, name: name.into(), price_cents: price, cost_cents: 0, tax_rate_bp: 2000,
+            category_id: None, sku: None, barcode: None, name: name.into(), price_cents: price, cost_cents: 0, tax_rate_bp: Some(2000),
             stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap()

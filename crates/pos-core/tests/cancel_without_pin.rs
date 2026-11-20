@@ -17,7 +17,7 @@ fn setup() -> Kit {
     let admin = pos.setup_first_admin("Owner", "1111").unwrap();
     let item = |pos: &mut Pos, name: &str| {
         pos.create_product(&admin, NewProduct {
-            category_id: None, sku: None, barcode: None, name: name.into(), price_cents: 800, cost_cents: 0, tax_rate_bp: 0,
+            category_id: None, sku: None, barcode: None, name: name.into(), price_cents: 800, cost_cents: 0, tax_rate_bp: Some(0),
             stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap()

@@ -21,7 +21,7 @@ fn setup() -> (Pos, Session, i64) {
     let mk = |pos: &mut Pos, name: &str, alt: Option<&str>, drink: bool| {
         let p = pos
             .create_product(&s, NewProduct {
-                category_id: Some(cat.id), sku: None, barcode: None, name: name.into(), price_cents: 1200, cost_cents: 0, tax_rate_bp: 0,
+                category_id: Some(cat.id), sku: None, barcode: None, name: name.into(), price_cents: 1200, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: alt.map(Into::into), prep: false, team_id: None,
             })
             .unwrap();

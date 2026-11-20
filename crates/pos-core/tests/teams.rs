@@ -23,7 +23,7 @@ fn setup() -> Kit {
         (cat(&pos, "Starters", 1), cat(&pos, "Mains", 2), cat(&pos, "Curries", 3), cat(&pos, "Rice", 4), cat(&pos, "Drinks", 5));
     let item = |pos: &mut Pos, name: &str, c: i64, starter: bool, team: Option<i64>| {
         pos.create_product(&s, NewProduct {
-            category_id: Some(c), sku: None, barcode: None, name: name.into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 0,
+            category_id: Some(c), sku: None, barcode: None, name: name.into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(0),
             stock_qty: 0, track_stock: false, starter, name_alt: None, prep: false, team_id: team,
         })
         .unwrap()
@@ -89,7 +89,7 @@ fn four_teams_are_there_to_start_with_and_can_be_edited() {
     // A product can only join a team that exists.
     let p = k.pos.get_product(&k.s, k.cola.id).unwrap();
     let upd = |team| ProductUpdate {
-        category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 0,
+        category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(0),
         track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: team,
     };
     assert!(k.pos.update_product(&k.s, p.id, upd(Some(999))).is_err());
@@ -137,7 +137,7 @@ fn nothing_changes_until_dishes_are_given_a_team() {
     for id in [k.soup.id, k.wings.id, k.steak.id, k.green.id, k.jasmine.id] {
         let p = k.pos.get_product(&k.s, id).unwrap();
         k.pos.update_product(&k.s, id, ProductUpdate {
-            category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 0,
+            category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(0),
             track_stock: false, active: true, starter: p.starter, name_alt: None, prep: false, team_id: None,
         })
         .unwrap();
@@ -296,7 +296,7 @@ fn drinks_go_straight_away_on_their_own_ticket() {
     assert!(k.pos.get_product(&k.s, k.cola.id).unwrap().drink);
     // New items in the category are drinks too.
     let tea = k.pos.create_product(&k.s, NewProduct {
-        category_id: Some(drinks.id), sku: None, barcode: None, name: "Tea".into(), price_cents: 200, cost_cents: 0, tax_rate_bp: 0,
+        category_id: Some(drinks.id), sku: None, barcode: None, name: "Tea".into(), price_cents: 200, cost_cents: 0, tax_rate_bp: Some(0),
         stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     }).unwrap();
     assert!(tea.drink);
@@ -359,7 +359,7 @@ fn desserts_print_last_on_their_own_ticket_and_both_can_be_switched_off() {
     // Named like desserts: marked from the start, and its items follow.
     let cake = k.pos.create_product(&k.s, NewProduct {
         category_id: Some(cat.id), sku: None, barcode: None, name: "Mango sticky rice".into(), price_cents: 900, cost_cents: 0,
-        tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+        tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     }).unwrap();
     k.pos.set_category_dessert(&k.s, cat.id, true, true).unwrap();
     assert!(k.pos.get_product(&k.s, cake.id).unwrap().dessert);

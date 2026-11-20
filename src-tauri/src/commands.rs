@@ -131,6 +131,24 @@ impl Inner {
         self.local_throttle = LoginThrottle::default();
     }
 
+    /// Re-read the sessions of everyone logged in as `user_id` (after their
+    /// name, role or active flag changed); those who can no longer log in are logged out.
+    fn refresh_logins_of(&mut self, user_id: i64) {
+        let Inner { pos, logins, .. } = self;
+        logins.retain(|_, l| {
+            if l.session.user_id != user_id {
+                return true;
+            }
+            match pos.refresh_session(&l.session) {
+                Ok(s) => {
+                    l.session = s;
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+    }
+
     fn sign_in(&mut self, t: &str, s: &Session) {
         if self.logins.len() >= MAX_TERMINALS && !self.logins.contains_key(t) {
             let oldest = self
@@ -507,6 +525,12 @@ pub fn prune_backups(dir: &Path, keep: usize) {
     }
 }
 
+/// A manager's or admin's PIN typed to approve one change, hashed before
+/// the lock is taken; left out, null or empty = none.
+fn approval_pin(app: &App, pin: Option<String>) -> Option<HashedPin> {
+    pin.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(|p| app.hash_pin(p))
+}
+
 /// Declares the commands and generates [`dispatch`]. Each command lists its
 /// arguments (read from a JSON object with camelCase keys; `Option` ones may
 /// be left out) and a body returning `Result<T>`; `app` is the [`App`] and
@@ -808,15 +832,22 @@ commands! {
         })
     }
 
-    /// A dish not on the menu: name and price typed on the order.
-    fn add_open_item(app, t, order_id: i64, name: String, price_cents: i64, qty: Option<i64>, note: Option<String>, starter: Option<bool>) -> Order {
-        app.with_session(t, |pos, s| pos.add_open_item(s, order_id, &name, price_cents, qty.unwrap_or(1), note.as_deref(), starter.unwrap_or(false)))
+    /// A dish not on the menu: name and price typed on the order. Staff
+    /// pass `pin`, a manager's or admin's PIN approving it (it only
+    /// approves; nobody is logged in or out).
+    fn add_open_item(app, t, order_id: i64, name: String, price_cents: i64, qty: Option<i64>, note: Option<String>, starter: Option<bool>, pin: Option<String>) -> Order {
+        let pin = approval_pin(app, pin);
+        app.with_session(t, |pos, s| {
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            pos.add_open_item_approved(s, approver.as_ref(), order_id, &name, price_cents, qty.unwrap_or(1), note.as_deref(), starter.unwrap_or(false))
+        })
     }
 
     /// A change to a dish already sent tells the kitchen: fewer or removed
     /// prints CANCELLED (with the set's dishes for a set), a new note CHANGED.
     /// `pin`: a manager's or admin's PIN approving a discount over the staff
-    /// limit (it only approves; nobody is logged in or out).
+    /// limit, or staff reducing or removing a dish already sent (it only
+    /// approves; nobody is logged in or out).
     fn update_item(app, t, item_id: i64, update: ItemUpdate, pin: Option<String>, order_id: Option<i64>) -> Order {
         let pin = pin.as_deref().map(|p| app.hash_pin(p));
         let (order, job) = app.with_session(t, |pos, s| {
@@ -1068,9 +1099,14 @@ commands! {
         Ok(system_printers())
     }
 
-    fn pay_order(app, t, order_id: i64, method: PaymentMethod, tendered_cents: i64) -> PayResult {
+    /// `pin`: a manager's or admin's PIN when staff pay by Other on an
+    /// order not from a delivery app.
+    fn pay_order(app, t, order_id: i64, method: PaymentMethod, tendered_cents: i64, pin: Option<String>) -> PayResult {
+        let pin = approval_pin(app, pin);
         let (order, job) = app.with_session(t, |pos, s| {
-            let order = pos.pay_order(s, order_id, method, tendered_cents)?;
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            let payment = PaymentInput { method, amount_cents: None, tendered_cents, tip_cents: 0, items: None };
+            let order = pos.add_payment_approved(s, approver.as_ref(), order_id, &payment)?;
             let job = pos.payment_print_job(s, &order)?;
             Ok((order, job))
         })?;
@@ -1079,17 +1115,28 @@ commands! {
 
     /// One payment: the rest, an amount, or chosen dishes, with a tip.
     /// The receipt prints when the last part is paid; cash opens the drawer.
-    fn add_payment(app, t, order_id: i64, payment: PaymentInput) -> PayResult {
+    /// `pin`: a manager's or admin's PIN when staff pay by Other on an
+    /// order not from a delivery app (it only approves).
+    fn add_payment(app, t, order_id: i64, payment: PaymentInput, pin: Option<String>) -> PayResult {
+        let pin = approval_pin(app, pin);
         let (order, job) = app.with_session(t, |pos, s| {
-            let order = pos.add_payment(s, order_id, &payment)?;
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            let order = pos.add_payment_approved(s, approver.as_ref(), order_id, &payment)?;
             let job = pos.payment_print_job(s, &order)?;
             Ok((order, job))
         })?;
         Ok(PayResult { order, print: print(job) })
     }
 
-    fn remove_payment(app, t, order_id: i64, payment_id: i64) -> Order {
-        app.with_session(t, |pos, s| pos.remove_payment(s, order_id, payment_id))
+    /// Take back a part payment. Admins and managers need no PIN; staff
+    /// pass `pin`, a manager's or admin's PIN approving it (it only
+    /// approves; nobody is logged in or out). Logged with who approved it.
+    fn remove_payment(app, t, order_id: i64, payment_id: i64, pin: Option<String>) -> Order {
+        let pin = approval_pin(app, pin);
+        app.with_session(t, |pos, s| {
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            pos.remove_payment_approved(s, approver.as_ref(), order_id, payment_id)
+        })
     }
 
     /// Cancel an open order. Admins and managers confirm with no PIN
@@ -1172,8 +1219,14 @@ commands! {
         app.with_session(t, |pos, s| pos.create_user(s, &name, role, &pin))
     }
 
+    /// Every terminal logged in as this user gets the new name and role at
+    /// once (app_status shows them), and is logged out if they can no longer log in.
     fn update_user(app, t, id: i64, name: String, role: Role, active: bool) -> User {
-        app.with_session(t, |pos, s| pos.update_user(s, id, &name, role, active))
+        app.with_session_inner(t, |inner, s| {
+            let user = inner.pos.update_user(s, id, &name, role, active)?;
+            inner.refresh_logins_of(id);
+            Ok(user)
+        })
     }
 
     fn reset_pin(app, t, id: i64, pin: String) -> () {
@@ -1263,13 +1316,25 @@ commands! {
         app.with_session(t, |pos, s| pos.set_service_settings(s, &settings))
     }
 
-    fn set_service_charge(app, t, order_id: i64, rate_bp: i64) -> Order {
-        app.with_session(t, |pos, s| pos.set_service_charge(s, order_id, rate_bp))
+    /// The service charge on one order. Removing or lowering it: staff pass
+    /// `pin`, a manager's or admin's PIN approving it.
+    fn set_service_charge(app, t, order_id: i64, rate_bp: i64, pin: Option<String>) -> Order {
+        let pin = approval_pin(app, pin);
+        app.with_session(t, |pos, s| {
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            pos.set_service_charge_approved(s, approver.as_ref(), order_id, rate_bp)
+        })
     }
 
     /// One tax rate for the whole order; null = each item's menu rate.
-    fn set_order_tax(app, t, order_id: i64, rate_bp: Option<i64>) -> Order {
-        app.with_session(t, |pos, s| pos.set_order_tax(s, order_id, rate_bp))
+    /// A rate of the order's own: staff pass `pin`, a manager's or admin's
+    /// PIN approving it.
+    fn set_order_tax(app, t, order_id: i64, rate_bp: Option<i64>, pin: Option<String>) -> Order {
+        let pin = approval_pin(app, pin);
+        app.with_session(t, |pos, s| {
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+            pos.set_order_tax_approved(s, approver.as_ref(), order_id, rate_bp)
+        })
     }
 
     fn delete_order(app, t, order_id: i64, reason: Option<String>) -> () {
@@ -1648,6 +1713,39 @@ mod tests {
     }
 
     #[test]
+    fn changing_yourself_updates_your_session_at_once() {
+        let app = app();
+        let tablet = "web-0123456789abcdef0123456789abcdef";
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, tablet, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, "web-ffffffffffffffffffffffffffffffff", "login", json!({ "pin": "2222" })).unwrap();
+        let me = dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["session"]["user_id"].as_i64().unwrap();
+        // A second admin, so the owner may step down.
+        dispatch(&app, LOCAL, "create_user", json!({ "name": "Ann", "role": "admin", "pin": "3333" })).unwrap();
+        let status = |t| dispatch(&app, t, "app_status", Value::Null).unwrap()["session"].clone();
+        dispatch(&app, LOCAL, "update_user", json!({ "id": me, "name": "Boss", "role": "manager", "active": true })).unwrap();
+        // Both terminals logged in as the owner see the new name and role without another call.
+        for t in [LOCAL, tablet] {
+            let s = status(t);
+            assert_eq!((s["name"].clone(), s["role"].clone()), (json!("Boss"), json!("manager")), "{t}");
+        }
+        assert!(matches!(dispatch(&app, LOCAL, "list_users", json!({})), Err(PosError::Forbidden)));
+        // Other people's logins are left as they were.
+        assert_eq!(status("web-ffffffffffffffffffffffffffffffff")["name"], "Sam");
+        // An admin turning themselves off is logged out everywhere.
+        dispatch(&app, LOCAL, "logout", json!({})).unwrap();
+        dispatch(&app, LOCAL, "login", json!({ "pin": "3333" })).unwrap();
+        let ann = status(LOCAL)["user_id"].as_i64().unwrap();
+        dispatch(&app, tablet, "logout", json!({})).unwrap();
+        dispatch(&app, tablet, "login", json!({ "pin": "3333" })).unwrap();
+        dispatch(&app, LOCAL, "update_user", json!({ "id": me, "name": "Boss", "role": "admin", "active": true })).unwrap();
+        dispatch(&app, LOCAL, "update_user", json!({ "id": ann, "name": "Ann", "role": "admin", "active": false })).unwrap();
+        assert!(status(LOCAL).is_null());
+        assert!(status(tablet).is_null());
+        assert!(matches!(dispatch(&app, LOCAL, "list_users", json!({})), Err(PosError::NotLoggedIn)));
+    }
+
+    #[test]
     fn wrong_pins_on_the_network_never_lock_out_the_till() {
         let app = app();
         for i in 0..6 {
@@ -1682,7 +1780,7 @@ mod tests {
         let mia = pos.create_user(&admin, "Mia", Role::Manager, "2222").unwrap();
         let curry = pos
             .create_product(&admin, NewProduct {
-                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
             })
             .unwrap();
@@ -1725,7 +1823,7 @@ mod tests {
         let admin = pos.setup_first_admin("Owner", "1111").unwrap();
         let curry = pos
             .create_product(&admin, NewProduct {
-                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: Some("แกงเขียวหวาน".into()), prep: false, team_id: None,
             })
             .unwrap();
@@ -1769,7 +1867,7 @@ mod tests {
         pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
         let curry = pos
             .create_product(&admin, NewProduct {
-                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 900, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
             })
             .unwrap();
@@ -1836,7 +1934,7 @@ mod tests {
         pos.set_setting(&admin, "discount_staff_max_pct", "10").unwrap();
         let curry = pos
             .create_product(&admin, NewProduct {
-                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 0,
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
             })
             .unwrap();
@@ -1856,9 +1954,173 @@ mod tests {
         assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
     }
 
+    #[test]
+    fn staff_need_a_manager_pin_for_sent_dishes_open_items_other_payments_and_the_limit() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+        let curry = pos
+            .create_product(&admin, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Green curry".into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(0),
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        let new_order = |app: &App| {
+            let o = dispatch(app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+            dispatch(app, LOCAL, "add_item", json!({ "orderId": o["id"], "productId": curry.id, "qty": 2 })).unwrap()
+        };
+        // Refused alone, wrong PIN, own PIN; then approved by Quinn's PIN.
+        let check = |app: &App, cmd: &str, args: Value, needs: &str| {
+            let err = dispatch(app, LOCAL, cmd, args.clone()).unwrap_err();
+            assert_eq!(err.to_string(), format!("{needs} needs a manager PIN"), "{cmd}");
+            let with = |pin: &str| { let mut a = args.clone(); a["pin"] = json!(pin); a };
+            assert!(matches!(dispatch(app, LOCAL, cmd, with("9999")).unwrap_err(), PosError::InvalidPin), "{cmd}");
+            assert_eq!(dispatch(app, LOCAL, cmd, with("2222")).unwrap_err().to_string(), format!("{needs} needs a manager's or admin's PIN"), "{cmd}");
+            dispatch(app, LOCAL, cmd, with("4646")).unwrap()
+        };
+
+        // A manager sets the staff limit; staff may not.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        assert!(matches!(
+            dispatch(&app, LOCAL, "set_setting", json!({ "key": "discount_staff_max_pct", "value": "100" })).unwrap_err(),
+            PosError::Forbidden
+        ));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "4646" })).unwrap();
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "discount_staff_max_pct", "value": "20" })).unwrap();
+        let v = dispatch(&app, LOCAL, "get_settings", json!({ "keys": ["discount_staff_max_pct"] })).unwrap();
+        assert_eq!(v["discount_staff_max_pct"], "20");
+
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        let o = new_order(&app);
+        let (id, item) = (o["id"].clone(), o["items"][0]["id"].clone());
+        // Over Quinn's 20% limit.
+        let upd = json!({ "qty": 2, "discount_cents": 500, "note": null });
+        let o2 = check(&app, "update_item", json!({ "itemId": item, "update": upd }), "a discount over 20%");
+        assert_eq!(o2["discount_cents"], 500);
+        // A sent dish: one fewer.
+        dispatch(&app, LOCAL, "send_to_kitchen", json!({ "orderId": id })).unwrap();
+        let upd = json!({ "qty": 1, "discount_cents": 250, "note": null });
+        let o2 = check(&app, "update_item", json!({ "itemId": item, "update": upd }), "removing a dish already sent to the kitchen");
+        assert_eq!(o2["items"][0]["qty"], 1);
+        // A dish not on the menu.
+        let o2 = check(&app, "add_open_item", json!({ "orderId": id, "name": "Lobster", "priceCents": 1 }), "a dish not on the menu");
+        assert_eq!(o2["items"].as_array().unwrap().len(), 2);
+        // Other, not a delivery app: add_payment and pay_order.
+        let pay = json!({ "method": "other", "amount_cents": null, "tendered_cents": 0, "tip_cents": 0, "items": null });
+        let r = check(&app, "add_payment", json!({ "orderId": id, "payment": pay }), "a payment by Other (not a delivery app)");
+        assert_eq!(r["order"]["status"], "paid");
+        let o = new_order(&app);
+        let r = check(&app, "pay_order", json!({ "orderId": o["id"], "method": "other", "tenderedCents": 0 }), "a payment by Other (not a delivery app)");
+        assert_eq!(r["order"]["status"], "paid");
+        // Card needs nothing; Sam is still the one logged in.
+        let o = new_order(&app);
+        dispatch(&app, LOCAL, "pay_order", json!({ "orderId": o["id"], "method": "card", "tenderedCents": 0 })).unwrap();
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
+
+        // Quinn and the owner are never asked.
+        for pin in ["4646", "1111"] {
+            dispatch(&app, LOCAL, "login", json!({ "pin": pin })).unwrap();
+            let o = new_order(&app);
+            let (id, item) = (o["id"].clone(), o["items"][0]["id"].clone());
+            dispatch(&app, LOCAL, "send_to_kitchen", json!({ "orderId": id })).unwrap();
+            dispatch(&app, LOCAL, "update_item", json!({ "itemId": item, "update": { "qty": 1, "discount_cents": 1000, "note": null } })).unwrap();
+            dispatch(&app, LOCAL, "add_open_item", json!({ "orderId": id, "name": "Bread", "priceCents": 200 })).unwrap();
+            let r = dispatch(&app, LOCAL, "pay_order", json!({ "orderId": id, "method": "other", "tenderedCents": 0 })).unwrap();
+            assert_eq!(r["order"]["status"], "paid");
+        }
+    }
+
+    /// The audit log's last entry with `action`: (user id, detail).
+    fn last_audit(app: &App, action: &str) -> (Option<i64>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy.db");
+        app.lock().pos.backup_unchecked(&path).unwrap();
+        let c = Connection::open(&path).unwrap();
+        c.query_row("SELECT user_id, detail FROM audit_log WHERE action = ?1 ORDER BY id DESC LIMIT 1", [action], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+    }
+
+    #[test]
+    fn staff_need_a_manager_pin_to_take_a_payment_back_or_cut_service_or_tax() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        let sam = pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        let quinn = pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+        pos.set_service_settings(&admin, &ServiceSettings { rate_bp: 1000, ..Default::default() }).unwrap();
+        let curry = pos.create_product(&admin, curry("Green curry")).unwrap();
+        let floor = pos.create_floor(&admin, "Ground").unwrap();
+        let table = pos
+            .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: Some(true), id: None, name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+            .unwrap()[0]
+            .id;
+        let app = App::new(pos, std::env::temp_dir());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        let o = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "dine_in", "table_id": table } })).unwrap();
+        let id = o["id"].clone();
+        dispatch(&app, LOCAL, "add_item", json!({ "orderId": id, "productId": curry.id, "qty": 2 })).unwrap();
+        let pay = |amount: i64| {
+            let o = dispatch(&app, LOCAL, "add_payment", json!({ "orderId": id, "payment": { "method": "cash", "amount_cents": amount, "tendered_cents": amount } })).unwrap();
+            o["order"]["payments"].as_array().unwrap().last().unwrap()["id"].clone()
+        };
+        let needs = "needs a manager PIN";
+        let wrong = "needs a manager's or admin's PIN";
+
+        // Taking a payment back.
+        let p = pay(500);
+        for pin in [json!(null), json!(""), json!("  ")] {
+            let err = dispatch(&app, LOCAL, "remove_payment", json!({ "orderId": id, "paymentId": p, "pin": pin })).unwrap_err();
+            assert_eq!(err.to_string(), format!("taking a payment back {needs}"));
+        }
+        let err = dispatch(&app, LOCAL, "remove_payment", json!({ "orderId": id, "paymentId": p })).unwrap_err();
+        assert_eq!(err.to_string(), format!("taking a payment back {needs}"));
+        let err = dispatch(&app, LOCAL, "remove_payment", json!({ "orderId": id, "paymentId": p, "pin": "9999" })).unwrap_err();
+        assert!(matches!(err, PosError::InvalidPin), "{err}");
+        let err = dispatch(&app, LOCAL, "remove_payment", json!({ "orderId": id, "paymentId": p, "pin": "2222" })).unwrap_err();
+        assert_eq!(err.to_string(), format!("taking a payment back {wrong}"));
+        let o = dispatch(&app, LOCAL, "remove_payment", json!({ "orderId": id, "paymentId": p, "pin": "4646" })).unwrap();
+        assert_eq!(o["paid_cents"], 0);
+        let (user, detail) = last_audit(&app, "order.payment_removed");
+        assert_eq!(user, Some(sam.id));
+        assert!(detail.ends_with(&format!("cash 500 tip 0 taken by Sam (PIN of Quinn #{}, manager)", quinn.id)), "{detail}");
+
+        // Removing the service charge; putting it back is staff's own.
+        let err = dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": id, "rateBp": 0 })).unwrap_err();
+        assert_eq!(err.to_string(), format!("removing or lowering the service charge {needs}"));
+        let err = dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": id, "rateBp": 0, "pin": "9999" })).unwrap_err();
+        assert!(matches!(err, PosError::InvalidPin), "{err}");
+        let o = dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": id, "rateBp": 0, "pin": "4646" })).unwrap();
+        assert_eq!(o["service_bp"], 0);
+        assert!(last_audit(&app, "order.service").1.ends_with(&format!("(was 1000) (PIN of Quinn #{}, manager)", quinn.id)));
+        let o = dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": id, "rateBp": 1000 })).unwrap();
+        assert_eq!(o["service_bp"], 1000);
+
+        // A tax rate for the order; the menu rates are staff's own.
+        let err = dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": 0 })).unwrap_err();
+        assert_eq!(err.to_string(), format!("changing the tax on an order {needs}"));
+        let err = dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": 0, "pin": "2222" })).unwrap_err();
+        assert_eq!(err.to_string(), format!("changing the tax on an order {wrong}"));
+        let o = dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": 0, "pin": "1111" })).unwrap();
+        assert_eq!(o["tax_bp"], 0);
+        assert!(last_audit(&app, "order.tax").1.ends_with(&format!("(PIN of Owner #{}, admin)", admin.user_id)));
+        dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": null })).unwrap();
+        // Sam is still the one logged in.
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["session"]["name"], "Sam");
+
+        // A manager logged in needs no PIN for any of it.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "4646" })).unwrap();
+        let p = pay(500);
+        dispatch(&app, LOCAL, "remove_payment", json!({ "orderId": id, "paymentId": p })).unwrap();
+        assert!(last_audit(&app, "order.payment_removed").1.ends_with("(no PIN, manager)"));
+        dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": id, "rateBp": 0 })).unwrap();
+        let o = dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": 0 })).unwrap();
+        assert_eq!((o["service_bp"].clone(), o["tax_bp"].clone()), (json!(0), json!(0)));
+    }
+
     fn curry(name: &str) -> NewProduct {
         NewProduct {
-            category_id: None, sku: None, barcode: None, name: name.into(), price_cents: 900, cost_cents: 0, tax_rate_bp: 0,
+            category_id: None, sku: None, barcode: None, name: name.into(), price_cents: 900, cost_cents: 0, tax_rate_bp: Some(0),
             stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         }
     }

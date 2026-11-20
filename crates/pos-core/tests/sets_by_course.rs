@@ -33,7 +33,7 @@ fn setup_with(teams: bool) -> Kit {
     let team = |n: &str| if teams { list.iter().find(|t| t.name == n).map(|t| t.id) } else { None };
     let item = |pos: &mut Pos, name: &str, price: i64, team_id: Option<i64>| {
         pos.create_product(&s, NewProduct {
-            category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: price, cost_cents: 0, tax_rate_bp: 0,
+            category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: price, cost_cents: 0, tax_rate_bp: Some(0),
             stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id,
         })
         .unwrap()
@@ -244,7 +244,7 @@ fn two_sets_sent_course_by_course_keep_one_block_per_set() {
 fn dishes_off_the_set_stay_first_and_drinks_keep_their_own_ticket() {
     let mut k = setup();
     let cola = k.pos.create_product(&k.s, NewProduct {
-        category_id: None, sku: None, barcode: None, name: "Cola".into(), price_cents: 0, cost_cents: 0, tax_rate_bp: 0,
+        category_id: None, sku: None, barcode: None, name: "Cola".into(), price_cents: 0, cost_cents: 0, tax_rate_bp: Some(0),
         stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     }).unwrap();
     k.pos.set_drink(&k.s, cola.id, true).unwrap();

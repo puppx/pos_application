@@ -388,7 +388,7 @@ mod tests {
             .map(|(n, (price, tax, starter))| {
                 pos.create_product(&s, NewProduct {
                     category_id: Some(cat), sku: None, barcode: None, name: format!("Dish {n}"), price_cents: *price, cost_cents: 0,
-                    tax_rate_bp: *tax, stock_qty: 0, track_stock: false, starter: *starter, name_alt: None, prep: false, team_id: None,
+                    tax_rate_bp: Some(*tax), stock_qty: 0, track_stock: false, starter: *starter, name_alt: None, prep: false, team_id: None,
                 })
                 .unwrap()
                 .id

@@ -287,7 +287,7 @@ mod tests {
         let cat = pos.create_category(&s, "Food", None, 1).unwrap().id;
         let item = |pos: &mut Pos, name: &str, starter: bool, team: Option<i64>, alt: Option<&str>| {
             pos.create_product(&s, NewProduct {
-                category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 1000,
+                category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(1000),
                 stock_qty: 0, track_stock: false, starter, name_alt: alt.map(Into::into), prep: false, team_id: team,
             })
             .unwrap()

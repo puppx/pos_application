@@ -61,8 +61,10 @@ impl Role {
 pub enum Permission {
     /// Open orders, add items, send to kitchen, take payment.
     Sell,
-    /// A discount over the staff limit (Settings, `discount_staff_max_pct`)
-    /// without anyone else's PIN (admins and managers).
+    /// A discount over the staff limit (Settings, `discount_staff_max_pct`),
+    /// a changed price, removing or lowering an order's service charge, or
+    /// a tax rate for a whole order, without anyone else's PIN (admins and
+    /// managers). Staff need the PIN of someone who has it.
     AnyDiscount,
     ViewOwnOrders,
     ViewAllOrders,
@@ -70,7 +72,9 @@ pub enum Permission {
     VoidOrder,
     /// Cancel an open order (sent to the kitchen or not) from the till with
     /// just a confirm box, no PIN (admins and managers). Everyone else types
-    /// a PIN (see `Pos::cancel_order_confirmed`).
+    /// a PIN (see `Pos::cancel_order_confirmed`). Also taking a part
+    /// payment back (see `Pos::remove_payment`): staff need the PIN of
+    /// someone who has this.
     CancelWithoutPin,
     ManageMenu,
     AdjustStock,

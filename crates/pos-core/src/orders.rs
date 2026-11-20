@@ -673,6 +673,51 @@ pub(crate) fn audit_tx(tx: &Transaction, user_id: i64, action: &str, detail: &st
     Ok(())
 }
 
+/// Who answers for a change to the money on an order that needs `p` (a
+/// manager's or an admin's say-so): `s`, logged in on the till, when their
+/// role has it; else `approver`, the owner of a PIN typed on the till for
+/// it. Refused as "`what` needs a manager PIN" when no PIN came, and as
+/// "`what` needs a manager's or admin's PIN" when the PIN's owner may not
+/// either (the till asks for a PIN on "needs a manager").
+pub(crate) fn approved_by<'a>(s: &'a Session, approver: Option<&'a Session>, p: Permission, what: &str) -> Result<&'a Session> {
+    if s.role.can(p) {
+        return Ok(s);
+    }
+    match approver {
+        None => invalid(format!("{what} needs a manager PIN")),
+        Some(a) if !a.role.can(p) => invalid(format!("{what} needs a manager's or admin's PIN")),
+        Some(a) => Ok(a),
+    }
+}
+
+/// How `by` (from [`approved_by`]) approved what `s` did, for the audit
+/// log: "(no PIN, manager)", or "(PIN of Quinn #3, manager)".
+pub(crate) fn approval_note(s: &Session, by: &Session) -> String {
+    if by.user_id == s.user_id {
+        format!("(no PIN, {})", s.role.as_str())
+    } else {
+        format!("(PIN of {} #{}, {})", by.name, by.user_id, by.role.as_str())
+    }
+}
+
+/// Removing or lowering the service charge, or setting a tax rate for the
+/// whole order: a manager's or admin's say-so, like a discount over the
+/// staff limit.
+const MONEY_APPROVAL: Permission = Permission::AnyDiscount;
+const SERVICE_NEEDS_PIN: &str = "removing or lowering the service charge";
+const TAX_NEEDS_PIN: &str = "changing the tax on an order";
+const PAYMENT_NEEDS_PIN: &str = "taking a payment back";
+/// Fewer of a dish already sent to the kitchen (or removing it): staff need
+/// a manager's or admin's PIN ([`Permission::CancelWithoutPin`]), or a
+/// cashier could take the dishes off, then cancel the empty order freely.
+const VOID_NEEDS_PIN: &str = "removing a dish already sent to the kitchen";
+/// A dish not on the menu at a typed price: the same say-so as a changed
+/// price ([`Pos::set_item_price`]).
+const OPEN_ITEM_NEEDS_PIN: &str = "a dish not on the menu";
+/// A payment by "Other" on an order not from a delivery app: nothing is
+/// taken at the till, so it is a manager's or admin's say-so.
+const OTHER_PAY_NEEDS_PIN: &str = "a payment by Other (not a delivery app)";
+
 impl Pos {
     pub fn open_order(&self, s: &Session, new: &NewOrder) -> Result<Order> {
         s.require(Permission::Sell)?;
@@ -1122,6 +1167,24 @@ impl Pos {
         note: Option<&str>,
         starter: bool,
     ) -> Result<Order> {
+        self.add_open_item_approved(s, None, order_id, name, price_cents, qty, note, starter)
+    }
+
+    /// [`Pos::add_open_item`], with `approver` (the owner of a manager's or
+    /// admin's PIN typed on the till) allowing staff to add it: a typed
+    /// price is a changed price. The audit log says who approved it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_open_item_approved(
+        &mut self,
+        s: &Session,
+        approver: Option<&Session>,
+        order_id: i64,
+        name: &str,
+        price_cents: i64,
+        qty: i64,
+        note: Option<&str>,
+        starter: bool,
+    ) -> Result<Order> {
         s.require(Permission::Sell)?;
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 60 {
@@ -1136,6 +1199,7 @@ impl Pos {
         let note = opt_text(&note.map(str::to_string), 100, "note")?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
+        let by = approved_by(s, approver, MONEY_APPROVAL, OPEN_ITEM_NEEDS_PIN)?;
         let default_bp: i64 = tx
             .query_row("SELECT value FROM settings WHERE key = 'default_tax_bp'", [], |r| r.get::<_, String>(0))
             .optional()?
@@ -1165,7 +1229,7 @@ impl Pos {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![order_id, product, name, price_cents, order_tax.unwrap_or(default_bp), qty, note, s.user_id, starter],
         )?;
-        audit_tx(&tx, s.user_id, "order.open_item", &format!("order {order_id} {name} {price_cents}"))?;
+        audit_tx(&tx, s.user_id, "order.open_item", &format!("order {order_id} {name} {price_cents} {}", approval_note(s, by)))?;
         tx.commit()?;
         self.get_order(s, order_id)
     }
@@ -1191,14 +1255,18 @@ impl Pos {
     }
 
     /// Change quantity, discount or note on a line; qty 0 removes it.
-    /// Lines already sent to the kitchen can only be reduced or removed by
-    /// an admin (it is food that has been made), and their note is fixed.
+    /// Lines already sent to the kitchen (food that has been made) can only
+    /// be reduced or removed by a manager or an admin, or by staff with one's
+    /// PIN (see [`Pos::update_item_approved`]); with the setting
+    /// `staff_cancel_sent` = "0", only by a manager or admin.
     pub fn update_item(&mut self, s: &Session, item_id: i64, upd: &ItemUpdate) -> Result<Order> {
         self.update_item_approved(s, None, item_id, upd)
     }
 
     /// [`Pos::update_item`], with `approver` (from a manager's PIN typed on
-    /// this till) allowing a discount over the staff limit.
+    /// this till) allowing a discount over the staff limit, or staff to
+    /// reduce or remove a dish already sent (logged on `order.item_void`
+    /// with who approved it).
     pub fn update_item_approved(&mut self, s: &Session, approver: Option<&Session>, item_id: i64, upd: &ItemUpdate) -> Result<Order> {
         s.require(Permission::Sell)?;
         let note = opt_text(&upd.note, 100, "note")?;
@@ -1232,6 +1300,12 @@ impl Pos {
         if cur.parent_id.is_some() && (upd.qty != cur.qty || upd.discount_cents != cur.discount_cents) {
             return invalid("change or remove the set itself");
         }
+        // Fewer of a sent dish: a manager's or admin's say-so (staff type a PIN).
+        let void_by = if cur.sent_at.is_some() && upd.qty < cur.qty {
+            Some(approved_by(s, approver, Permission::CancelWithoutPin, VOID_NEEDS_PIN)?)
+        } else {
+            None
+        };
         if cur.is_set && upd.qty != cur.qty {
             if upd.qty == 0 {
                 tx.execute("DELETE FROM order_items WHERE parent_id = ?1", [item_id])?;
@@ -1291,8 +1365,13 @@ impl Pos {
                 params![item_id, upd.qty, upd.discount_cents, note],
             )?;
         }
-        if cur.sent_at.is_some() && upd.qty < cur.qty {
-            audit_tx(&tx, s.user_id, "order.item_void", &format!("order {order_id} {} x{}", cur.name, cur.qty - upd.qty))?;
+        if let Some(by) = void_by {
+            audit_tx(
+                &tx,
+                s.user_id,
+                "order.item_void",
+                &format!("order {order_id} {} x{} {}", cur.name, cur.qty - upd.qty, approval_note(s, by)),
+            )?;
         }
         if upd.discount_cents != cur.discount_cents && upd.qty > 0 {
             audit_tx(&tx, s.user_id, "order.discount", &format!("order {order_id} {} {}", cur.name, upd.discount_cents))?;
@@ -1436,39 +1515,68 @@ impl Pos {
     }
 
     /// Change or remove (0) the service charge on an open order, e.g. at the
-    /// customer's request. Logged.
-    pub fn set_service_charge(&self, s: &Session, order_id: i64, rate_bp: i64) -> Result<Order> {
+    /// customer's request. Raising it is anyone's; removing or lowering it
+    /// is a manager's or admin's (staff need `approver`, see
+    /// [`Pos::set_service_charge_approved`]). Logged.
+    pub fn set_service_charge(&mut self, s: &Session, order_id: i64, rate_bp: i64) -> Result<Order> {
+        self.set_service_charge_approved(s, None, order_id, rate_bp)
+    }
+
+    /// [`Pos::set_service_charge`], with `approver` (the owner of a manager's
+    /// or admin's PIN typed on the till) allowing staff to remove or lower
+    /// it. The audit log says who approved it.
+    pub fn set_service_charge_approved(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, rate_bp: i64) -> Result<Order> {
         s.require(Permission::Sell)?;
         check_rate(rate_bp)?;
-        require_open(&self.conn, order_id)?;
-        self.conn.execute("UPDATE orders SET service_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
-        self.audit(Some(s.user_id), "order.service", &format!("{order_id} {rate_bp}"))?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        require_open(&tx, order_id)?;
+        let was: i64 = tx.query_row("SELECT COALESCE(service_bp, 0) FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+        if rate_bp != was {
+            let by = if rate_bp < was { approved_by(s, approver, MONEY_APPROVAL, SERVICE_NEEDS_PIN)? } else { s };
+            tx.execute("UPDATE orders SET service_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
+            audit_tx(&tx, s.user_id, "order.service", &format!("{order_id} {rate_bp} (was {was}) {}", approval_note(s, by)))?;
+        }
+        tx.commit()?;
         self.get_order(s, order_id)
     }
 
     /// Set one tax rate for every line of an open order (e.g. 0% for a
     /// tax-exempt customer), or None to go back to each item's menu rate.
-    /// Logged.
+    /// Going back to the menu rates is anyone's; a rate of the order's own
+    /// is a manager's or admin's (staff need `approver`, see
+    /// [`Pos::set_order_tax_approved`]). Logged.
     pub fn set_order_tax(&mut self, s: &Session, order_id: i64, rate_bp: Option<i64>) -> Result<Order> {
+        self.set_order_tax_approved(s, None, order_id, rate_bp)
+    }
+
+    /// [`Pos::set_order_tax`], with `approver` (the owner of a manager's or
+    /// admin's PIN typed on the till) allowing staff to set a rate for the
+    /// whole order. The audit log says who approved it.
+    pub fn set_order_tax_approved(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, rate_bp: Option<i64>) -> Result<Order> {
         s.require(Permission::Sell)?;
         if rate_bp.is_some_and(|r| !(0..=10_000).contains(&r)) {
             return invalid("tax rate must be between 0% and 100%");
         }
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        tx.execute("UPDATE orders SET tax_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
-        match rate_bp {
-            Some(r) => tx.execute("UPDATE order_items SET tax_rate_bp = ?2 WHERE order_id = ?1", params![order_id, r])?,
-            None => tx.execute(
-                "UPDATE order_items SET tax_rate_bp = (SELECT p.tax_rate_bp FROM products p WHERE p.id = order_items.product_id)
-                 WHERE order_id = ?1",
-                [order_id],
-            )?,
-        };
-        tx.execute(
-            "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'order.tax', ?2)",
-            params![s.user_id, format!("{order_id} {rate_bp:?}")],
-        )?;
+        let was: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+        // The menu's own rates are always right; any other rate (0% for a
+        // tax-free customer, or one that is higher or lower) is not staff's
+        // to choose.
+        // Unchanged (e.g. "Menu rates" tapped again): nothing to write or log.
+        if rate_bp != was {
+            let by = if rate_bp.is_some() { approved_by(s, approver, MONEY_APPROVAL, TAX_NEEDS_PIN)? } else { s };
+            tx.execute("UPDATE orders SET tax_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
+            match rate_bp {
+                Some(r) => tx.execute("UPDATE order_items SET tax_rate_bp = ?2 WHERE order_id = ?1", params![order_id, r])?,
+                None => tx.execute(
+                    "UPDATE order_items SET tax_rate_bp = (SELECT p.tax_rate_bp FROM products p WHERE p.id = order_items.product_id)
+                     WHERE order_id = ?1",
+                    [order_id],
+                )?,
+            };
+            audit_tx(&tx, s.user_id, "order.tax", &format!("{order_id} {rate_bp:?} (was {was:?}) {}", approval_note(s, by)))?;
+        }
         tx.commit()?;
         self.get_order(s, order_id)
     }
@@ -1483,9 +1591,27 @@ impl Pos {
     /// typed) or chosen dishes (their share of the bill, service included).
     /// A tip can go on top. The order closes once the payments cover it.
     pub fn add_payment(&mut self, s: &Session, order_id: i64, p: &PaymentInput) -> Result<Order> {
+        self.add_payment_approved(s, None, order_id, p)
+    }
+
+    /// [`Pos::add_payment`], with `approver` (the owner of a manager's or
+    /// admin's PIN typed on the till) allowing staff to take a payment by
+    /// Other on an order that is not from a delivery app (no money comes
+    /// into the till for it). The audit log says who approved it.
+    pub fn add_payment_approved(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, p: &PaymentInput) -> Result<Order> {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
+        let other_by = if p.method == PaymentMethod::Other {
+            let channel: Option<i64> = tx.query_row("SELECT channel_id FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+            if channel.is_none() {
+                Some(approved_by(s, approver, MONEY_APPROVAL, OTHER_PAY_NEEDS_PIN)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let items = load_items(&tx, order_id)?;
         if items.is_empty() {
             return invalid("the order is empty");
@@ -1564,6 +1690,9 @@ impl Pos {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![order_id, p.method.as_str(), amount, p.tip_cents, tendered, change, chosen, s.user_id, shift],
         )?;
+        if let Some(by) = other_by {
+            audit_tx(&tx, s.user_id, "order.payment_other", &format!("order {order_id} {amount} tip {} {}", p.tip_cents, approval_note(s, by)))?;
+        }
         if paid + amount >= t.total {
             close_paid(&tx, s, order_id, &t)?;
         } else {
@@ -1574,15 +1703,37 @@ impl Pos {
     }
 
     /// Take back a part payment taken by mistake (the order is still open).
+    /// Admins and managers may ([`Permission::CancelWithoutPin`]); staff need
+    /// `approver` (see [`Pos::remove_payment_approved`]), or a cashier
+    /// could take the cash, take the payment back and keep it. Logged.
     pub fn remove_payment(&mut self, s: &Session, order_id: i64, payment_id: i64) -> Result<Order> {
+        self.remove_payment_approved(s, None, order_id, payment_id)
+    }
+
+    /// [`Pos::remove_payment`], with `approver` (the owner of a manager's or
+    /// admin's PIN typed on the till) allowing staff to take a payment
+    /// back. The audit log has the payment and who approved it.
+    pub fn remove_payment_approved(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, payment_id: i64) -> Result<Order> {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let n = tx.execute("DELETE FROM payments WHERE id = ?1 AND order_id = ?2", params![payment_id, order_id])?;
-        if n == 0 {
-            return Err(PosError::NotFound);
-        }
-        audit_tx(&tx, s.user_id, "order.payment_removed", &format!("order {order_id} payment {payment_id}"))?;
+        let (method, amount, tip, taken_by): (String, i64, i64, String) = tx
+            .query_row(
+                "SELECT p.method, p.amount_cents, p.tip_cents, u.name FROM payments p JOIN users u ON u.id = p.paid_by
+                 WHERE p.id = ?1 AND p.order_id = ?2",
+                params![payment_id, order_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+            .ok_or(PosError::NotFound)?;
+        let by = approved_by(s, approver, Permission::CancelWithoutPin, PAYMENT_NEEDS_PIN)?;
+        tx.execute("DELETE FROM payments WHERE id = ?1 AND order_id = ?2", params![payment_id, order_id])?;
+        audit_tx(
+            &tx,
+            s.user_id,
+            "order.payment_removed",
+            &format!("order {order_id} payment {payment_id} {method} {amount} tip {tip} taken by {taken_by} {}", approval_note(s, by)),
+        )?;
         tx.commit()?;
         self.get_order(s, order_id)
     }
@@ -1792,7 +1943,7 @@ mod tests {
         let cat = pos.create_category(&s, "Food", None, 1).unwrap().id;
         let dish = pos
             .create_product(&s, NewProduct {
-                category_id: Some(cat), sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: 0,
+                category_id: Some(cat), sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
             })
             .unwrap()
@@ -1848,7 +1999,7 @@ mod tests {
         let s = pos.setup_first_admin("Owner", "1111").unwrap();
         let dish = pos
             .create_product(&s, NewProduct {
-                category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: 0,
+                category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
             })
             .unwrap()

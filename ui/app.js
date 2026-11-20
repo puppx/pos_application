@@ -110,6 +110,7 @@ const ICONS = {
   more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
   minus: '<path d="M5 12h14"/>',
   alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5h.01"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
 };
 
 // ---------- light / dark theme (per device) ----------
@@ -376,8 +377,7 @@ function forgetSession() {
   Object.assign(state, {
     session: null, orderId: null, orderOpen: false, orderEmpty: null, view: 'floor', returnTo: 'floor', floorId: null,
     menu: null, cats: null, catId: null, subId: null, itemGroups: null, itemVariants: null, service: null, defaultTax: null,
-    quickNotes: null, starterChoice: null, menuTab: null, menuShown: null, newSubOf: null, openEditor: null, settingsTab: null,
-    day: null,
+    quickNotes: null, starterChoice: null, day: null,
   });
   resetManage();
 }
@@ -552,6 +552,8 @@ function renderLogin() {
 const UI_KEYS = ['auto_logout_minutes', 'auto_logout_warn_secs', 'start_screen', 'show_takeaway', 'show_collection', 'show_delivery',
   'button_size', 'discount_presets', 'discount_staff_max_pct', 'pay_name_cash', 'pay_name_card'];
 const DISCOUNT_PRESETS_DEFAULT = [5, 10, 15, 20];
+/// The staff discount limit (%) until a manager or admin sets one (pos-core DISCOUNT_LIMIT_DEFAULT).
+const DISCOUNT_LIMIT_DEFAULT = 10;
 const START_SCREENS = [['tables', 'Tables'], ['orders', 'Orders'], ['takeaway', 'New takeaway']];
 function uiSettings(raw = {}) {
   const whole = (v, lo, hi, def) => { const n = Number(String(v ?? '').trim()); return v != null && String(v).trim() !== '' && Number.isInteger(n) && n >= lo && n <= hi ? n : def; };
@@ -564,8 +566,10 @@ function uiSettings(raw = {}) {
     types: { takeaway: raw.show_takeaway !== '0', collection: raw.show_collection !== '0', delivery: raw.show_delivery !== '0' },
     bigButtons: raw.button_size === 'large',
     discountPresets: presets,
-    /// Staff need a manager's PIN for more than this percentage off a line; null = no limit.
-    discountLimit: whole(raw.discount_staff_max_pct, 0, 100, null),
+    /// Staff need a manager's PIN for more than this percentage off a line; null = no limit
+    /// (stored as ''). Never set: DISCOUNT_LIMIT_DEFAULT (pos-core settings.rs discount_limit).
+    discountLimit: raw.discount_staff_max_pct != null && String(raw.discount_staff_max_pct).trim() === '' ? null
+      : whole(raw.discount_staff_max_pct, 0, 100, DISCOUNT_LIMIT_DEFAULT),
     /// What Cash and Card are called on screen (Settings → Payments); stored as "cash" / "card".
     payNames: { cash: String(raw.pay_name_cash ?? '').trim() || 'Cash', card: String(raw.pay_name_card ?? '').trim() || 'Card' },
   };
@@ -735,22 +739,22 @@ const HELP = {
     'Finish & Pay takes the money: cash, card or split.',
     'Move, Reprint, Bill, Drawer and Cancel are under the order name.']],
   history: ['History', [
-    'Pick a day, or Today / Yesterday / Last 7 days.',
-    'Tap an order to see it, reprint its receipt or void it (a refund).']],
+    'Pick Today, Yesterday or 7 days, or tap the calendar for one day.',
+    'Tap an order to see it, reprint its receipt or void it (a refund). ⋯ on a row reprints straight away.']],
   reports: ['Reports', [
-    "See the day's sales, tax, payment methods and best sellers.",
-    'At closing time tap Close day & print summary. All orders must be paid or cancelled first.']],
+    "See a day's sales, orders, average bill, tips and best sellers. Pick the day at the top.",
+    'At closing time tap Close day: it prints the summary. All orders must be paid or cancelled first.']],
   settings: ['Manage', [
     'Pick a page or a settings group in the list. Search finds a setting by name, like "printer", "tax" or "PIN".',
     'Switches and choices save at once: a ✓ shows next to them. Printers, the service charge and other settings with several parts open a panel with Save.',
     'Lists (teams, delivery apps, the floor plan) keep changes in a bar at the bottom until you tap Save.',
     'Tap (i) next to a setting for a short explanation.']],
   menuAdmin: ['Menu', [
-    'Tap + Menu item to add a dish: a name, a category and a price is enough.',
-    'Tap any item to change it. More options holds tax, choices, extras and stock.',
-    'Paste a menu copies a whole list from Excel or Google Sheets.']],
+    'Tap + Item to add a dish: a name, a category and a price is enough.',
+    'Tap any item to change it: kitchen flags, sold out, and under Advanced tax, choices, option groups and stock.',
+    'Categories and option groups are on the left (chips on a phone). ⋯ has set menus and Paste a menu.']],
   plan: ['Floor plan', ['Pick a floor at the top, or add one with + Floor. This floor renames or deletes it.', 'Add a square or round table, or an Area for things that are not tables (the bar, a window).', 'Drag shapes to move them. Tap one to change its name, shape, size or kind in the card on the right.', 'Changes wait in the bar at the bottom: tap Save layout when you are done.']],
-  users: ['Staff', ['Add each person with a name, a role and a PIN they log in with.', 'Staff sell; managers also see reports and history; admins change settings.']],
+  users: ['Staff', ['Add each person with + Staff member: a name, a role and a PIN.', 'Tap a person to change their name, role, PIN or whether they can log in. Changes save at once.']],
   customers: ['Customers', ['Find a saved customer by phone, name or postcode.', 'Tap one to change their details or see their recent orders.']],
   shift: ['Shift & cash', ['Start the shift with the float in the drawer.', 'Record money put in or taken out, and count the drawer at the end.']],
   kitchen: ['Kitchen screen', ['Each card is one order, oldest first.', 'Tap a dish when it is ready; tap Done when the whole order is out.']],
@@ -1109,7 +1113,13 @@ async function renderOrder() {
       if (!price.value.trim()) return toast('Type the price (0 if it is free)', true);
       let cents;
       try { cents = parseMoney(price.value); } catch { return toast('Enter a price like 2 or 2.50', true); }
-      order = await call('add_open_item', { orderId, name: name.value, priceCents: cents, qty, note: note.value.trim() || null, starter: course });
+      // Staff: a typed price needs a manager's or admin's PIN (orders.rs add_open_item_approved).
+      const r = await managerRetry('add_open_item', { orderId, name: name.value, priceCents: cents, qty, note: note.value.trim() || null, starter: course }, {
+        hint: `${name.value.trim()} × ${qty} at ${money(cents)}: a dish not on the menu. A manager or admin enters their PIN to approve it.`,
+        okLabel: 'Approve and add' });
+      if (!r) return;
+      if (r.declined) return toast(`${name.value.trim()} not added (no manager PIN)`, true);
+      order = r.result;
       editing = null; // a dish added: the totals and Send come back
       closeModal(); draw(); toast(`${name.value.trim()} added`);
     });
@@ -1421,14 +1431,18 @@ async function renderOrder() {
         else toast(msg, true);
         const err = new Error(msg); err.handled = true; throw err;
       }
-      // Over the discount limit, or more of a dish whose price was made cheaper (orders.rs update_item_approved).
-      const what = /changed price/i.test(msg) ? 'more' : 'discount';
+      // Over the discount limit, more of a dish whose price was made cheaper, or fewer of a
+      // dish already sent to the kitchen (orders.rs update_item_approved).
+      const what = /changed price/i.test(msg) ? 'more' : /sent to the kitchen/i.test(msg) ? 'void' : 'discount';
+      const q = changes.qty ?? it.qty;
       const ok = await pinDialog({
         title: 'Manager PIN',
         hint: what === 'more'
-          ? `${it.name}: ${it.qty} → ${changes.qty ?? it.qty} at ${money(it.unit_price_cents)} each, a price changed by a manager. A manager or admin enters their PIN to approve more of it.`
-          : `${it.name}: ${msg}. A manager or admin enters their PIN to approve it.`,
-        okLabel: what === 'more' ? `Approve ${changes.qty ?? it.qty} at ${money(it.unit_price_cents)}` : 'Approve discount',
+          ? `${it.name}: ${it.qty} → ${q} at ${money(it.unit_price_cents)} each, a price changed by a manager. A manager or admin enters their PIN to approve more of it.`
+          : what === 'void'
+            ? `${it.name}: ${q ? `${it.qty} → ${q}` : 'remove'} (already sent to the kitchen). A manager or admin enters their PIN to approve it.`
+            : `${it.name}: ${msg}. A manager or admin enters their PIN to approve it.`,
+        okLabel: what === 'more' ? `Approve ${q} at ${money(it.unit_price_cents)}` : what === 'void' ? (q ? `Approve ${it.qty} → ${q}` : 'Approve removing it') : 'Approve discount',
         submit: async (pin) => {
           try { order = await invoke('update_item', { ...args, pin }); } catch (e2) {
             const m = String(e2?.message ?? e2);
@@ -1439,13 +1453,13 @@ async function renderOrder() {
         },
       });
       if (!ok) {
-        const err = new Error(what === 'more' ? `Not changed: ${it.name} stays at ${it.qty}` : 'Discount not approved');
+        const err = new Error(what === 'more' || what === 'void' ? `Not changed: ${it.name} stays at ${it.qty}` : 'Discount not approved');
         err.handled = true;
         err.notApproved = true;
         toast(err.message, true);
         throw err;
       }
-      toast(what === 'more' ? 'Approved' : 'Discount approved');
+      toast(what === 'discount' ? 'Discount approved' : 'Approved');
     }
     // The dish now belongs to another bill (its order was joined onto it on another till).
     if (order.id !== orderId) { leaveDeadOrder(); return; }
@@ -1481,7 +1495,20 @@ async function renderOrder() {
       // Anything not yet sent (mains waiting included) goes to the kitchen with the first payment.
       if (!sentFirst && order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
       sentFirst = true;
-      const { order: res, print: receipt } = await call('add_payment', { orderId, payment });
+      // Other on an order not from a delivery app: staff need a manager's or admin's PIN
+      // (orders.rs add_payment_approved); the PIN pad takes the pay dialog's place for a moment.
+      let paid;
+      if (payment.method === 'other') {
+        const r = await managerRetry('add_payment', { orderId, payment }, {
+          hint: `${money(payment.amount_cents ?? order.total_cents - (order.paid_cents ?? 0))} by Other: no money comes into the till. A manager or admin enters their PIN to approve it.`,
+          okLabel: 'Approve payment', before: () => { state.onModalClose = null; } });
+        if (!r?.result) {
+          if (r?.declined) toast('Not paid (no manager PIN)', true);
+          const err = new Error('not paid'); err.handled = true; err.redraw = !!r?.declined; throw err;
+        }
+        paid = r.result;
+      } else paid = await call('add_payment', { orderId, payment });
+      const { order: res, print: receipt } = paid;
       if (res.status !== 'paid') {
         order = res;
         draw();
@@ -1840,7 +1867,13 @@ async function renderOrder() {
     const presets = [...new Set([state.service?.rate_bp || 0, 1000, 1250, 1500].filter((b) => b > 0))].sort((a, b) => a - b);
     const custom = h('input', { inputmode: 'decimal', placeholder: '%', style: 'width:80px', value: order.service_bp ? pct(order.service_bp) : '' });
     const set = (bp) => act(async () => {
-      order = await call('set_service_charge', { orderId, rateBp: bp });
+      // Removing or lowering it: staff need a manager's PIN.
+      const r = await managerRetry('set_service_charge', { orderId, rateBp: bp }, {
+        hint: `${state.service?.label || 'Service charge'}: ${order.service_bp ? `${pct(order.service_bp)}%` : 'none'} → ${bp ? `${pct(bp)}%` : 'none'}. A manager or admin enters their PIN to approve.`,
+        okLabel: bp ? `Approve ${pct(bp)}%` : 'Remove service charge' });
+      if (!r) return;
+      if (r.declined) return toast('Service charge not changed (no manager PIN)', true);
+      order = r.result;
       setKids(extra); draw();
       toast(bp ? `Service charge ${pct(bp)}%` : 'Service charge removed');
     });
@@ -1862,7 +1895,14 @@ async function renderOrder() {
     const presets = [...new Set([0, state.defaultTax || 0, 500, 2000])].sort((a, b) => a - b);
     const custom = h('input', { inputmode: 'decimal', placeholder: '%', style: 'width:80px', value: order.tax_bp != null ? pct(order.tax_bp) : '' });
     const set = (bp) => act(async () => {
-      order = await call('set_order_tax', { orderId, rateBp: bp });
+      // A rate for the whole order: staff need a manager's PIN ("Menu rates" never does).
+      const label = (v) => (v == null ? 'menu rates' : `${pct(v)}%`);
+      const r = await managerRetry('set_order_tax', { orderId, rateBp: bp }, {
+        hint: `Tax on this order: ${label(order.tax_bp)} → ${label(bp)}. A manager or admin enters their PIN to approve.`,
+        okLabel: `Approve ${label(bp)}` });
+      if (!r) return;
+      if (r.declined) return toast('Tax not changed (no manager PIN)', true);
+      order = r.result;
       setKids(extra); draw();
       toast(bp == null ? 'Tax back to each item\'s menu rate' : bp ? `Tax ${pct(bp)}% on every item` : 'No tax on this order');
     });
@@ -1994,6 +2034,43 @@ function showModal(...kids) {
   m.hidden = false;
 }
 
+/// A change staff may make only with a manager's or admin's PIN (taking a payment
+/// back, lowering the service charge, the tax on an order). Tries it; when the
+/// server asks for a manager, the PIN pad asks and it is tried again with that PIN
+/// (the PIN only approves: nobody is logged in or out). Gives { result } (with
+/// `approved` after a PIN), { notFound }, { declined } (PIN pad closed), or null
+/// when it failed for another reason (already shown, as call() does).
+const pinError = (m) => (/invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m);
+async function managerRetry(cmd, args, { hint, okLabel, before = null }) {
+  // Only a payment can be gone while its order is open; for the order itself "not found" means it is gone.
+  const missing = (m) => m === 'not found' && cmd === 'remove_payment';
+  try { return { result: await invoke(cmd, args) }; } catch (e) {
+    const msg = String(e?.message ?? e);
+    if (missing(msg)) return { notFound: true };
+    if (!/needs a manager/i.test(msg)) {
+      if (msg === 'please log in') { forgetSession(); start(); }
+      else if (isDeadOrder(msg, args, cmd) || await deniedForDeadOrder(msg, args, cmd)) leaveDeadOrder(msg);
+      else toast(msg, true);
+      return null;
+    }
+  }
+  before?.();
+  let result = null, notFound = false, gone = false;
+  const ok = await pinDialog({ title: 'Manager PIN', hint, okLabel,
+    submit: async (pin) => {
+      try { result = await invoke(cmd, { ...args, pin }); } catch (e2) {
+        const m = String(e2?.message ?? e2);
+        if (m === 'please log in') { gone = true; setTimeout(() => { closeModal(); forgetSession(); start(); }); return 'Logged out: log in again'; }
+        if (missing(m)) { notFound = true; setTimeout(closeModal); return 'Changed on another till'; }
+        if (isDeadOrder(m, args, cmd)) { gone = true; setTimeout(() => { closeModal(); leaveDeadOrder(m); }); return 'This order is closed'; }
+        return pinError(m);
+      }
+    } });
+  if (gone) return null;
+  if (notFound) return { notFound: true };
+  return ok ? { result, approved: true } : { declined: true };
+}
+
 /// A PIN keypad in a dialog, e.g. a manager approving something on this
 /// till (nobody is logged in or out). `submit(pin)` does the action and
 /// returns nothing when it worked, or a message to show (wrong PIN…).
@@ -2019,7 +2096,7 @@ function pinDialog({ title, hint, okLabel, okClass = 'primary paybig', keepLabel
     ok.onclick = go;
     showModal(h('h3', {}, title), h('div', { class: 'muted' }, hint), dots, err,
       h('div', { class: 'keypad' }, ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))),
-      ok, h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, keepLabel)));
+      ok, h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { class: 'pin-keep', onclick: closeModal }, keepLabel)));
     drawPin();
     state.onModalClose = () => resolve(false);
     document.removeEventListener('keydown', state.modalKeys);
@@ -2204,6 +2281,8 @@ async function payDialog(order, refresh, pay) {
     } catch (e) {
       busy = false;
       if (!e?.handled) toast(String(e?.message ?? e), true);
+      // The PIN pad (Other) was closed: the pay dialog comes back.
+      if (e?.redraw) { draw(); state.onModalClose = reload; }
     }
   };
 
@@ -2242,11 +2321,7 @@ async function payDialog(order, refresh, pay) {
             order.payments.map((p) => h('div', { class: 'row nowrap pay-part' },
               h('span', { style: 'flex:1' }, `✓ ${payName(p.method, order.channel_name)} ${money(p.amount_cents)}`,
                 p.tip_cents ? h('span', { class: 'muted' }, ` + tip ${money(p.tip_cents)}`) : ''),
-              h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(async () => {
-                order = await call('remove_payment', { orderId: order.id, paymentId: p.id });
-                mode = 'all'; even.done = 0; draw();
-                reload();
-              }) }, 'undo')))),
+              h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(() => undoPayment(p)) }, 'undo')))),
             h('div', { class: 'row nowrap pay-left-row' }, h('strong', { style: 'flex:1' }, 'Left to pay'), h('span', { class: 'big' }, money(left())))),
           h('div', { class: 'pay-label' }, 'Pay'),
           seg([['all', 'Everything', money(left())], ['even', 'Split evenly'], ['amount', 'Amount'], ['dishes', 'Dishes']], mode, (v) => {
@@ -2306,6 +2381,27 @@ async function payDialog(order, refresh, pay) {
       else if (e.key === 'Escape') closeModal();
     });
   }
+  // Undo a payment: staff need a manager's PIN. The PIN pad takes the dialog's
+  // place for a moment, then the pay dialog comes back.
+  async function undoPayment(p) {
+    const id = order.id;
+    const r = await managerRetry('remove_payment', { orderId: id, paymentId: p.id }, {
+      hint: `Take back ${payName(p.method, order.channel_name)} ${money(p.amount_cents)}? A manager or admin enters their PIN to approve.`,
+      okLabel: 'Take payment back',
+      before: () => { state.onModalClose = null; } });
+    if (!state.session || document.body.classList.contains('locked')) return;
+    if (!r) { if (document.getElementById('modal').hidden && state.orderId === id) { draw(); state.onModalClose = reload; } return; }
+    // Already gone (taken back on another till): show the order as it is now.
+    if (r.notFound) {
+      order = await call('get_order', { id });
+      toast('That payment was already taken back', true);
+    } else if (r.declined) toast('Payment not taken back (no manager PIN)', true);
+    else { order = r.result; if (r.approved) toast('Payment taken back'); }
+    mode = 'all'; even.done = 0;
+    draw();
+    state.onModalClose = reload;
+    reload();
+  }
   draw();
   state.onModalClose = reload;
 }
@@ -2332,7 +2428,8 @@ function customerFields(type, o = {}) {
 /// Saved-customer search + editable details. Typing a postcode lists the
 /// addresses already saved there (door numbers), all offline.
 /// Used for new delivery/collection orders and on the Customers screen.
-function customerEditor({ type = 'delivery', customer = null, search = true, saveToggle = true, onPick = () => {} } = {}) {
+/// `rows`: the fields as labelled setting rows (the Customers page), not a compact form.
+function customerEditor({ type = 'delivery', customer = null, search = true, saveToggle = true, onPick = () => {}, rows = false } = {}) {
   let selected = customer;
   const input = (ph, attrs = {}) => h('input', { placeholder: ph, ...attrs });
   const f = {
@@ -2349,6 +2446,13 @@ function customerEditor({ type = 'delivery', customer = null, search = true, sav
   const suggestions = h('div', { class: 'chips' });
   const save = h('input', { type: 'checkbox', checked: true });
   const find = input('Find saved customer: phone, name or postcode', { style: 'flex:1' });
+  if (rows) {
+    // Labelled rows: the label says what the box is, so the boxes keep short hints and one width.
+    const hints = { name: 'e.g. Somchai', phone: 'e.g. 081 234 5678', line1: 'House number and street', line2: 'Optional', town: '', postcode: 'e.g. SW1A 1AA', notes: 'e.g. gate code' };
+    const labels = { name: 'Name', phone: 'Phone', postcode: 'Postcode', line1: 'Address', line2: 'Flat, building', town: 'Town', notes: 'Notes' };
+    for (const [k, el] of Object.entries(f)) { el.removeAttribute('style'); el.placeholder = hints[k]; el.setAttribute('aria-label', labels[k]); }
+    f.postcode.classList.add('upper');
+  }
 
   const fill = (c, addressOnly = false) => {
     if (!addressOnly) {
@@ -2396,8 +2500,13 @@ function customerEditor({ type = 'delivery', customer = null, search = true, sav
   if (customer) fill(customer);
   const delivery = type === 'delivery';
 
+  const fieldRow = (k, hint) => srow({ id: `c_${k}`, label: { name: 'Name', phone: 'Phone', postcode: 'Postcode', line1: 'Address', line2: 'Flat, building', town: 'Town', notes: 'Notes' }[k], hint, cls: 'text-row', ctl: f[k] });
   return {
-    el: h('div', { class: 'stack' },
+    el: rows ? h('div', { class: 'cust-rows' },
+      ssec(null, [fieldRow('name'), fieldRow('phone')]),
+      delivery && ssec('Address', [fieldRow('postcode'), h('div', { class: 'srow-strip cust-sugg' }, suggestions), fieldRow('line1'), fieldRow('line2'), fieldRow('town')]),
+      ssec(null, [fieldRow('notes', 'Saved with the customer')]))
+    : h('div', { class: 'stack' },
       search && h('div', { class: 'row' }, find), results, picked,
       h('div', { class: 'row' }, f.name, f.phone),
       delivery && h('div', { class: 'row' }, f.postcode, f.line1),
@@ -2443,48 +2552,73 @@ async function startCustomerOrder(type, ce, orderNotes) {
 
 /// Read-only view of a closed order, with void for admins.
 function orderDetail(o, onChange) {
-  const reason = h('input', { placeholder: 'Void reason' });
-  return h('div', { class: 'card stack' },
-    h('h3', {}, `#${o.id} ${TYPE[o.order_type]}${where(o) ? ` · ${where(o)}` : ''} — ${o.status}`),
-    h('div', { class: 'muted' }, `Opened ${fmtTime(o.opened_at)} by ${o.opened_by_name}` +
-      (o.paid_at ? ` · paid ${fmtTime(o.paid_at)}` : '')),
-    (o.customer_phone || o.delivery_address) && h('div', { class: 'muted' }, [o.customer_phone, o.delivery_address].filter(Boolean).join(' · ')),
-    h('table', {}, o.items.map((i) => h('tr', {},
-      h('td', {}, i.name, i.options.length > 0 && h('div', { class: 'muted' }, i.options.map((x) => x.name).join(', ')),
-        i.note && h('div', { class: 'muted' }, i.note)),
-      h('td', { class: 'num' }, `${i.qty} × ${money(i.unit_price_cents)}`),
-      h('td', { class: 'num' }, i.discount_cents ? '-' + money(i.discount_cents) : ''),
-      h('td', { class: 'num' }, money(i.line_total_cents))))),
-    h('div', {}, `Tax ${o.tax_incl ? 'included ' : ''}${money(o.tax_cents)} · `, h('strong', {}, `Total ${money(o.total_cents)}`),
-      o.tip_cents ? ` · Tip ${money(o.tip_cents)}` : ''),
-    o.payments?.length > 0 && h('div', { class: 'muted' }, o.payments.map((p) =>
-      `${payName(p.method, o.channel_name)} ${money(p.amount_cents)}` + (p.tip_cents ? ` + tip ${money(p.tip_cents)}` : '') +
-      (p.change_cents ? ` (tendered ${money(p.tendered_cents)}, change ${money(p.change_cents)})` : '') + ` · ${p.paid_by_name}`).join('  |  ')),
-    o.close_reason && h('div', {}, `Reason: ${o.close_reason}`),
-    o.status !== 'cancelled' && h('div', {}, h('button', { onclick: act(async () => {
-      printResult(await call('print_receipt', { orderId: o.id }), o.status === 'paid' ? 'Receipt printed' : 'Printed');
-    }) }, o.status === 'paid' ? 'Reprint receipt' : 'Print'),
-      o.status === 'paid' && h('button', { onclick: act(async () => printResult(await call('print_staff_copy', { orderId: o.id }), 'Staff copy printed')) }, 'Print staff copy')),
-    o.status === 'paid' && h('div', {}, h('button', { onclick: act(async () => {
-      const p = await call('reprint_kitchen', { orderId: o.id });
-      if (p.error) toast(`Did not print: ${p.error}`, true);
-      else toast(p.attempted ? 'Kitchen ticket reprinted' : 'No kitchen printer is set up', !p.attempted);
-    }) }, 'Reprint kitchen ticket')),
-    isManager() && o.status === 'paid' && h('div', { class: 'row' }, reason,
-      h('button', { class: 'danger', onclick: act(async () => {
-        await call('void_order', { orderId: o.id, reason: reason.value });
+  const paid = o.status === 'paid';
+  const printBtn = (label, fn) => h('button', { onclick: act(fn) }, icon('printer', 18), label);
+  // Void (a refund) and Delete each ask in a sheet, with the reason.
+  const voidSheet = () => {
+    const reason = h('input', { placeholder: 'e.g. wrong dish, card refunded', 'aria-label': 'Reason', maxlength: 120 });
+    sheet({ title: `Void #${o.id}?`, danger: true, saveLabel: 'Void / refund',
+      body: [ssec(null, [srow({ label: 'Reason', cls: 'text-row', ctl: reason })], `${money(o.total_cents)} comes off the day's sales.`)],
+      onSave: async () => {
+        await call('void_order', { orderId: o.id, reason: reason.value }, { quiet: true });
         toast('Order voided');
         onChange();
-      }) }, 'Void / refund')),
-    // A mistake to be done again: remove the order from history and reports.
-    isAdmin() && h('div', { class: 'row delete-order' },
-      h('span', { class: 'muted grow' }, 'Entered by mistake? Delete removes this order from history and reports for good' +
-        (o.status === 'paid' ? ' (stock is put back). To refund a real sale use Void instead.' : '.')),
-      confirmBtn('Delete order', `Tap again to delete #${o.id}`, async () => {
-        await call('delete_order', { orderId: o.id, reason: reason.value || null });
+      } });
+  };
+  const deleteSheet = () => {
+    const reason = h('input', { placeholder: 'Optional', 'aria-label': 'Reason', maxlength: 120 });
+    sheet({ title: `Delete #${o.id}?`, danger: true, saveLabel: 'Delete for good',
+      body: [h('div', { class: 'warn-box' }, `Removes it from history and reports.${paid ? ' Stock is put back. To refund a real sale, use Void.' : ''}`),
+        ssec(null, [srow({ label: 'Reason', cls: 'text-row', ctl: reason })])],
+      onSave: async () => {
+        await call('delete_order', { orderId: o.id, reason: reason.value || null }, { quiet: true });
         toast(`Order #${o.id} deleted`);
         onChange('deleted');
-      })));
+      } });
+  };
+  const opened = `${friendlyTime(o.opened_at)} · ${o.opened_by_name}`;
+  return h('div', { class: 'rcpt' },
+    h('div', { class: 'rcpt-head' },
+      h('div', { class: 'rcpt-title' }, h('h3', {}, `#${o.id}`), typeChip(o.order_type), statusPill(o.status)),
+      isAdmin() && moreMenu(`#${o.id}`, () => [h('button', { class: 'danger', onclick: deleteSheet }, 'Delete order…')])),
+    h('div', { class: 'rcpt-meta' },
+      where(o) && h('div', { class: 'rcpt-where' }, where(o)),
+      h('div', {}, `Opened ${opened}${o.paid_at ? ` · paid ${friendlyTime(o.paid_at).replace(/^today /, '')}` : ''}`),
+      // where() names the customer on all but dine-in orders.
+      (o.customer_phone || o.delivery_address || (o.order_type === 'dine_in' && o.customer_name)) && h('div', {},
+        [o.order_type === 'dine_in' && o.customer_name, o.customer_phone, o.delivery_address].filter(Boolean).join(' · '))),
+    h('div', { class: 'rcpt-lines' }, o.items.map((i) => h('div', { class: 'rline' },
+      h('span', { class: 'rq' }, `${i.qty}×`),
+      h('span', { class: 'rn' }, i.name,
+        i.options.length > 0 && h('small', {}, i.options.map((x) => x.name).join(', ')),
+        i.note && h('small', {}, i.note),
+        (i.qty > 1 || i.discount_cents > 0) && h('small', {}, [i.qty > 1 && `${money(i.unit_price_cents)} each`, i.discount_cents > 0 && `−${money(i.discount_cents)}`].filter(Boolean).join(' · '))),
+      // Before its discount, as on the printed receipt (the discount is under it and in the sum).
+      h('span', { class: 'rt' }, money(i.unit_price_cents * i.qty)))),
+    !o.items.length && h('div', { class: 'muted rline-none' }, 'No dishes')),
+    // As on the printed receipt: subtotal, discount, tax, service charge, total.
+    h('div', { class: 'rcpt-sum' },
+      o.discount_cents > 0 && h('div', {}, h('span', {}, 'Subtotal'), h('span', {}, money(o.subtotal_cents))),
+      o.discount_cents > 0 && h('div', {}, h('span', {}, 'Discount'), h('span', {}, '−' + money(o.discount_cents))),
+      h('div', {}, h('span', {}, o.tax_incl ? 'Tax included' : 'Tax'), h('span', {}, money(o.tax_cents))),
+      o.service_cents > 0 && h('div', {}, h('span', {}, `${state.service?.label || 'Service charge'} ${pct(o.service_bp)}%`), h('span', {}, money(o.service_cents))),
+      h('div', { class: 'grand' }, h('span', {}, 'Total'), h('span', {}, money(o.total_cents))),
+      // On top of the total, as on the receipt (with the payment).
+      o.tip_cents > 0 && h('div', {}, h('span', {}, 'Tip'), h('span', {}, money(o.tip_cents)))),
+    o.payments?.length > 0 && h('div', { class: 'rcpt-pays' }, o.payments.map((p) => h('div', {},
+      h('span', {}, payName(p.method, o.channel_name), h('small', {}, [p.paid_by_name, p.tip_cents && `tip ${money(p.tip_cents)}`,
+        p.change_cents && `paid ${money(p.tendered_cents)}, change ${money(p.change_cents)}`].filter(Boolean).join(' · '))),
+      h('span', {}, money(p.amount_cents))))),
+    o.close_reason && h('div', { class: 'rcpt-reason' }, `Reason: ${o.close_reason}`),
+    o.status !== 'cancelled' && h('div', { class: 'rcpt-foot' },
+      printBtn(paid ? 'Reprint receipt' : 'Print', async () => printResult(await call('print_receipt', { orderId: o.id }), paid ? 'Receipt printed' : 'Printed')),
+      paid && printBtn('Staff copy', async () => printResult(await call('print_staff_copy', { orderId: o.id }), 'Staff copy printed')),
+      paid && printBtn('Kitchen ticket', async () => {
+        const p = await call('reprint_kitchen', { orderId: o.id });
+        if (p.error) toast(`Did not print: ${p.error}`, true);
+        else toast(p.attempted ? 'Kitchen ticket reprinted' : 'No kitchen printer is set up', !p.attempted);
+      }),
+      isManager() && paid && h('button', { class: 'danger-outline', onclick: voidSheet }, 'Void / refund')));
 }
 
 // ---------- open orders board + new takeaway / collection / delivery ----------
@@ -2560,27 +2694,45 @@ async function renderOrders() {
 // ---------- history ----------
 
 async function renderHistory() {
-  const date = h('input', { type: 'date', value: today() });
-  const list = h('div');
-  const span = h('div', { class: 'muted small history-span' });
-  const detail = h('div', { 'data-hint': 'Tap an order to see it' });
   // Quick dates follow the business day (header), which runs from the last
   // day close: "Today" is the open business day, so orders after midnight
   // before the day is closed are still today. "Yesterday" is the business
-  // day closed last, "Last 7 days" the business days dated in the last week.
-  // The Day picker shows calendar days (midnight to midnight).
+  // day closed last, "7 days" the business days dated in the last week.
+  // A picked day is a calendar day (midnight to midnight).
   let mode = 'today'; // today | yesterday | week | day
   let day = null;
+  let picked = today();
   const OPEN_END = 4102444800; // 2100: "up to now", whatever this device's clock says
   const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d; };
-  const quick = h('div', { class: 'seg quick-dates' });
-  const drawQuick = () => setKids(quick, [['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Last 7 days']].map(([k, label]) => h('button', {
-    class: mode === k ? 'on' : '',
-    onclick: () => { mode = k; load(); },
-  }, label)));
+  const list = h('div', { class: 'olist', role: 'list', 'aria-label': 'Orders' });
+  const span = h('div', { class: 'md-span' });
+  const more = h('div', { class: 'srow-strip', hidden: true });
+  const find = h('input', { type: 'search', placeholder: 'Order # or table', 'aria-label': 'Find an order', enterkeyhint: 'search' });
+  const detail = h('div', { class: 'md-body' });
+  const empty = () => setKids(detail, h('div', { class: 'sgroup md-empty' }, emptyState({ icon: 'history', title: 'Tap an order to see it' })));
+  let shown = [];
+  let openId = null;
+  const dayBtn = h('button', { class: 'daybtn', 'aria-label': 'Pick a day', onclick: () => pickDay() });
+  const seg = sseg([['today', 'Today'], ['yesterday', 'Yesterday'], ['week', '7 days']], mode, (v) => { mode = v; load(); }, 'Dates');
+  const drawDayBtn = () => {
+    dayBtn.classList.toggle('on', mode === 'day');
+    setKids(dayBtn, icon('calendar', 20), mode === 'day' && h('span', {}, dayLabel(picked)));
+    if (mode !== 'day') seg.set(mode); else seg.set(null);
+  };
+  // Pick a day: a small sheet with the date (a calendar day, midnight to midnight).
+  function pickDay() {
+    const date = h('input', { type: 'date', value: picked, max: today(), 'aria-label': 'Day' });
+    const s = sheet({ title: 'Show one day', saveLabel: 'Show', body: ssec(null, [srow({ label: 'Day', ctl: date, cls: 'text-row' })]), onSave: () => {
+      if (!date.value) return 'Pick a day';
+      picked = date.value;
+      mode = 'day';
+      load();
+    } });
+    date.addEventListener('keydown', (e) => { if (e.key === 'Enter') s.save.click(); });
+  }
   let loads = 0; // a newer tap wins over a slow earlier load
   const load = act(async () => {
-    drawQuick();
+    drawDayBtn();
     const mine = ++loads;
     if (mode !== 'day') {
       day = await call('business_day');
@@ -2589,21 +2741,17 @@ async function renderHistory() {
     // Not closed for a long time (or only once, long ago): business days
     // would mean weeks, so the quick dates fall back to calendar days.
     const stale = mode !== 'day' && Date.now() / 1000 - day.since > 36 * 3600;
-    if (mode !== 'day') {
-      date.value = stale ? isoDate(daysAgo(mode === 'yesterday' ? 1 : 0))
-        : mode === 'yesterday' ? (day.prev_date ?? isoDate(daysAgo(1))) : day.date;
-    }
-    if (!date.value) return;
+    const date = mode === 'day' ? picked : stale ? isoDate(daysAgo(mode === 'yesterday' ? 1 : 0))
+      : mode === 'yesterday' ? (day.prev_date ?? isoDate(daysAgo(1))) : day.date;
     const [from, to] = stale
-      ? (mode === 'week' ? [dayRange(isoDate(daysAgo(6)))[0], OPEN_END] : mode === 'today' ? [dayRange(date.value)[0], OPEN_END] : dayRange(date.value))
+      ? (mode === 'week' ? [dayRange(isoDate(daysAgo(6)))[0], OPEN_END] : mode === 'today' ? [dayRange(date)[0], OPEN_END] : dayRange(date))
       : { today: () => [day.since, OPEN_END], yesterday: () => [day.prev_since, day.since],
-        week: () => [day.week_since, OPEN_END], day: () => dayRange(date.value) }[mode]();
-    const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    span.textContent = stale ? `The day has not been closed since ${friendlyTime(day.since)}: showing calendar days (close the day in Reports)` : {
-      today: () => `Business day ${dayLabel(day.date)}: since ${friendlyTime(day.since)}${day.prev_date ? ' (the last day close)' : ''}`,
-      yesterday: () => `Previous business day${day.prev_date ? ` ${dayLabel(day.prev_date)}` : ''}: ${friendlyTime(day.prev_since)} to ${friendlyTime(day.since)}`,
-      week: () => `Last 7 business days: since ${friendlyTime(day.week_since)}`,
-      day: () => `Calendar day ${dayLabel(date.value)}, midnight to midnight`,
+        week: () => [day.week_since, OPEN_END], day: () => dayRange(date) }[mode]();
+    span.textContent = stale ? `Day not closed since ${friendlyTime(day.since)}: calendar days` : {
+      today: () => `${dayLabel(day.date)} · since ${friendlyTime(day.since)}`,
+      yesterday: () => `${day.prev_date ? dayLabel(day.prev_date) : 'Previous day'} · ${friendlyTime(day.prev_since)} to ${friendlyTime(day.since)}`,
+      week: () => `Since ${friendlyTime(day.week_since)}`,
+      day: () => `${dayLabel(date)} · midnight to midnight`,
     }[mode]();
     // The server sends at most 500 at a time: a busy week takes several pages.
     const PAGE = 500, MAX = 5000;
@@ -2615,95 +2763,131 @@ async function renderHistory() {
       if (page.length < PAGE) break;
     }
     // Exactly 5000 is not "more than shown": look one past the end.
-    const more = orders.length >= MAX && (await call('list_orders', { from, to, limit: 1, offset: MAX })).length > 0;
+    const over = orders.length >= MAX && (await call('list_orders', { from, to, limit: 1, offset: MAX })).length > 0;
     if (mine !== loads) return;
     shown = orders;
+    more.hidden = !over;
+    more.textContent = over ? `Showing the latest ${MAX}. Pick one day for the rest.` : '';
     // Orders from more than one calendar day: the date goes with the time.
     const end = Math.min(to, Date.now() / 1000);
-    const severalDays = mode !== 'day' && new Date(from * 1000).toDateString() !== new Date(end * 1000).toDateString();
-    const opened = (t) => (severalDays ? friendlyTime(t) : hm(t));
-    setKids(list, h('table', {},
-      h('tr', {}, h('th', {}, '#'), h('th', {}, 'Opened'), h('th', {}, 'Type'), h('th', {}, 'Table / customer'), h('th', {}, 'Status'), h('th', { class: 'num' }, 'Total')),
-      orders.map((o) => h('tr', { class: 'click', onclick: act(() => show(o.id)) },
-        h('td', {}, h('strong', {}, `#${o.id}`)), h('td', {}, opened(o.opened_at)),
-        h('td', {}, typeChip(o.order_type)), h('td', {}, where(o)), h('td', {}, h('span', { class: `status s-${o.status}` }, o.status)),
-        h('td', { class: 'num' }, money(o.total_cents))))));
-    if (more) list.prepend(h('div', { class: 'badge warn' }, `Showing the latest ${MAX} orders: pick one day to see the rest.`));
-    if (!orders.length) setKids(list, emptyState({ icon: 'history', title: 'No orders', text: {
-      today: 'None closed yet this business day.', yesterday: 'None in the previous business day.',
-      week: 'None in the last 7 days.', day: 'None on this day.' }[mode] }));
+    severalDays = mode !== 'day' && new Date(from * 1000).toDateString() !== new Date(end * 1000).toDateString();
+    drawList();
   });
+  let severalDays = false;
+  const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Rows are drawn 200 at a time: a busy week stays quick to open and scroll.
+  const CHUNK = 200;
+  function drawList() {
+    const q = find.value.trim().toLowerCase().replace(/^#/, '');
+    const rows = q ? shown.filter((o) => String(o.id).startsWith(q) || where(o).toLowerCase().includes(q) || (o.customer_phone ?? '').includes(q)) : shown;
+    const draw = (n) => {
+      setKids(list, rows.slice(0, n).map(orderRow),
+        rows.length > n && h('button', { class: 'ghost olist-more', onclick: () => draw(n + CHUNK) }, `Show more (${rows.length - n})`));
+    };
+    draw(CHUNK);
+    if (!rows.length) setKids(list, emptyState({ icon: q ? 'search' : 'history', title: q ? 'Nothing found' : 'No orders', text: q ? 'Try an order number or table.' : {
+      today: 'None yet this business day.', yesterday: 'None in the previous business day.',
+      week: 'None in the last 7 days.', day: 'None on this day.' }[mode] }));
+  }
+  function orderRow(o) {
+    const st = statusPill(o.status);
+    const row = h('div', { class: `orow${o.id === openId ? ' on' : ''}`, role: 'listitem', tabindex: 0, 'data-id': o.id,
+      onclick: (e) => { if (!e.target.closest('.more-btn')) show(o.id); },
+      onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); show(o.id); } } },
+    h('span', { class: 'o-main' },
+      h('span', { class: 'o-l1' }, h('strong', {}, `#${o.id}`), h('span', { class: 'o-time' }, severalDays ? friendlyTime(o.opened_at) : hm(o.opened_at)), typeChip(o.order_type)),
+      h('span', { class: 'o-l2' }, st, h('span', { class: 'o-where' }, where(o)))),
+    h('strong', { class: 'o-total' }, money(o.total_cents)),
+    moreMenu(`#${o.id}`, () => [
+      o.status !== 'cancelled' && h('button', { onclick: act(async () => printResult(await call('print_receipt', { orderId: o.id }), o.status === 'paid' ? 'Receipt printed' : 'Printed')) },
+        o.status === 'paid' ? 'Reprint receipt' : 'Print'),
+      h('button', { onclick: () => show(o.id) }, 'Open'),
+    ]));
+    return row;
+  }
   async function show(id) {
-    setKids(detail, orderDetail(await call('get_order', { id }), async (what) => {
-      if (what === 'deleted') setKids(detail);
-      else await show(id);
+    const o = await call('get_order', { id }).catch(() => null);
+    if (!o) return;
+    // The service charge's name (Settings), for its line on the receipt.
+    if (o.service_cents) state.service = await call('get_service_settings').catch(() => state.service);
+    openId = id;
+    for (const r of list.querySelectorAll('.orow')) r.classList.toggle('on', Number(r.dataset.id) === id);
+    setKids(detail, orderDetail(o, async (what) => {
+      if (what === 'deleted') { openId = null; empty(); md.close(true); } else await show(id);
       await load();
     }));
+    md.show();
   }
-  date.onchange = (e) => { mode = 'day'; load(e); };
-  let shown = [];
+  let ft;
+  find.addEventListener('input', () => { clearTimeout(ft); ft = setTimeout(drawList, 120); });
   const bulk = () => bulkDelete('Delete orders', shown.filter((o) => o.status !== 'open').map((o) => ({
-    id: o.id, label: [`#${o.id} ${TYPE[o.order_type] ?? ''}`, where(o)].filter(Boolean).join(' · '), sub: `${o.status} · ${money(o.total_cents)}`,
-  })), (ids) => deleteMany('order', ids, 'order(s)'), async () => { setKids(detail); await load(); });
-  screen(h('div', { class: 'page split' },
-    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, quick, h('label', { class: 'field' }, 'Day', date), h('span', { class: 'grow' }),
-      isAdmin() && h('button', { onclick: bulk }, 'Select…')), span, h('div', { class: 'panel' }, list)),
-    h('div', { class: 'stack sticky' }, detail)));
+    id: o.id, label: [`#${o.id} ${TYPE[o.order_type] ?? ''}`, where(o)].filter(Boolean).join(' · '), sub: `${STATUS_LABEL[o.status] ?? o.status} · ${money(o.total_cents)}`,
+  })), (ids) => deleteMany('order', ids, 'order(s)'), async () => { openId = null; empty(); await load(); });
+  const md = masterDetail({ cls: 'md-orders', back: 'History',
+    list: [h('div', { class: 'md-tools' }, seg, dayBtn), h('div', { class: 'md-tools' }, h('label', { class: 'searchbox grow' }, icon('search', 20), find)),
+      span, more, h('div', { class: 'md-list' }, list)],
+    detail });
+  empty();
+  screen({ action: isAdmin() && h('button', { onclick: bulk }, 'Select…') }, md);
   await load();
+}
+const STATUS_LABEL = { paid: 'Paid', voided: 'Voided', cancelled: 'Cancelled', open: 'Open' };
+const statusPill = (s) => h('span', { class: `pill ${{ paid: 'ok', voided: 'bad', open: 'warn' }[s] ?? ''}` }, STATUS_LABEL[s] ?? s);
+
+/// Master-detail (History, Staff, Customers): the list beside the detail on wide
+/// screens; on phones the list, then the detail as its own screen (a back step).
+function masterDetail({ cls = '', list, detail, back }) {
+  // A page drawn again: a detail screen left open on the old one is gone.
+  if (backStack.at(-1) === 'item') popBack('item');
+  state.itemBack = null;
+  const el = h('div', { class: `md ${cls}` },
+    h('div', { class: 'md-side' }, list),
+    h('div', { class: 'md-main' }, h('button', { class: 'ghost back md-dback', onclick: () => el.close() }, icon('back', 22), h('span', {}, back)), detail));
+  const hide = () => { el.classList.remove('show-detail'); state.itemBack = null; };
+  el.show = () => {
+    if (!phoneQ.matches || el.classList.contains('show-detail')) return;
+    el.classList.add('show-detail');
+    app.scrollTop = 0;
+    pushBack('item');
+    state.itemBack = () => { if (!leaveOk()) { pushBack('item'); return; } hide(); };
+  };
+  /// `force`: the item is gone (deleted), whatever its form held.
+  el.close = (force = false) => {
+    if (!el.classList.contains('show-detail')) return;
+    if (!force && !leaveOk()) return;
+    if (backStack.at(-1) === 'item') popBack('item');
+    hide();
+  };
+  return el;
 }
 
 // ---------- menu (admin) ----------
 
-/// A pop-up for an editor: put a card in it with setKids(host, card) and
-/// empty it to close. Adds a close button; Escape closes it too.
-function popupHost() {
-  const host = h('div', { class: 'popup' });
-  new MutationObserver(() => {
-    const card = host.firstElementChild;
-    if (card && !card.querySelector(':scope > .modal-x')) {
-      card.prepend(h('button', { class: 'modal-x ghost icon-btn', title: 'Close (Esc)', 'aria-label': 'Close', onclick: () => closePopup(host) }, icon('x')));
-    }
-  }).observe(host, { childList: true });
-  if (!state.popupEscBound) {
-    state.popupEscBound = true;
-    document.addEventListener('keydown', (e) => {
-      const open = [...document.querySelectorAll('.popup')].find((m) => m.firstChild);
-      if (e.key === 'Escape' && open && document.getElementById('modal').hidden) closePopup(open);
-    });
-  }
-  return host;
-}
-
-/// Close a pop-up editor; with unsaved changes its save bar asks first (Discard changes?).
-function closePopup(host) {
-  const bar = host.querySelector('.savebar:not([hidden])');
-  if (state.dirty && bar?.ask) return bar.ask();
-  if (leaveOk()) setKids(host);
-}
 // Esc on a form with a save bar in a page (Customers): ask in the bar, as × does.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || !state.dirty || !document.getElementById('modal').hidden || openPop) return;
   const bar = document.querySelector('.mdetail .savebar.askable:not([hidden])');
-  if (bar && !bar.closest('.popup')) bar.ask(bar.closeTo);
+  if (bar) bar.ask(bar.closeTo);
 });
 
 async function renderMenuAdmin() {
-  const [cats, groups, feed, allVariants, defaultTaxRaw, teams] = await Promise.all([
+  const [cats, groups, feed, allVariants, defaultTaxRaw, teams, taxInclRaw] = await Promise.all([
     call('list_categories', { includeInactive: true }),
     call('list_option_groups', { includeInactive: true }),
     call('menu_options'),
     call('list_variants', { productId: null }),
     call('get_setting', { key: 'default_tax_bp' }),
     call('list_teams'),
+    call('get_setting', { key: 'prices_include_tax' }),
   ]);
   const teamById = Object.fromEntries(teams.map((t) => [t.id, t]));
   const teamSelect = (value, none) => {
-    const sel = h('select', {}, h('option', { value: '' }, none), teams.map((t) => h('option', { value: t.id }, t.name)));
+    const sel = h('select', { 'aria-label': 'Kitchen team' }, h('option', { value: '' }, none), teams.map((t) => h('option', { value: t.id }, t.name)));
     sel.value = value ?? '';
     return sel;
   };
   const defaultTax = Math.max(0, parseInt(defaultTaxRaw ?? '0', 10) || 0);
-  const taxIncluded = (await call('get_setting', { key: 'prices_include_tax' })) !== '0';
+  const taxIncluded = taxInclRaw !== '0';
   const variantsOf = {};
   for (const v of allVariants) (variantsOf[v.product_id] ??= []).push(v);
   const activeGroups = groups.filter((g) => g.active);
@@ -2722,18 +2906,20 @@ async function renderMenuAdmin() {
     return { tax: c?.tax_rate_bp ?? m?.tax_rate_bp ?? defaultTax, team: c?.team_id ?? m?.team_id ?? null,
       starter: flagOf(c, m, 'starter'), prep: flagOf(c, m, 'prep'), drink: flagOf(c, m, 'drink'), dessert: flagOf(c, m, 'dessert') };
   };
-  const form = popupHost();
-  const list = h('div');
-  const search = h('input', { type: 'search', placeholder: 'Search items' });
-  const showInactive = h('input', { type: 'checkbox' });
-  const tabs = h('div', { class: 'cat-tabs' });
+  const list = h('div', { class: 'mlist', role: 'list', 'aria-label': 'Menu items' });
+  const listHead = h('div', { class: 'mlist-head' });
+  const catPane = h('nav', { class: 'mcats', 'aria-label': 'Categories' });
+  const catChips = h('div', { class: 'mchips', role: 'tablist', 'aria-label': 'Categories' });
+  const search = h('input', { type: 'search', placeholder: 'Search items', 'aria-label': 'Search items', enterkeyhint: 'search' });
   state.menuTab ??= 'all';
   if (state.menuTab !== 'all' && state.menuTab !== 'none' && !catById[state.menuTab]?.active) state.menuTab = 'all';
-  const changed = async (keepForm = false) => { state.menu = null; if (!keepForm) setKids(form); await renderMenuAdmin(); };
+  const changed = async () => { state.menu = null; await renderMenuAdmin(); };
   const tabCat = () => (typeof state.menuTab === 'number' ? state.menuTab : null);
+  let all = []; // every item (removed ones too when shown)
 
   // ---- error under a field (instead of a pop-up) ----
   const fieldErr = (input, msg) => {
+    if (!input) return;
     let el = input.parentNode?.querySelector(`.field-error[data-for="${input.dataset.f}"]`);
     if (!msg) { el?.remove(); input.classList.remove('bad'); return; }
     input.classList.add('bad');
@@ -2745,302 +2931,353 @@ async function renderMenuAdmin() {
     }
     el.textContent = msg;
   };
+  const field = (label, ctl, o = {}) => srow({ label, ctl, cls: `text-row ${o.cls ?? ''}`, hint: o.hint, tip: o.tip });
+  const pick = (tab) => { state.menuTab = tab; search.value = ''; drawProducts(); };
 
-  // ---- the list ----
+  // ---- the item list ----
   const loadProducts = act(async () => {
     // Not the hidden entry behind "Other dish" on orders.
-    let products = (await call('list_products', { includeInactive: showInactive.checked, limit: 500, offset: 0 })).filter((x) => x.sku !== '__open_item__');
-    state.menuShown = products;
+    all = (await call('list_products', { includeInactive: !!state.menuRemoved, limit: 500, offset: 0 })).filter((x) => x.sku !== '__open_item__');
+    state.menuShown = all;
+    drawProducts();
+  });
+  const TAGS = [['starter', 'Starter'], ['prep', 'Prep'], ['drink', 'Drink'], ['dessert', 'Dessert']];
+  function itemRow(p, canDrag) {
+    const sub = [p.name_alt, variantsOf[p.id]?.map((v) => v.name).join(' / '), state.menuTab === 'all' || search.value ? catById[p.category_id]?.name : null].filter(Boolean).join(' · ');
+    const row = h('div', { class: `mrow${p.active ? '' : ' removed'}${p.sold_out ? ' sold' : ''}`, role: 'listitem', tabindex: 0, 'data-id': p.id,
+      onclick: (e) => { if (e.target.closest('.lgrip, .more-btn') || row.dataset.dragged) return; editProduct(p); },
+      onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); editProduct(p); } } },
+    canDrag ? h('span', { class: 'lgrip', role: 'button', tabindex: 0, title: 'Drag to change the order', 'aria-label': `Drag ${p.name}` }, icon('grip', 20)) : h('span', { class: 'm-dot', style: `background:${catById[p.category_id]?.color || 'var(--line-2)'}` }),
+    h('span', { class: 'm-text' },
+      h('strong', {}, p.name),
+      h('span', { class: 'm-sub' }, sub && h('small', { lang: 'th' }, sub),
+      h('span', { class: 'm-tags' },
+        p.sold_out && h('span', { class: 'ftag sold' }, 'Sold out'),
+        !p.active && h('span', { class: 'ftag' }, 'Removed'),
+        p.is_set && h('span', { class: 'ftag set' }, 'Set'),
+        p.set_only && h('span', { class: 'ftag' }, 'Set only'),
+        TAGS.filter(([k]) => p[k]).map(([k, l]) => h('span', { class: `ftag ${k}` }, l)),
+        teams.length > 0 && teamById[p.team_id] && h('span', { class: 'ftag team' }, teamById[p.team_id].name)))),
+    h('span', { class: 'm-price' }, h('strong', {}, itemPrice(p, variantsOf[p.id])), p.track_stock && h('small', {}, `${p.stock_qty} left`)),
+    moreMenu(p.name, () => [
+      h('button', { onclick: act(async () => {
+        await call('set_sold_out', { id: p.id, soldOut: !p.sold_out });
+        p.sold_out = !p.sold_out;
+        state.menu = null;
+        toast(p.sold_out ? `${p.name}: sold out today` : `${p.name}: back on sale`);
+        drawProducts();
+      }) }, p.sold_out ? 'Back on sale' : 'Sold out today'),
+      h('button', { onclick: () => editProduct(p) }, 'Edit'),
+      !p.is_set && h('button', { onclick: act(() => duplicate(p)) }, 'Duplicate'),
+    ]));
+    return row;
+  }
+  function drawProducts() {
     const q = search.value.trim().toLowerCase();
+    let products = all;
     if (q) products = products.filter((p) => matches(p, q));
     else if (state.menuTab === 'none') products = products.filter((p) => p.category_id == null);
     else if (tabCat()) products = products.filter((p) => p.category_id === tabCat());
     // Dragging sets the order inside one category, so it needs a category tab.
     const canDrag = !q && tabCat() != null;
-    const table = h('table', { class: 'menu-list' },
-      h('tr', {}, canDrag && h('th', {}), h('th', {}, 'Item'), h('th', {}, 'Category'), teams.length > 0 && h('th', { title: 'The kitchen team whose ticket this item prints on' }, 'Team'), h('th', { title: 'Starters go to the kitchen first on dine-in orders' }, 'Starter'),
-        h('th', { title: 'Prepare ahead: a PREPARE NOW ticket prints while the mains wait' }, 'Prep'),
-        h('th', { title: 'Drink: goes straight away, on its own DRINKS ticket' }, 'Drink'),
-        h('th', { title: 'Dessert: printed on its own DESSERTS ticket' }, 'Dessert'),
-        h('th', { class: 'num' }, 'Price'), h('th', { class: 'num' }, 'Tax %'), h('th', { class: 'num' }, 'Stock')),
-      products.map((p) => h('tr', { class: 'click', 'data-id': p.id, style: p.active ? '' : 'opacity:.5',
-        onclick: (e) => { if (!e.currentTarget.dataset.dragged) editProduct(p); } },
-        canDrag && h('td', { class: 'grip', title: 'Drag to reorder', onclick: (e) => e.stopPropagation() }, '⠿'),
-        h('td', {}, p.name, p.is_set && h('span', { class: 'tag set' }, ' SET'), p.set_only && h('span', { class: 'badge', title: 'Only sold inside set menus' }, 'set only'),
-          p.name_alt && h('div', { class: 'alt', lang: 'th' }, p.name_alt),
-          variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
-        h('td', {}, catById[p.category_id]?.name ?? '—'),
-        teams.length > 0 && h('td', {}, teamById[p.team_id]?.name ?? '—'),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
-          type: 'checkbox', checked: p.starter, title: 'Starter: sent to the kitchen first',
-          onchange: act(async (e) => {
-            await call('set_starter', { id: p.id, starter: e.target.checked });
-            p.starter = e.target.checked;
-            state.menu = null;
-            toast(`${p.name}: ${p.starter ? 'starter' : 'not a starter'}`);
-          }),
-        }), h('span', {}))),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
-          type: 'checkbox', checked: p.prep, title: 'Prepare ahead: the kitchen gets a PREPARE NOW ticket while the mains wait',
-          onchange: act(async (e) => {
-            await call('set_prep', { id: p.id, prep: e.target.checked });
-            p.prep = e.target.checked;
-            toast(`${p.name}: ${p.prep ? 'prepared ahead' : 'not prepared ahead'}`);
-          }),
-        }), h('span', {}))),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
-          type: 'checkbox', checked: p.drink, title: 'Drink: goes straight away, on its own DRINKS ticket',
-          onchange: act(async (e) => {
-            await call('set_drink', { id: p.id, drink: e.target.checked });
-            p.drink = e.target.checked;
-            toast(`${p.name}: ${p.drink ? 'drink (own ticket)' : 'not a drink'}`);
-          }),
-        }), h('span', {}))),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
-          type: 'checkbox', checked: p.dessert, title: 'Dessert: printed on its own DESSERTS ticket',
-          onchange: act(async (e) => {
-            await call('set_dessert', { id: p.id, dessert: e.target.checked });
-            p.dessert = e.target.checked;
-            toast(`${p.name}: ${p.dessert ? 'dessert (own ticket)' : 'not a dessert'}`);
-          }),
-        }), h('span', {}))),
-        h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
-        h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—'))));
-    setKids(list, table,
-      !products.length && emptyState({ icon: 'menuAdmin', title: q ? 'Nothing found' : 'No items here yet', text: q ? 'Try another name.' : 'Add one with + Menu item, or many with Paste a menu.' }),
-      canDrag && products.length > 1 && h('div', { class: 'muted small pad' }, 'Drag ⠿ to change the order items appear on the order screen.'));
-    if (canDrag) sortable(table, { item: 'tr[data-id]', handle: '.grip', onDrop: act(async (ids) => { await call('reorder_products', { ids }); state.menu = null; toast('Order saved'); }) });
-  });
+    const c = catById[tabCat()];
+    setKids(listHead, h('span', { class: 'mlist-title' }, q ? `"${search.value.trim()}"` : c ? c.name : state.menuTab === 'none' ? 'No category' : 'All items',
+      h('small', {}, `${products.length}`)),
+    c && !q && h('button', { class: 'ghost', onclick: () => editCategory(c) }, 'Edit category'));
+    setKids(list, products.map((p) => itemRow(p, canDrag)),
+      !products.length && emptyState({ icon: q ? 'search' : 'menuAdmin', title: q ? 'Nothing found' : 'No items here yet', text: q ? 'Try another name.' : null,
+        action: !q && h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Item') }));
+    drawCats();
+  }
+  sortable(list, { item: '.mrow', handle: '.lgrip', onDrop: act(async (ids) => { await call('reorder_products', { ids }); state.menu = null; toast('Order saved'); }) });
 
-  // ---- categories (with defaults and drag to reorder) ----
-  function editCategory(c) {
-    const name = h('input', { value: c?.name ?? '', placeholder: 'Category name', 'data-f': 'cname' });
-    const alt = h('input', { value: c?.name_alt ?? '', placeholder: 'Thai name (optional)', lang: 'th', 'data-f': 'calt' });
-    const color = h('input', { type: 'color', value: c?.color ?? '#9a9484' });
-    const active = h('input', { type: 'checkbox', checked: c ? c.active : true });
-    const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `Same as restaurant (${pct(defaultTax)}%)`, inputmode: 'decimal', style: 'width:230px', 'data-f': 'ctax' });
-    // Each default: a tick for a main category; for a sub-category "Same as <main>", On or Off.
-    const flagBox = (key, label, title, guess) => {
-      const box = h('input', { type: 'checkbox', checked: c ? c[key] : guess });
-      const pick = h('select', { 'aria-label': label });
-      const wrap = h('span', { class: 'flag-pick' });
-      const sub = () => (parent.value ? catById[Number(parent.value)] : null);
-      const draw = () => {
-        const m = sub();
-        if (!m) return setKids(wrap, h('label', { class: 'switch', title }, box, h('span', {}), `${label}`));
-        const was = pick.value;
-        setKids(pick, h('option', { value: 'inherit' }, `Same as main: ${m[key] ? 'on' : 'off'}`),
-          h('option', { value: 'on' }, 'On'), h('option', { value: 'off' }, 'Off'));
-        pick.value = was || (c?.[key] ? 'on' : (c?.flags_off ?? 0) & CAT_FLAG_OFF[key] ? 'off' : box.checked ? 'on' : 'inherit');
-        setKids(wrap, h('label', { class: 'field', title }, label, pick));
-      };
-      return { el: wrap, draw,
-        own: () => (sub() ? pick.value === 'on' : box.checked),
-        off: () => (sub() && pick.value === 'off' ? CAT_FLAG_OFF[key] : 0),
-        // What new items here get, the main category's default included.
-        effective: () => { const m = sub(); return m ? pick.value === 'on' || (pick.value === 'inherit' && !!m[key]) : box.checked; } };
+  // ---- categories: the pane (wide) or chips (phones), with counts ----
+  let reorder = !!state.menuReorder;
+  // ↑ / ↓ on a row in reorder mode: one place up or down, saved at once. A main
+  // category moves with its sub-categories past the next main one; a
+  // sub-category moves only among its main category's.
+  const moveCat = (c, dir) => act(async () => {
+    const blocks = cats.filter(isMain).map((m) => ({ id: m.id, subs: cats.filter((x) => x.parent_id === m.id).map((x) => x.id) }));
+    const swap = (list, i) => {
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= list.length) return false;
+      [list[i], list[j]] = [list[j], list[i]];
+      return true;
     };
-    const team = teamSelect(c?.team_id, 'No team');
-    const moveItems = h('input', { type: 'checkbox', checked: true });
+    const subs = isMain(c) ? null : blocks.find((b) => b.id === c.parent_id).subs;
+    if (!(subs ? swap(subs, subs.indexOf(c.id)) : swap(blocks, blocks.findIndex((b) => b.id === c.id)))) return;
+    const ids = blocks.flatMap((b) => [b.id, ...b.subs]);
+    await call('reorder_categories', { ids });
+    state.menu = null;
+    toast('Category order saved');
+    await changed();
+    document.querySelector(`.mcat-list [data-id="${c.id}"]`)?.focus();
+  })();
+  function drawCats() {
+    const count = (id) => all.filter((p) => (id === 'all' ? true : id === 'none' ? p.category_id == null : p.category_id === id)).length;
+    const on = (id) => !search.value.trim() && state.menuTab === id;
+    // Reorder mode: a 44 px grip on each row (and no ⋯); otherwise the row picks the category.
+    const catRow = (c) => h('div', { class: `mcat${on(c.id) && !reorder ? ' on' : ''}${isMain(c) ? '' : ' sub'}${c.active ? '' : ' removed'}`, 'data-id': c.id, role: 'button', tabindex: 0,
+      onclick: (e) => { if (reorder || e.target.closest('.lgrip, .more-btn') || e.currentTarget.dataset.dragged) return; pick(c.id); },
+      onkeydown: (e) => {
+        if (reorder && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); moveCat(c, e.key === 'ArrowUp' ? -1 : 1); }
+        else if (!reorder && (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); pick(c.id); }
+      } },
+    reorder && h('span', { class: 'lgrip', title: 'Drag to change the order', 'aria-hidden': 'true' }, icon('grip', 20)),
+    h('span', { class: 'm-dot', style: `background:${c.color || 'var(--line-2)'}` }),
+    h('span', { class: 'mcat-name' }, c.name), h('small', {}, count(c.id)),
+    !reorder && moreMenu(c.name, () => [h('button', { onclick: () => editCategory(c) }, 'Edit'),
+      isMain(c) && h('button', { onclick: () => { state.newSubOf = c.id; editCategory(null); } }, '+ Sub-category')]));
+    const plain = (id, label) => h('div', { class: `mcat plain${on(id) ? ' on' : ''}`, role: 'button', tabindex: 0, onclick: () => pick(id),
+      onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(id); } } }, h('span', { class: 'mcat-name' }, label), h('small', {}, count(id)));
+    const catList = h('div', { class: `mcat-list${reorder ? ' reorder' : ''}` }, catTree.map(catRow));
+    sortable(catList, { item: '.mcat', handle: '.lgrip', onDrop: act(async (ids) => {
+      await call('reorder_categories', { ids });
+      state.menu = null;
+      toast('Category order saved');
+      await changed();
+    }) });
+    setKids(catPane,
+      h('div', { class: 'mcats-title' }, h('span', {}, 'Categories'), reorder
+        ? h('button', { class: 'ghost mcats-done', onclick: () => { reorder = state.menuReorder = false; drawCats(); } }, 'Done')
+        : cats.length > 0 && moreMenu('categories', () => [cats.length > 1 && h('button', { onclick: () => { reorder = state.menuReorder = true; drawCats(); } }, 'Change order'),
+          isAdmin() && h('button', { class: 'danger', onclick: () => bulkDelete('Delete categories',
+            cats.map((c) => ({ id: c.id, label: c.name })), (ids) => deleteMany('category', ids, 'categor(ies)'), async () => { state.menuTab = 'all'; await changed(); }) }, 'Delete several…')])),
+      !reorder && plain('all', 'All items'), catList, !reorder && plain('none', 'No category'),
+      h('button', { class: 'ladd', onclick: () => editCategory(null) }, icon('plus', 18), 'Category'),
+      h('div', { class: 'mcats-title opts' }, h('span', {}, 'Options'), isAdmin() && groups.length > 0 && moreMenu('option groups', () => [h('button', { class: 'danger', onclick: () => bulkDelete('Delete option groups',
+        groups.map((g) => ({ id: g.id, label: g.name, sub: groupRule(g) })), (ids) => deleteMany('option_group', ids, 'group(s)'), () => changed()) }, 'Delete several…')])),
+      groups.map((g) => h('div', { class: `mcat mgrp${g.active ? '' : ' removed'}`, role: 'button', tabindex: 0, onclick: () => editGroup(g),
+        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); editGroup(g); } } },
+      h('span', { class: 'mcat-name' }, g.name, h('small', {}, groupRule(g))), h('span', { class: 'chev' }, icon('chev', 16)))),
+      h('button', { class: 'ladd', onclick: () => editGroup(null) }, icon('plus', 18), 'Option group'));
+    // Phones: the same as a row of chips (and Options › opens the groups).
+    const chip = (id, label, color = null) => h('button', { class: `mchip${on(id) ? ' on' : ''}`, role: 'tab', 'aria-selected': String(on(id)), onclick: () => pick(id) },
+      color && h('span', { class: 'm-dot', style: `background:${color}` }), label);
+    setKids(catChips, chip('all', 'All'), catTree.filter((c) => c.active).map((c) => chip(c.id, c.name, c.color || 'var(--line-2)')), chip('none', 'No category'),
+      h('button', { class: 'mchip', onclick: optionsSheet }, 'Options', icon('chev', 16)),
+      h('button', { class: 'mchip add', 'aria-label': 'New category', onclick: () => editCategory(null) }, icon('plus', 18)));
+    catChips.querySelector('.mchip.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  // Phones: the option groups in a sheet.
+  function optionsSheet() {
+    const s = sheet({ title: 'Options', body: [ssec(null, [
+      ...groups.map((g) => navRow({ label: g.name, hint: groupRule(g), value: g.active ? null : 'Off', onOpen: () => { s.close(); setTimeout(() => editGroup(g)); } })),
+      h('button', { class: 'ladd', onclick: () => { s.close(); setTimeout(() => editGroup(null)); } }, icon('plus', 18), 'Option group')])] });
+  }
+
+  // ---- a category, in a sheet ----
+  function editCategory(c) {
+    const name = h('input', { value: c?.name ?? '', placeholder: 'e.g. Curries', 'data-f': 'cname', maxlength: 40, 'aria-label': 'Name' });
+    const alt = h('input', { value: c?.name_alt ?? '', placeholder: 'Optional', lang: 'th', 'data-f': 'calt', 'aria-label': 'Thai name' });
+    const color = h('input', { type: 'color', value: c?.color ?? '#9a9484', 'aria-label': 'Colour', class: 'swatch' });
+    const tax = h('input', { value: c?.tax_rate_bp != null ? pct(c.tax_rate_bp) : '', placeholder: `${pct(defaultTax)} (restaurant)`, inputmode: 'decimal', 'data-f': 'ctax', class: 'short-in', 'aria-label': 'Tax %' });
     // Under a main category (a sub-category), or a main category itself.
     const hasSubs = !!c && cats.some((x) => x.parent_id === c.id);
-    const parent = h('select', { disabled: hasSubs, title: hasSubs ? 'It has sub-categories, so it stays a main category' : '' },
-      h('option', { value: '' }, '— None: a main category —'),
+    const parent = h('select', { disabled: hasSubs, 'aria-label': 'Main category' },
+      h('option', { value: '' }, 'None (main)'),
       cats.filter((x) => isMain(x) && x.active && x.id !== c?.id).map((x) => h('option', { value: x.id }, x.name)));
     parent.value = c?.parent_id ?? (state.newSubOf ?? '');
     state.newSubOf = null;
-    const starter = flagBox('starter', 'Items here are starters', '', /^starter/i.test(c?.name ?? ''));
-    const prep = flagBox('prep', 'Items here are prepared ahead', '', false);
-    const drink = flagBox('drink', 'Drinks (own ticket)', 'Sent straight away and printed on their own DRINKS ticket', /drink|beverage|เครื่องดื่ม/i.test(c?.name ?? ''));
-    const dessert = flagBox('dessert', 'Desserts (own ticket)', 'Printed on their own DESSERTS ticket', /dessert|sweet|ของหวาน/i.test(c?.name ?? ''));
-    const flags = [starter, prep, drink, dessert];
-    const flagsHint = h('div', { class: 'muted small' });
-    const drawFlags = () => {
-      flags.forEach((f) => f.draw());
-      const m = parent.value ? catById[Number(parent.value)] : null;
-      flagsHint.textContent = m ? `"Same as main" follows ${m.name} for new dishes. On or Off here always wins.` : '';
+    // Each default: a switch for a main category; for a sub-category "Same as main", On or Off.
+    const flagBox = (key, label, guess) => {
+      const sw = switchRow({ label, value: c ? c[key] : guess, onChange: () => {} });
+      const sel = h('select', { 'aria-label': label });
+      const selRow = srow({ label, ctl: sel, cls: 'text-row' });
+      const wrap = h('div', { class: 'flag-wrap' });
+      const sub = () => (parent.value ? catById[Number(parent.value)] : null);
+      const draw = () => {
+        const m = sub();
+        if (!m) return setKids(wrap, sw);
+        const was = sel.value;
+        setKids(sel, h('option', { value: 'inherit' }, `Same as main (${m[key] ? 'on' : 'off'})`), h('option', { value: 'on' }, 'On'), h('option', { value: 'off' }, 'Off'));
+        sel.value = was || (c?.[key] ? 'on' : (c?.flags_off ?? 0) & CAT_FLAG_OFF[key] ? 'off' : sw.input.checked ? 'on' : 'inherit');
+        setKids(wrap, selRow);
+      };
+      return { el: wrap, draw,
+        own: () => (sub() ? sel.value === 'on' : sw.input.checked),
+        off: () => (sub() && sel.value === 'off' ? CAT_FLAG_OFF[key] : 0),
+        // What new items here get, the main category's default included.
+        effective: () => { const m = sub(); return m ? sel.value === 'on' || (sel.value === 'inherit' && !!m[key]) : sw.input.checked; } };
     };
+    const starter = flagBox('starter', 'Starters', /^starter/i.test(c?.name ?? ''));
+    const prep = flagBox('prep', 'Prepared ahead', false);
+    const drink = flagBox('drink', 'Drinks', /drink|beverage|เครื่องดื่ม/i.test(c?.name ?? ''));
+    const dessert = flagBox('dessert', 'Desserts', /dessert|sweet|ของหวาน/i.test(c?.name ?? ''));
+    const flags = [starter, prep, drink, dessert];
+    const drawFlags = () => flags.forEach((f) => f.draw());
     parent.addEventListener('change', drawFlags);
     drawFlags();
+    const team = teamSelect(c?.team_id, 'No team');
+    const moveItems = switchRow({ label: 'Move its items too', value: true, onChange: () => {} });
+    moveItems.hidden = !team.value;
+    team.addEventListener('change', () => { moveItems.hidden = !team.value; });
+    const active = switchRow({ label: 'On the menu', value: c ? c.active : true, onChange: () => {} });
     // Drinks and desserts: the items already here follow what the category now gives them.
     const wasDrink = c ? flagOf(c, catById[c.parent_id], 'drink') : false;
     const wasDessert = c ? flagOf(c, catById[c.parent_id], 'dessert') : false;
-    const save = act(async () => {
+    const save = async () => {
       fieldErr(name); fieldErr(tax);
-      if (!name.value.trim()) return fieldErr(name, 'Type a name');
+      if (!name.value.trim()) { fieldErr(name, 'Type a name'); return 'Type a name'; }
       let taxBp = null;
       if (tax.value.trim()) {
         const v = Number(tax.value.replace(',', '.').replace('%', ''));
-        if (!Number.isFinite(v) || v < 0 || v > 100) return fieldErr(tax, 'Enter a tax rate from 0 to 100');
+        if (!Number.isFinite(v) || v < 0 || v > 100) { fieldErr(tax, 'From 0 to 100'); return 'Tax: from 0 to 100'; }
         taxBp = Math.round(v * 100);
       }
       const args = { name: name.value, color: color.value };
       const saved = c
-        ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.checked })
-        : await call('create_category', { ...args, sortOrder: cats.length + 1 });
-      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.own(), prep: prep.own(), nameAlt: alt.value.trim() || null });
+        ? await call('update_category', { id: c.id, ...args, sortOrder: c.sort_order, active: active.input.checked }, { quiet: true })
+        : await call('create_category', { ...args, sortOrder: cats.length + 1 }, { quiet: true });
+      await call('set_category_defaults', { id: saved.id, taxRateBp: taxBp, starter: starter.own(), prep: prep.own(), nameAlt: alt.value.trim() || null }, { quiet: true });
       // Drinks and desserts: the items already here follow the category (its main category's included),
       // then the category keeps its own setting.
       for (const [f, was, cmd, key] of [[drink, wasDrink, 'set_category_drink', 'drink'], [dessert, wasDessert, 'set_category_dessert', 'dessert']]) {
-        if (f.effective() !== was) await call(cmd, { id: saved.id, [key]: f.effective(), moveItems: true });
-        if (f.own() !== f.effective() || (f.effective() === was && f.own() !== !!c?.[key])) await call(cmd, { id: saved.id, [key]: f.own(), moveItems: false });
+        if (f.effective() !== was) await call(cmd, { id: saved.id, [key]: f.effective(), moveItems: true }, { quiet: true });
+        if (f.own() !== f.effective() || (f.effective() === was && f.own() !== !!c?.[key])) await call(cmd, { id: saved.id, [key]: f.own(), moveItems: false }, { quiet: true });
       }
       const parentId = parent.value ? Number(parent.value) : null;
-      if (parentId !== (c?.parent_id ?? null)) await call('set_category_parent', { id: saved.id, parentId });
+      if (parentId !== (c?.parent_id ?? null)) await call('set_category_parent', { id: saved.id, parentId }, { quiet: true });
       const off = flags.reduce((n, f) => n | f.off(), 0);
-      if (off !== (c?.flags_off ?? 0)) await call('set_category_flags_off', { id: saved.id, flagsOff: off });
+      if (off !== (c?.flags_off ?? 0)) await call('set_category_flags_off', { id: saved.id, flagsOff: off }, { quiet: true });
       const teamId = team.value ? Number(team.value) : null;
-      if (teamId !== (c?.team_id ?? null) || (teamId != null && moveItems.checked)) {
-        await call('set_category_team', { id: saved.id, teamId, moveItems: moveItems.checked });
+      if (teamId !== (c?.team_id ?? null) || (teamId != null && moveItems.input.checked)) {
+        await call('set_category_team', { id: saved.id, teamId, moveItems: moveItems.input.checked }, { quiet: true });
       }
       toast('Saved');
       if (!c) state.menuTab = saved.id;
+      setTimeout(changed);
+    };
+    const del = c && isAdmin() && confirmBtn('Delete', `Tap again to delete`, async () => {
+      await call('delete_category', { id: c.id });
+      s.close();
+      toast(`${c.name} deleted; its items now have no category`);
+      state.menuTab = 'all';
       await changed();
-    });
-    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
-    setKids(form, h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
-      h('div', { class: 'row' }, name, h('label', { class: 'field' }, 'Colour', color), c && h('label', { class: 'switch' }, active, h('span', {}), 'Active')),
-      h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, alt, h('div', { class: 'muted small' }, 'Printed next to the heading on kitchen tickets')),
-      h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax), flags.map((f) => f.el)),
-      flagsHint,
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Main category', parent),
-        h('span', { class: 'muted small' }, hasSubs ? 'It has sub-categories, so it stays a main category.'
-          : 'Pick one to make this a sub-category: on the order screen it shows as a button after you tap the main category.'),
-        c && isMain(c) && h('button', { onclick: () => { state.newSubOf = c.id; editCategory(null); } }, '+ Sub-category here')),
-      teams.length > 0 && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Kitchen team', team),
-        h('label', { class: 'switch' }, moveItems, h('span', {}), 'Also move the items already here to this team'),
-        h('span', { class: 'muted small' }, 'Each team gets its own ticket with its name as a big header.')),
-      h('div', { class: 'row' },
-        h('button', { class: 'primary', onclick: save }, 'Save'),
-        h('button', { onclick: () => setKids(form) }, 'Cancel'),
-        h('span', { style: 'flex:1' }),
-        c && isAdmin() && confirmBtn('Delete category', `Tap again to delete "${c.name}"`, async () => {
-          await call('delete_category', { id: c.id });
-          toast(`${c.name} deleted; its items now have no category`);
-          state.menuTab = 'all';
-          await changed();
-        }))));
-    tapFocus(name);
+    }, 'ghost danger');
+    const subBtn = c && isMain(c) && c.active && h('button', { class: 'ghost', onclick: () => { s.close(); state.newSubOf = c.id; setTimeout(() => editCategory(null)); } }, '+ Sub-category');
+    const s = sheet({ title: c ? c.name : 'New category', wide: true, onSave: save, left: (del || subBtn) && h('span', { class: 'sheet-left' }, del, subBtn),
+      body: [ssec(null, [field('Name', name), field('Thai name', alt, { hint: 'On kitchen tickets' }), srow({ label: 'Colour', ctl: color }), c && active]),
+        ssec('Place', [field('Main category', parent, { hint: hasSubs ? 'Has sub-categories' : 'Pick one to make this a sub-category' }),
+          teams.length > 0 && field('Kitchen team', team), teams.length > 0 && moveItems]),
+        ssec('New items here', [field('Tax %', tax), flags.map((f) => f.el)], 'Defaults for items you add. Drinks and desserts also move the items already here.')] });
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (name.value.trim()) s.save.click(); } });
+    if (!c) tapFocus(name);
   }
 
-  // ---- option groups ----
+  // ---- an option group, in a sheet ----
   function editGroup(g) {
-    const name = h('input', { value: g?.name ?? '', placeholder: 'Group name, e.g. Burger size' });
-    const min = h('input', { type: 'number', value: g?.min_select ?? 0, min: 0, max: 20, style: 'width:70px' });
-    const max = h('input', { type: 'number', value: g?.max_select ?? 1, min: 1, max: 20, style: 'width:70px' });
-    const active = h('input', { type: 'checkbox', checked: g ? g.active : true });
+    const name = h('input', { value: g?.name ?? '', placeholder: 'e.g. Size, Extras', maxlength: 40, 'aria-label': 'Name', 'data-f': 'gname' });
+    const min = stepper({ value: g?.min_select ?? 0, min: 0, max: 20, label: 'At least' });
+    const max = stepper({ value: g?.max_select ?? 1, min: 1, max: 20, label: 'At most' });
+    const active = switchRow({ label: 'In use', hint: (v) => (v ? '' : 'Hidden on orders'), value: g ? g.active : true, onChange: () => {} });
     const rows = (g?.options ?? []).filter((o) => o.active).map((o) => ({ id: o.id, name: o.name, alt: o.name_alt ?? '', price: o.price_cents ? signed(o.price_cents) : '' }));
-    const optList = h('div', { class: 'stack' });
-    const drawRows = () => setKids(optList, ...rows.map((r, i) => h('div', { class: 'row' },
-      h('input', { value: r.name, placeholder: 'Option, e.g. Large', style: 'width:160px', oninput: (e) => (r.name = e.target.value) }),
-      h('input', { value: r.alt, placeholder: 'Thai (optional)', lang: 'th', class: 'alt-input', oninput: (e) => (r.alt = e.target.value) }),
-      h('input', { value: r.price, placeholder: '+0.00', style: 'width:90px', inputmode: 'decimal', oninput: (e) => (r.price = e.target.value) }),
-      h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); drawRows(); } }, '×'))));
-    const addRow = () => { rows.push({ id: null, name: '', alt: '', price: '' }); drawRows(); tapFocus(optList.lastChild.querySelector('input')); };
-    const save = act(async () => {
-      const args = { name: name.value, minSelect: parseInt(min.value, 10) || 0, maxSelect: parseInt(max.value, 10) || 1 };
-      const options = rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, name_alt: r.alt.trim() || null, price_cents: parseSignedMoney(r.price) }));
+    if (!rows.length) rows.push({ id: null, name: '', alt: '', price: '' });
+    const opts = listEditor({ rows, cls: 'opts3', addLabel: 'Option', onChange: () => {},
+      make: () => ({ id: null, name: '', alt: '', price: '' }),
+      render: (r) => [
+        h('input', { value: r.name, placeholder: 'e.g. Large', 'aria-label': 'Option', oninput: (e) => (r.name = e.target.value) }),
+        h('input', { value: r.alt, placeholder: 'Thai', lang: 'th', 'aria-label': 'Thai name', oninput: (e) => (r.alt = e.target.value) }),
+        h('input', { value: r.price, placeholder: '+0.00', inputmode: 'decimal', 'aria-label': 'Extra price', class: 'price-in', oninput: (e) => (r.price = e.target.value) })] });
+    const save = async () => {
+      if (!name.value.trim()) { fieldErr(name, 'Type a name'); return 'Type a name'; }
+      if (max.value() < min.value()) return 'At most must be at least as many as At least';
+      let options;
+      try { options = rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, name_alt: r.alt.trim() || null, price_cents: parseSignedMoney(r.price) })); }
+      catch (e) { return `Price: ${e.message ?? e}`; }
+      const args = { name: name.value, minSelect: min.value(), maxSelect: max.value() };
       const saved = g
-        ? await call('update_option_group', { id: g.id, ...args, sortOrder: g.sort_order, active: active.checked })
-        : await call('create_option_group', args);
-      await call('save_group_options', { groupId: saved.id, options });
-      toast('Saved'); await changed();
-    });
-    setKids(form, h('div', { class: 'card stack' },
-      h('h3', {}, g ? `Edit ${g.name}` : 'New option group'),
-      h('div', { class: 'row' }, name, g && h('label', { class: 'switch' }, active, h('span', {}), 'In use')),
-      h('div', { class: 'row' }, 'Customer must choose at least', min, 'and at most', max),
-      h('div', { class: 'muted' }, 'Sizes: at least 1, at most 1. Extras: at least 0, at most e.g. 5. Prices are added to the item (use -1.00 for a cheaper option). ' +
-        'Untick "In use" to hide it for now; Delete removes it from every item (past orders are not affected).'),
-      optList,
-      h('div', {}, h('button', { onclick: addRow }, '+ Option')),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'),
-        h('span', { style: 'flex:1' }),
-        g && isAdmin() && confirmBtn('Delete group', `Tap again to delete "${g.name}"`, async () => {
-          await call('delete_option_group', { id: g.id });
-          toast(`${g.name} deleted`); await changed();
-        }))));
-    drawRows();
-    if (!rows.length) addRow();
-    tapFocus(name);
+        ? await call('update_option_group', { id: g.id, ...args, sortOrder: g.sort_order, active: active.input.checked }, { quiet: true })
+        : await call('create_option_group', args, { quiet: true });
+      await call('save_group_options', { groupId: saved.id, options }, { quiet: true });
+      toast('Saved');
+      setTimeout(changed);
+    };
+    const del = g && isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => {
+      await call('delete_option_group', { id: g.id });
+      s.close();
+      toast(`${g.name} deleted`);
+      await changed();
+    }, 'ghost danger');
+    const s = sheet({ title: g ? g.name : 'New option group', wide: true, onSave: save, left: del,
+      body: [ssec(null, [field('Name', name), srow({ label: 'At least', hint: 'Size: 1. Extras: 0.', ctl: min }), srow({ label: 'At most', ctl: max }), g && active]),
+        ssec('Options', [opts], 'Price is added to the item. Use −1.00 for a cheaper one.')] });
+    if (!g) tapFocus(name);
   }
 
-  // ---- 1, 3, 7, 9, 10, 11: the item editor ----
+  // ---- an item, in a sheet: the main fields, the kitchen flags, then Advanced ----
+  async function duplicate(p) {
+    const copy = await call('duplicate_product', { id: p.id });
+    toast(`Copied as "${copy.name}"`);
+    await renderMenuAdmin();
+    const fresh = (await call('list_products', { includeInactive: true, limit: 500, offset: 0 })).find((x) => x.id === copy.id);
+    state.openEditor?.(fresh ?? copy);
+  }
   function editProduct(p, preset = {}) {
     if (p?.is_set) return editSet(p);
     const startCat = p ? p.category_id : (preset.category_id !== undefined ? preset.category_id : tabCat());
     const d0 = defaultsFor(startCat);
-    const f = {
-      name: h('input', { value: p?.name ?? '', placeholder: 'Item name', 'data-f': 'name' }),
-      alt: h('input', { value: p?.name_alt ?? '', placeholder: 'Thai name (optional), e.g. ผัดไทย', lang: 'th', 'data-f': 'alt' }),
-      cat: h('select', {}, h('option', { value: '' }, 'No category'), catTree.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, catLabel(c)))),
-      price: h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', style: 'width:110px', 'data-f': 'price' }),
-      tax: h('input', { value: pct(p ? p.tax_rate_bp : d0.tax), inputmode: 'decimal', style: 'width:80px', 'data-f': 'tax' }),
-      cost: h('input', { value: p ? money(p.cost_cents) : '0', inputmode: 'decimal', style: 'width:100px', 'data-f': 'cost' }),
-      barcode: h('input', { value: p?.barcode ?? '', placeholder: 'Barcode (optional)' }),
-      sku: h('input', { value: p?.sku ?? '', placeholder: 'Code / PLU (optional)' }),
-      track: h('input', { type: 'checkbox', checked: p ? p.track_stock : false }),
-      stock: h('input', { value: '0', inputmode: 'numeric', style: 'width:80px' }),
-      active: h('input', { type: 'checkbox', checked: p ? p.active : true }),
-      starter: h('input', { type: 'checkbox', checked: p ? p.starter : d0.starter }),
-      prep: h('input', { type: 'checkbox', checked: p ? p.prep : d0.prep }),
-      team: teamSelect(p ? p.team_id : d0.team, 'No team'),
-      drink: h('input', { type: 'checkbox', checked: p ? p.drink : d0.drink }),
-      dessert: h('input', { type: 'checkbox', checked: p ? p.dessert : d0.dessert }),
-      setOnly: h('input', { type: 'checkbox', checked: !!p?.set_only }),
+    const flag = (label, hint, value) => switchRow({ label, hint, value, onChange: () => {} });
+    const rows = {
+      starter: flag('Starter', 'Sent to the kitchen first', p ? p.starter : d0.starter),
+      prep: flag('Prepare ahead', 'Ticket while the mains wait', p ? p.prep : d0.prep),
+      drink: flag('Drink', 'Own DRINKS ticket, sent at once', p ? p.drink : d0.drink),
+      dessert: flag('Dessert', 'Own DESSERTS ticket', p ? p.dessert : d0.dessert),
+      sold: flag('Sold out today', 'Back on sale at day close', !!p?.sold_out),
+      setOnly: flag('Only in set menus', 'No tile of its own', !!p?.set_only),
+      track: flag('Count stock', 'e.g. bottled drinks', p ? p.track_stock : false),
+      active: flag('On the menu', 'Off: removed, kept on past orders', p ? p.active : true),
     };
+    const f = {
+      name: h('input', { value: p?.name ?? '', placeholder: 'e.g. Pad Thai', 'data-f': 'name', maxlength: 60, 'aria-label': 'Name', enterkeyhint: 'next' }),
+      alt: h('input', { value: p?.name_alt ?? '', placeholder: 'e.g. ผัดไทย', lang: 'th', 'data-f': 'alt', 'aria-label': 'Thai name', enterkeyhint: 'next' }),
+      cat: h('select', { 'aria-label': 'Category' }, h('option', { value: '' }, 'No category'), catTree.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, catLabel(c)))),
+      price: h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', class: 'short-in', 'data-f': 'price', 'aria-label': 'Price' }),
+      tax: h('input', { value: pct(p ? p.tax_rate_bp : d0.tax), inputmode: 'decimal', class: 'short-in', 'data-f': 'tax', 'aria-label': 'Tax %' }),
+      cost: h('input', { value: p ? money(p.cost_cents) : '0', inputmode: 'decimal', class: 'short-in', 'data-f': 'cost', 'aria-label': 'Cost' }),
+      barcode: h('input', { value: p?.barcode ?? '', placeholder: 'Optional', 'aria-label': 'Barcode' }),
+      sku: h('input', { value: p?.sku ?? '', placeholder: 'Optional', 'aria-label': 'Code / PLU' }),
+      stock: h('input', { value: '0', inputmode: 'numeric', class: 'short-in', 'aria-label': 'Opening stock' }),
+      team: teamSelect(p ? p.team_id : d0.team, 'No team'),
+    };
+    for (const k of ['starter', 'prep', 'drink', 'dessert', 'setOnly', 'track', 'active', 'sold']) f[k] = rows[k].input;
     f.cat.value = startCat ?? '';
     // A new item follows its category's defaults until the user changes them.
-    let taxTouched = !!p, starterTouched = !!p, prepTouched = !!p, teamTouched = !!p;
-    f.team.addEventListener('change', () => (teamTouched = true));
-    let drinkTouched = !!p;
-    f.drink.addEventListener('change', () => (drinkTouched = true));
-    let dessertTouched = !!p;
-    f.dessert.addEventListener('change', () => (dessertTouched = true));
-    f.tax.addEventListener('input', () => (taxTouched = true));
-    f.starter.addEventListener('change', () => (starterTouched = true));
-    f.prep.addEventListener('change', () => (prepTouched = true));
+    const touched = new Set(p ? ['tax', 'starter', 'prep', 'team', 'drink', 'dessert'] : []);
+    for (const k of ['starter', 'prep', 'team', 'drink', 'dessert']) f[k].addEventListener('change', () => touched.add(k));
+    f.tax.addEventListener('input', () => touched.add('tax'));
     f.cat.addEventListener('change', () => {
       const d = defaultsFor(f.cat.value ? Number(f.cat.value) : null);
-      if (!taxTouched) f.tax.value = pct(d.tax);
-      if (!starterTouched) f.starter.checked = d.starter;
-      if (!prepTouched) f.prep.checked = d.prep;
-      if (!teamTouched) f.team.value = d.team ?? '';
-      if (!drinkTouched) f.drink.checked = d.drink;
-      if (!dessertTouched) f.dessert.checked = d.dessert;
+      if (!touched.has('tax')) f.tax.value = pct(d.tax);
+      for (const k of ['starter', 'prep', 'drink', 'dessert']) if (!touched.has(k)) f[k].checked = d[k];
+      if (!touched.has('team')) f.team.value = d.team ?? '';
       preview();
     });
-    const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
+    // Choices with their own price (a soup with Chicken 6.50 / Beef 7.50).
     const choices = (variantsOf[p?.id] ?? []).map((v) => ({ id: v.id, name: v.name, alt: v.name_alt ?? '', price: money(v.price_cents) }));
-    const choiceList = h('div', { class: 'stack' });
-    const priceHint = h('span', { class: 'muted' });
-    const drawChoices = () => {
-      priceHint.textContent = choices.length ? '(the item price is not used)' : '';
-      setKids(choiceList, ...choices.map((c, i) => h('div', { class: 'row' },
-        h('input', { value: c.name, placeholder: 'e.g. Chicken', style: 'width:150px', oninput: (e) => { c.name = e.target.value; preview(); } }),
-        h('input', { value: c.alt, placeholder: 'Thai, e.g. ไก่', lang: 'th', class: 'alt-input', oninput: (e) => (c.alt = e.target.value) }),
-        h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', 'data-f': `choice${i}`, oninput: (e) => { c.price = e.target.value; preview(); } }),
-        h('button', { class: 'danger', onclick: () => { choices.splice(i, 1); drawChoices(); preview(); } }, '×'))));
-    };
-    const addChoice = () => { choices.push({ id: null, name: '', alt: '', price: '' }); drawChoices(); tapFocus(choiceList.lastChild.querySelector('input')); };
-    drawChoices();
-    const groupBoxes = activeGroups.map((g) => ({ g, box: h('input', { type: 'checkbox', checked: linked.has(g.id) }) }));
-    const groupRow = h('div', { class: 'row' });
-    const drawGroups = () => setKids(groupRow, groupBoxes.map(({ g, box }) => h('label', { class: 'switch' }, box, h('span', {}), `${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))),
-      !groupBoxes.length && h('span', { class: 'muted' }, 'No option groups yet.'));
-    drawGroups();
-
-    // 9: new option group without leaving the item.
+    let choiceSeq = 0;
+    const choiceList = listEditor({ rows: choices, cls: 'opts3', addLabel: 'Choice', onChange: () => preview(),
+      make: () => ({ id: null, name: '', alt: '', price: '' }),
+      render: (c) => {
+        c.key ??= ++choiceSeq;
+        return [h('input', { value: c.name, placeholder: 'e.g. Chicken', 'aria-label': 'Choice', oninput: (e) => { c.name = e.target.value; preview(); } }),
+          h('input', { value: c.alt, placeholder: 'Thai', lang: 'th', 'aria-label': 'Thai name', oninput: (e) => (c.alt = e.target.value) }),
+          h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', class: 'price-in', 'aria-label': 'Price', 'data-f': `choice${c.key}`, oninput: (e) => { c.price = e.target.value; preview(); } })];
+      } });
+    // Option groups this item uses: toggle chips; a new group can be made here.
+    const linked = new Set(feed.links.filter((l) => l.product_id === p?.id).map((l) => l.group_id));
+    let groupIds = activeGroups.filter((g) => linked.has(g.id)).map((g) => g.id);
+    const groupChips = () => toggleChips(activeGroups.map((g) => [g.id, g.name]), groupIds, (sel) => { groupIds = sel; preview(); }, 'Option groups');
+    const groupWrap = h('span', { class: 'grp-wrap' }, activeGroups.length ? groupChips() : h('span', { class: 'muted' }, 'None yet'));
     const newGroup = h('div');
     const openNewGroup = () => {
-      const gname = h('input', { placeholder: 'e.g. Spice level' });
-      const rule = h('select', {}, h('option', { value: '1-1' }, 'Customer picks exactly 1'), h('option', { value: '0-1' }, 'Optional, up to 1'), h('option', { value: '0-5' }, 'Optional, up to 5'));
-      const opts = h('textarea', { rows: 3, placeholder: 'One option per line, with an extra price if any, and Thai after | if you like:\nMild | เผ็ดน้อย\nHot | เผ็ด\nExtra hot | เผ็ดมาก +0.50', style: 'width:100%' });
-      setKids(newGroup, h('div', { class: 'card stack inset' },
-        h('strong', {}, 'New option group'),
-        h('div', { class: 'row' }, gname, rule), opts,
-        h('div', { class: 'row' },
+      const gname = h('input', { placeholder: 'e.g. Spice level', 'aria-label': 'Group name' });
+      const rule = h('select', { 'aria-label': 'Rule' }, h('option', { value: '1-1' }, 'Pick exactly 1'), h('option', { value: '0-1' }, 'Optional, up to 1'), h('option', { value: '0-5' }, 'Optional, up to 5'));
+      const opts = h('textarea', { rows: 3, placeholder: 'One per line, Thai after |, price at the end:\nMild | เผ็ดน้อย\nHot | เผ็ด\nExtra hot +0.50', 'aria-label': 'Options' });
+      setKids(newGroup, h('div', { class: 'newgrp' },
+        h('div', { class: 'newgrp-row' }, gname, rule), opts,
+        h('div', { class: 'newgrp-row' },
+          h('button', { onclick: () => setKids(newGroup) }, 'Cancel'),
           h('button', { class: 'primary', onclick: act(async () => {
             const [mn, mx] = rule.value.split('-').map(Number);
             const options = opts.value.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
@@ -3048,20 +3285,20 @@ async function renderMenuAdmin() {
               const [name, alt = ''] = (m ? m[1] : l).split('|').map((x) => x.trim());
               return { id: null, name, name_alt: alt || null, price_cents: m ? parseSignedMoney(m[2].replace(/\s|[£$€]/g, '')) : 0 };
             });
+            if (!gname.value.trim()) return toast('Type the group name', true);
             if (!options.length) return toast('Add at least one option, one per line', true);
             const g = await call('create_option_group', { name: gname.value, minSelect: mn, maxSelect: mx });
             const saved = await call('save_group_options', { groupId: g.id, options });
-            groupBoxes.push({ g: saved, box: h('input', { type: 'checkbox', checked: true }) });
             activeGroups.push(saved);
-            drawGroups();
+            groups.push(saved);
+            groupIds = [...groupIds, saved.id];
+            setKids(groupWrap, groupChips());
             setKids(newGroup);
-            toast(`${saved.name} created and ticked; Save the item to keep it`);
-          }) }, 'Create group'),
-          h('button', { onclick: () => setKids(newGroup) }, 'Cancel'))));
+            toast(`${saved.name} added and ticked`);
+          }) }, 'Create group'))));
       tapFocus(gname);
     };
-
-    // 10: live preview of the order-screen tile.
+    // Live preview of the order-screen tile.
     const tile = h('div', { class: 'tile preview' });
     const preview = () => {
       const c = catById[Number(f.cat.value)];
@@ -3075,14 +3312,13 @@ async function renderMenuAdmin() {
       tile.style.setProperty('--c', c?.color || '#9a9484');
       setKids(tile, h('span', { class: 'names' }, h('span', { class: 'name' }, f.name.value.trim() || 'Item name'), f.alt.value.trim() && h('span', { class: 'alt', lang: 'th' }, f.alt.value.trim())),
         h('span', { class: 'foot' }, h('span', { class: 'price' }, label), f.starter.checked && h('span', { class: 'tag' }, 'Starter'),
-          (named.length || groupBoxes.some((x) => x.box.checked)) && h('span', { class: 'more' }, '•••')));
+          (named.length > 0 || groupIds.length > 0) && h('span', { class: 'more' }, '•••')));
     };
     for (const el of [f.name, f.alt, f.price]) el.addEventListener('input', preview);
     f.starter.addEventListener('change', preview);
-    groupRow.addEventListener('change', preview);
     preview();
 
-    // 11: check everything, showing problems next to the field.
+    // Check everything, showing problems next to the field.
     const validate = () => {
       let ok = true;
       const err = (el, msg) => { fieldErr(el, msg); if (msg) ok = false; };
@@ -3097,12 +3333,18 @@ async function renderMenuAdmin() {
       let cost = 0;
       try { cost = parseMoney(f.cost.value || '0'); err(f.cost, null); } catch (e) { err(f.cost, e.message); }
       const variants = [];
-      choices.forEach((c, i) => {
-        if (!c.name.trim()) return;
-        const el = choiceList.querySelector(`[data-f="choice${i}"]`);
+      for (const c of choices) {
+        if (!c.name.trim()) continue;
+        const el = choiceList.querySelector(`[data-f="choice${c.key}"]`);
         try { variants.push({ id: c.id, name: c.name, name_alt: c.alt.trim() || null, price_cents: parseMoney(c.price) }); err(el, null); } catch (e) { err(el, e.message); }
-      });
-      if (!ok) { more.open = more.open || !!form.querySelector('details .bad'); return null; }
+      }
+      if (!ok) {
+        // A problem inside Advanced: open it.
+        const adv = s.el.querySelector('.adv-body');
+        if (adv?.hidden && adv.querySelector('.bad')) adv.previousElementSibling?.click();
+        s.el.querySelector('.bad')?.scrollIntoView({ block: 'center' });
+        return null;
+      }
       return {
         product: {
           name: f.name.value, name_alt: f.alt.value.trim() || null, category_id: f.cat.value ? Number(f.cat.value) : null,
@@ -3113,120 +3355,106 @@ async function renderMenuAdmin() {
         variants,
       };
     };
-    const save = (again) => act(async () => {
+    const save = async (again = false) => {
       const v = validate();
-      if (!v) return;
+      if (!v) return 'Check the fields in red';
       const saved = p
-        ? await call('update_product', { id: p.id, product: { ...v.product, active: f.active.checked } })
-        : await call('create_product', { product: { ...v.product, stock_qty: parseInt(f.stock.value || '0', 10) } });
-      const groupIds = groupBoxes.filter((x) => x.box.checked).map((x) => x.g.id);
-      if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds });
-      if (p || v.variants.length) await call('set_variants', { productId: saved.id, variants: v.variants });
-      if (saved.drink !== f.drink.checked) await call('set_drink', { id: saved.id, drink: f.drink.checked });
-      if (saved.dessert !== f.dessert.checked) await call('set_dessert', { id: saved.id, dessert: f.dessert.checked });
-      if (!!saved.set_only !== f.setOnly.checked) await call('set_set_only', { id: saved.id, setOnly: f.setOnly.checked });
+        ? await call('update_product', { id: p.id, product: { ...v.product, active: f.active.checked } }, { quiet: true })
+        : await call('create_product', { product: { ...v.product, stock_qty: parseInt(f.stock.value || '0', 10) || 0 } }, { quiet: true });
+      if (p || groupIds.length) await call('set_product_option_groups', { productId: saved.id, groupIds }, { quiet: true });
+      if (p || v.variants.length) await call('set_variants', { productId: saved.id, variants: v.variants }, { quiet: true });
+      if (saved.drink !== f.drink.checked) await call('set_drink', { id: saved.id, drink: f.drink.checked }, { quiet: true });
+      if (saved.dessert !== f.dessert.checked) await call('set_dessert', { id: saved.id, dessert: f.dessert.checked }, { quiet: true });
+      if (!!saved.set_only !== f.setOnly.checked) await call('set_set_only', { id: saved.id, setOnly: f.setOnly.checked }, { quiet: true });
+      if (!!saved.sold_out !== f.sold.checked) await call('set_sold_out', { id: saved.id, soldOut: f.sold.checked }, { quiet: true });
       state.menu = null;
       if (again) {
-        // 1: keep going in the same category.
+        // Keep going in the same category.
         toast(`${saved.name} saved. Next item:`);
-        await renderMenuAdmin();
-        state.openEditor?.(null, { category_id: v.product.category_id });
+        setTimeout(async () => { await renderMenuAdmin(); state.openEditor?.(null, { category_id: v.product.category_id }); });
       } else {
         toast('Saved');
-        await changed();
+        setTimeout(changed);
       }
-    });
-    for (const el of [f.name, f.alt, f.price]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(!p)(e); });
+    };
+    // The keyboard's Done (Enter) moves on to the price; Enter on the price saves.
+    f.name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (f.name.value.trim()) tapFocus(f.price); } });
+    f.alt.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); tapFocus(f.price); } });
+    f.price.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (f.name.value.trim() && f.price.value.trim()) s.save.click(); } });
 
-    const delta = h('input', { placeholder: '+/- qty', style: 'width:90px', inputmode: 'numeric' });
-    const reason = h('input', { placeholder: 'Reason (delivery, count…)' });
-    // 3: the rarely needed fields wait behind "More options".
-    const more = h('details', { class: 'more-options' },
-      h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, drink, dessert, choices, extras, stock, codes')),
-      h('div', { class: 'stack' },
-        h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', f.tax), h('label', { class: 'field' }, 'Cost', f.cost),
-          h('label', { class: 'switch' }, f.starter, h('span', {}), 'Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)')),
-          h('label', { class: 'switch' }, f.prep, h('span', {}), 'Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)')),
-          h('label', { class: 'switch' }, f.drink, h('span', {}), 'Drink ', h('span', { class: 'muted' }, '(sent straight away, own DRINKS ticket)')),
-          h('label', { class: 'switch' }, f.dessert, h('span', {}), 'Dessert ', h('span', { class: 'muted' }, '(own DESSERTS ticket)')),
-          h('label', { class: 'switch' }, f.setOnly, h('span', {}), 'Only in set menus ', h('span', { class: 'muted' }, '(no tile of its own on the order screen)'))),
-        h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
-          h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering.'),
-          choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
-        h('div', { class: 'stack' }, h('strong', {}, 'Options (sizes, extras…)'), groupRow,
-          h('div', {}, h('button', { onclick: openNewGroup }, '+ New option group')), newGroup),
-        h('div', { class: 'row' }, f.barcode, f.sku),
-        h('div', { class: 'row' }, h('label', { class: 'switch' }, f.track, h('span', {}), 'Count stock (e.g. bottled drinks)'),
-          !p && h('label', { class: 'field' }, 'Opening stock', f.stock), p && h('label', { class: 'switch' }, f.active, h('span', {}), 'On the menu')),
-        p && p.track_stock && h('div', { class: 'row' }, `Stock: ${p.stock_qty}`, delta, reason,
-          h('button', { onclick: act(async () => {
-            await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
-            toast('Stock updated'); await changed();
-          }) }, 'Adjust'))));
-    more.open = !!p && (choices.length > 0 || linked.size > 0 || !!p.sku || !!p.barcode || p.track_stock || !p.active);
-    setKids(form, h('div', { class: 'card stack' },
-      h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, p ? `Edit ${p.name}` : 'New menu item'), tile),
-      h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, f.name), f.cat, teams.length > 0 && h('label', { class: 'field', title: 'The kitchen team whose ticket this prints on' }, 'Team', f.team)),
-      h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, f.alt, h('div', { class: 'muted small' }, 'Printed under the name on kitchen tickets')),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, taxIncluded ? 'Price (tax included)' : 'Price (before tax)', h('span', { class: 'field-col' }, f.price)),
-        taxIncluded && h('span', { class: 'muted small' }, 'What the customer pays; the tax is worked out from it.')),
-      more,
-      h('div', { class: 'row' },
-        !p && h('button', { class: 'primary', onclick: save(true), title: 'Enter' }, 'Save & add another'),
-        h('button', { class: p ? 'primary' : '', onclick: save(false) }, 'Save'),
-        h('button', { onclick: () => setKids(form) }, 'Cancel'),
-        h('span', { style: 'flex:1' }),
-        p && h('button', { onclick: act(async () => {
-          const copy = await call('duplicate_product', { id: p.id });
-          toast(`Copied as "${copy.name}": change the name and price`);
-          await renderMenuAdmin();
-          const fresh = (await call('list_products', { includeInactive: true, limit: 500, offset: 0 })).find((x) => x.id === copy.id);
-          state.openEditor?.(fresh ?? copy);
-        }) }, 'Duplicate'),
-        p && isAdmin() && confirmBtn('Delete item', `Tap again to delete "${p.name}" for good`, async () => {
-          await call('delete_product', { id: p.id });
-          toast(`${p.name} deleted`);
-          await changed();
-        }))));
+    const delta = h('input', { placeholder: '+5 or -2', inputmode: 'numeric', class: 'short-in', 'aria-label': 'Stock change' });
+    const reason = h('input', { placeholder: 'Reason', 'aria-label': 'Reason' });
+    const stockRow = p && p.track_stock && srow({ label: `Stock: ${p.stock_qty}`, cls: 'text-row stock-row', ctl: [delta, reason, h('button', { onclick: act(async () => {
+      await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
+      toast('Stock updated');
+      p.stock_qty += parseInt(delta.value, 10) || 0;
+      stockRow.querySelector('.srow-label span').textContent = `Stock: ${p.stock_qty}`;
+      delta.value = '';
+    }) }, 'Adjust')] });
+    const advRows = [
+      field('Tax %', f.tax), field('Cost', f.cost), rows.setOnly,
+      srow({ label: 'Choices', hint: 'Each with its own price', stacked: true, ctl: choiceList }),
+      srow({ label: 'Option groups', hint: 'Sizes, extras', stacked: true, ctl: h('div', { class: 'grp-edit' }, groupWrap,
+        h('button', { class: 'ghost add-grp', onclick: openNewGroup }, icon('plus', 18), 'New group'), newGroup) }),
+      field('Barcode', f.barcode), field('Code / PLU', f.sku), rows.track,
+      !p && field('Opening stock', f.stock), stockRow, p && rows.active];
+    const left = p && h('span', { class: 'sheet-left' },
+      h('button', { class: 'ghost', onclick: act(async () => { s.close(); await duplicate(p); }) }, 'Duplicate'),
+      isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => {
+        await call('delete_product', { id: p.id });
+        s.close();
+        toast(`${p.name} deleted`);
+        await changed();
+      }, 'ghost danger'));
+    const again = !p && h('button', { class: 'ghost', onclick: async () => {
+      const r = await save(true).catch((e) => String(e?.message ?? e));
+      if (typeof r === 'string') s.show(r, false); else s.close();
+    } }, 'Save & next');
+    const s = sheet({ title: p ? p.name : 'New item', wide: true, onSave: () => save(false), left: left || again,
+      body: [
+        h('div', { class: 'item-top' }, ssec(null, [field('Name', f.name), field('Thai name', f.alt, { hint: 'On kitchen tickets' }),
+          field('Category', f.cat), field(taxIncluded ? 'Price' : 'Price before tax', f.price, { hint: taxIncluded ? 'Tax included' : '' }),
+          teams.length > 0 && field('Kitchen team', f.team)]), tile),
+        ssec('Kitchen', [rows.starter, rows.prep, rows.drink, rows.dessert]),
+        p && ssec('Today', [rows.sold]),
+        ssec(null, advanced('menuitem', advRows)),
+      ] });
     tapFocus(f.name);
     if (!p) f.name.select();
   }
+
   // ---- set menus: price, sections (Starter, Main, Side...) and their dishes ----
   async function editSet(p) {
     // Any dish can go in a set; its choices and options are picked with it on the order.
-    const all = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set);
-    const byId = Object.fromEntries(all.map((x) => [x.id, x]));
+    const allDishes = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set);
+    const pool = allDishes;
+    const byId = Object.fromEntries(allDishes.map((x) => [x.id, x]));
+    const withable = [...allDishes];
     const sections = p
       ? (await call('get_set', { setId: p.id })).map((s) => ({ name: s.name, alt: s.name_alt ?? '', pick: s.pick, starter: s.starter,
         items: s.items.map((c) => c.product_id), with: s.with_items.map((c) => c.product_id) }))
       : [['Starter', true], ['Main', false], ['Side', false]].map(([name, starter]) => ({ name, alt: '', pick: 1, starter, items: [], with: [] }));
-    // Anything plain can be what a dish comes with (rice, noodles...).
-    const withable = (await call('list_products', { includeInactive: false, limit: 500, offset: 0 })).filter((x) => !x.is_set);
-    for (const x of withable) byId[x.id] ??= x;
-    const name = h('input', { value: p?.name ?? '', placeholder: 'Set name, e.g. Dinner set for 1', 'data-f': 'sname' });
-    const alt = h('input', { value: p?.name_alt ?? '', placeholder: 'Thai name (optional)', lang: 'th' });
-    const cat = h('select', {}, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name)));
+    const name = h('input', { value: p?.name ?? '', placeholder: 'e.g. Dinner set for 1', 'data-f': 'sname', 'aria-label': 'Name' });
+    const alt = h('input', { value: p?.name_alt ?? '', placeholder: 'Optional', lang: 'th', 'aria-label': 'Thai name' });
+    const cat = h('select', { 'aria-label': 'Category' }, h('option', { value: '' }, 'No category'), cats.filter((c) => c.active || c.id === p?.category_id).map((c) => h('option', { value: c.id }, c.name)));
     cat.value = p?.category_id ?? (tabCat() ?? '');
-    const price = h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', style: 'width:110px', 'data-f': 'sprice' });
-    const tax = h('input', { value: pct(p ? p.tax_rate_bp : defaultsFor(cat.value ? Number(cat.value) : null).tax), inputmode: 'decimal', style: 'width:80px' });
-    const active = h('input', { type: 'checkbox', checked: p ? p.active : true });
-    const list = h('div', { class: 'stack' });
+    const price = h('input', { value: p ? money(p.price_cents) : '', placeholder: '0.00', inputmode: 'decimal', class: 'short-in', 'data-f': 'sprice', 'aria-label': 'Price' });
+    const tax = h('input', { value: pct(p ? p.tax_rate_bp : defaultsFor(cat.value ? Number(cat.value) : null).tax), inputmode: 'decimal', class: 'short-in', 'aria-label': 'Tax %' });
+    const active = switchRow({ label: 'On the menu', value: p ? p.active : true, onChange: () => {} });
+    const secList = h('div', { class: 'stack' });
     // Searchable dish picker: tap a dish to add it, tap again to take it out.
-    // `rule` keeps to the dishes that suit the section, unless "Show all" is ticked.
-    const dishPicker = (chosen, pool, ui, rule, onChange) => {
-      const q = h('input', { type: 'search', placeholder: 'Search dishes (English or Thai)', value: ui.q ?? '' });
+    const dishPicker = (chosen, from, ui, onChange) => {
+      const q = h('input', { type: 'search', placeholder: 'Search dishes', value: ui.q ?? '', 'aria-label': 'Search dishes' });
       const tabsEl = h('div', { class: 'cat-tabs' });
       const grid = h('div', { class: 'pick-grid' });
-      const showAll = h('input', { type: 'checkbox', checked: !!ui.all });
       const drawList = () => {
         const term = q.value.trim().toLowerCase();
-        const fits = pool.filter((x) => ui.all || !rule || rule(x));
-        const here = [...new Set(fits.map((x) => x.category_id ?? 0))];
+        const here = [...new Set(from.map((x) => x.category_id ?? 0))];
         if (ui.cat != null && !here.includes(ui.cat)) ui.cat = null;
         setKids(tabsEl, h('button', { class: ui.cat == null ? 'on' : '', onclick: () => { ui.cat = null; drawList(); } }, 'All'),
           here.map((c) => h('button', { class: ui.cat === c ? 'on' : '', style: catStyle(catById[c]?.color),
             onclick: () => { ui.cat = c; drawList(); } }, catById[c]?.name ?? 'No category')));
-        const shown = fits.filter((x) => (ui.cat == null || (x.category_id ?? 0) === ui.cat) && (!term || matches(x, term)));
+        const shown = from.filter((x) => (ui.cat == null || (x.category_id ?? 0) === ui.cat) && (!term || matches(x, term)));
         setKids(grid, shown.slice(0, 120).map((x) => h('button', {
           class: chosen.includes(x.id) ? 'on' : '',
           onclick: () => {
@@ -3236,31 +3464,27 @@ async function renderMenuAdmin() {
             drawList();
           },
         }, h('span', {}, x.name), x.name_alt && h('small', { lang: 'th' }, x.name_alt), x.set_only && h('small', {}, 'set only'))),
-        !shown.length && h('span', { class: 'muted' }, term ? 'No dish matches your search.' : 'No dishes here.'));
+        !shown.length && h('span', { class: 'muted' }, term ? 'No dish matches.' : 'No dishes here.'));
       };
       q.addEventListener('input', () => { ui.q = q.value; drawList(); });
-      showAll.onchange = () => { ui.all = showAll.checked; drawList(); };
       drawList();
-      return h('div', { class: 'stack dish-picker' },
-        h('div', { class: 'row' }, h('div', { class: 'searchbox grow' }, icon('search', 18), q),
-          rule && h('label', { class: 'switch', title: 'Also list dishes that do not normally belong in this section' }, showAll, h('span', {}), 'Show all dishes')),
-        tabsEl, grid);
+      return h('div', { class: 'stack dish-picker' }, h('div', { class: 'searchbox' }, icon('search', 18), q), tabsEl, grid);
     };
-    const draw = () => setKids(list, sections.map((sec, i) => {
+    const draw = () => setKids(secList, sections.map((sec, i) => {
       sec.ui ??= { open: !sec.items.length };
       sec.withUi ??= { open: false };
-      const pick = h('input', { type: 'number', min: 1, max: 10, value: sec.pick, style: 'width:64px', oninput: (e) => (sec.pick = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1))) });
+      const pick = stepper({ value: sec.pick, min: 1, max: 10, label: 'Choose', onChange: (v) => (sec.pick = v) });
       const chips = h('div', { class: 'opts' });
       const drawChips = () => setKids(chips, sec.items.length ? sec.items.map((id) => h('button', { class: 'chip-btn', title: 'Remove from this section',
         onclick: () => { sec.items.splice(sec.items.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×'))
-        : h('span', { class: 'muted' }, 'No dishes yet: tap "Add dishes".'));
+        : h('span', { class: 'muted' }, 'No dishes yet'));
       drawChips();
       const withChips = h('div', { class: 'opts' });
       const drawWith = () => setKids(withChips, sec.with.map((id) => h('button', { class: 'chip-btn', title: 'Remove',
         onclick: () => { sec.with.splice(sec.with.indexOf(id), 1); draw(); } }, byId[id]?.name ?? `#${id}`, ' ×')));
       drawWith();
-      const newName = h('input', { placeholder: 'New dish just for sets' });
-      const newAlt = h('input', { placeholder: 'Thai (optional)', lang: 'th' });
+      const newName = h('input', { placeholder: 'New dish just for sets', 'aria-label': 'New dish name' });
+      const newAlt = h('input', { placeholder: 'Thai', lang: 'th', 'aria-label': 'New dish Thai name' });
       const addNew = h('div', { class: 'sec-add' }, newName, newAlt, h('button', { onclick: act(async () => {
         if (!newName.value.trim()) return toast('Type the new dish name', true);
         const made = await call('create_product', { product: {
@@ -3269,97 +3493,91 @@ async function renderMenuAdmin() {
         } });
         await call('set_set_only', { id: made.id, setOnly: true });
         made.set_only = true;
-        all.push(made); withable.push(made); byId[made.id] = made; sec.items.push(made.id);
-        toast(`${made.name} added (only sold in sets; give it a team in the menu list if needed)`);
+        pool.push(made); byId[made.id] = made; withable.push(made); sec.items.push(made.id);
+        toast(`${made.name} added (only sold in sets)`);
         draw();
       }) }, '+ New dish'));
       return h('div', { class: 'card stack inset set-edit' },
         h('div', { class: 'sec-head' },
-          h('input', { value: sec.name, placeholder: 'Section, e.g. Main', oninput: (e) => (sec.name = e.target.value) }),
-          h('input', { value: sec.alt, placeholder: 'Thai name', lang: 'th', oninput: (e) => (sec.alt = e.target.value) }),
-          h('label', { class: 'field' }, 'Choose', pick),
-          h('label', { class: 'switch', title: 'Goes to the kitchen with the starters; the rest waits for "Call mains"' },
-            h('input', { type: 'checkbox', checked: sec.starter, onchange: (e) => { sec.starter = e.target.checked; draw(); } }), h('span', {}), 'Starter course'),
-          h('span', { class: 'sec-tools' }, h('button', { title: 'Move up', disabled: i === 0, onclick: () => { [sections[i - 1], sections[i]] = [sections[i], sections[i - 1]]; draw(); } }, '↑'),
-          h('button', { title: 'Move down', disabled: i === sections.length - 1, onclick: () => { [sections[i + 1], sections[i]] = [sections[i], sections[i + 1]]; draw(); } }, '↓'),
-          h('button', { class: 'danger', title: 'Remove this section', onclick: () => { sections.splice(i, 1); draw(); } }, '×'))),
+          h('input', { value: sec.name, placeholder: 'Section, e.g. Main', 'aria-label': 'Section name', oninput: (e) => (sec.name = e.target.value) }),
+          h('input', { value: sec.alt, placeholder: 'Thai', lang: 'th', 'aria-label': 'Section Thai name', oninput: (e) => (sec.alt = e.target.value) }),
+          h('span', { class: 'sec-tools' },
+            h('button', { title: 'Move up', 'aria-label': 'Move up', disabled: i === 0, onclick: () => { [sections[i - 1], sections[i]] = [sections[i], sections[i - 1]]; draw(); } }, '↑'),
+            h('button', { title: 'Move down', 'aria-label': 'Move down', disabled: i === sections.length - 1, onclick: () => { [sections[i + 1], sections[i]] = [sections[i], sections[i + 1]]; draw(); } }, '↓'),
+            h('button', { class: 'danger', title: 'Remove this section', 'aria-label': 'Remove this section', onclick: () => { sections.splice(i, 1); draw(); } }, '×'))),
+        h('div', { class: 'sgroup' },
+          srow({ label: 'Choose', ctl: pick }),
+          switchRow({ label: 'Starter course', hint: 'Goes with the starters', value: sec.starter, onChange: (v) => { sec.starter = v; } })),
         h('div', { class: 'row' }, chips, h('span', { style: 'flex:1' }),
           h('button', { class: sec.ui.open ? 'on' : '', onclick: () => { sec.ui.open = !sec.ui.open; draw(); } }, sec.ui.open ? 'Done' : '+ Add dishes')),
-        sec.ui.open && dishPicker(sec.items, all, sec.ui, null, drawChips),
+        sec.ui.open && dishPicker(sec.items, pool, sec.ui, drawChips),
         sec.ui.open && addNew,
         // Optional: each dish here comes with one of these (e.g. rice or noodles).
         h('div', { class: 'with-edit' },
-          h('span', { class: 'muted small' }, sec.with.length ? 'Each dish comes with one of:' : 'Comes with (e.g. rice or noodles): none'),
+          h('span', { class: 'muted small' }, sec.with.length ? 'Comes with one of:' : 'Comes with: nothing'),
           withChips, h('span', { style: 'flex:1' }),
           h('button', { class: sec.withUi.open ? 'on' : '', onclick: () => { sec.withUi.open = !sec.withUi.open; draw(); } },
-            sec.withUi.open ? 'Done' : 'Choose what it comes with')),
-        sec.withUi.open && dishPicker(sec.with, withable, sec.withUi, null, drawWith));
+            sec.withUi.open ? 'Done' : 'Choose')),
+        sec.withUi.open && dishPicker(sec.with, withable, sec.withUi, drawWith));
     }));
     draw();
-    const save = act(async () => {
+    const save = async () => {
       fieldErr(name); fieldErr(price);
-      if (!name.value.trim()) return fieldErr(name, 'Type a name');
+      if (!name.value.trim()) { fieldErr(name, 'Type a name'); return 'Type a name'; }
       let cents;
-      try { cents = parseMoney(price.value); } catch (e) { return fieldErr(price, e.message); }
+      try { cents = parseMoney(price.value); } catch (e) { fieldErr(price, e.message); return `Price: ${e.message}`; }
       const t = Number(String(tax.value).replace(',', '.').replace('%', '') || 0);
-      if (!Number.isFinite(t) || t < 0 || t > 100) return toast('Tax: from 0 to 100', true);
-      if (!sections.length) return toast('Add at least one section', true);
-      const bad = sections.find((s) => !s.name.trim() || !s.items.length);
-      if (bad) return toast(`${bad.name || 'A section'}: give it a name and at least one dish`, true);
+      if (!Number.isFinite(t) || t < 0 || t > 100) return 'Tax: from 0 to 100';
+      if (!sections.length) return 'Add at least one section';
+      const bad = sections.find((x) => !x.name.trim() || !x.items.length);
+      if (bad) return `${bad.name || 'A section'}: give it a name and at least one dish`;
       const fields = { name: name.value, name_alt: alt.value.trim() || null, category_id: cat.value ? Number(cat.value) : null,
         price_cents: cents, cost_cents: 0, tax_rate_bp: Math.round(t * 100), track_stock: false, starter: false, prep: false, team_id: null };
       const saved = p
-        ? await call('update_product', { id: p.id, product: { ...fields, sku: p.sku, barcode: p.barcode, active: active.checked } })
-        : await call('create_product', { product: { ...fields, stock_qty: 0 } });
+        ? await call('update_product', { id: p.id, product: { ...fields, sku: p.sku, barcode: p.barcode, active: active.input.checked } }, { quiet: true })
+        : await call('create_product', { product: { ...fields, stock_qty: 0 } }, { quiet: true });
       try {
-        await call('save_set', { setId: saved.id, sections: sections.map((s) => ({
-          name: s.name.trim(), name_alt: s.alt.trim() || null, pick: s.pick, starter: s.starter, product_ids: s.items, with_ids: s.with })) });
+        await call('save_set', { setId: saved.id, sections: sections.map((x) => ({
+          name: x.name.trim(), name_alt: x.alt.trim() || null, pick: x.pick, starter: x.starter, product_ids: x.items, with_ids: x.with })) }, { quiet: true });
       } catch (e) {
         // A new set that could not be saved must not stay behind as a plain item.
         if (!p) await call('delete_product', { id: saved.id }).catch(() => {});
         throw e;
       }
       toast(`${saved.name} saved`);
+      setTimeout(changed);
+    };
+    const del = p && isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => {
+      await call('delete_product', { id: p.id });
+      s.close();
+      toast(`${p.name} deleted`);
       await changed();
-    });
-    setKids(form, h('div', { class: 'card stack' },
-      h('h3', {}, p ? `Edit set menu: ${p.name}` : 'New set menu'),
-      h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, name), cat),
-      h('div', { class: 'row' }, alt,
-        h('label', { class: 'field' }, taxIncluded ? 'Price (tax included)' : 'Price (before tax)', h('span', { class: 'field-col' }, price)),
-        h('label', { class: 'field' }, 'Tax %', tax), p && h('label', { class: 'switch' }, active, h('span', {}), 'On the menu')),
-      h('div', { class: 'muted small' }, 'The bill shows only the set and its price. Each section\'s dishes go to the kitchen under the set\'s name; '
-        + '"Starter course" sections go first on dine-in orders. Dishes with choices (e.g. chicken or beef) or options are fine: staff pick them with the dish; options with a price add to the set price.'),
-      list,
-      h('div', {}, h('button', { onclick: () => { sections.push({ name: '', alt: '', pick: 1, starter: false, items: [], with: [] }); draw(); } }, '+ Section')),
-      h('div', { class: 'row' },
-        h('button', { class: 'primary', onclick: save }, 'Save set'),
-        h('button', { onclick: () => setKids(form) }, 'Cancel'),
-        h('span', { style: 'flex:1' }),
-        p && isAdmin() && confirmBtn('Delete set', `Tap again to delete "${p.name}"`, async () => {
-          await call('delete_product', { id: p.id });
-          toast(`${p.name} deleted`);
-          await changed();
-        }))));
-    tapFocus(name);
+    }, 'ghost danger');
+    const s = sheet({ title: p ? p.name : 'New set menu', wide: true, onSave: save, saveLabel: 'Save set', left: del,
+      body: [ssec(null, [field('Name', name), field('Thai name', alt), field('Category', cat),
+        field(taxIncluded ? 'Price' : 'Price before tax', price, { hint: taxIncluded ? 'Tax included' : '' }), field('Tax %', tax), p && active],
+      'The bill shows the set and its price. Options with a price add to it.'),
+      h('h3', { class: 'ssec-title set-secs' }, 'Sections'), secList,
+      h('button', { class: 'ladd set-add', onclick: () => { sections.push({ name: '', alt: '', pick: 1, starter: false, items: [], with: [] }); draw(); } }, icon('plus', 18), 'Section')] });
+    if (!p) tapFocus(name);
   }
 
   state.openEditor = editProduct;
 
-  // ---- 6: paste a whole menu from a spreadsheet ----
+  // ---- paste a whole menu from a spreadsheet ----
   function pasteImport() {
-    const text = h('textarea', { rows: 10, style: 'width:100%', placeholder: 'Name\tPrice\tCategory\tThai name\nPad Thai\t9.50\tMains\tผัดไทย\nSpring rolls\t4.50\tStarters\tปอเปี๊ยะ\nCola\t2.50\tDrinks' });
+    const text = h('textarea', { rows: 8, 'aria-label': 'Menu rows', placeholder: 'Name\tPrice\tCategory\tThai name\nPad Thai\t9.50\tMains\tผัดไทย\nSpring rolls\t4.50\tStarters\tปอเปี๊ยะ\nCola\t2.50\tDrinks' });
     const out = h('div', { class: 'stack' });
     let rows = [];
     const parse = () => {
       rows = text.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((line, i) => {
         // Spreadsheets paste tab-separated; typed lines use commas ("quoted, names" allowed).
         const cells = line.includes('\t') ? line.split('\t') : splitCsv(line);
-        const [name = '', priceText = '', category = '', alt = ''] = cells.map((c) => c.trim());
+        const [nm = '', priceText = '', category = '', alt = ''] = cells.map((c) => c.trim());
         let price = null, error = null;
         try { price = parseMoney(priceText); } catch { error = priceText ? `"${priceText}" is not a price` : 'no price'; }
-        if (!name) error = 'no name';
-        return { line: i + 1, name, alt, price, category, error };
+        if (!nm) error = 'no name';
+        return { line: i + 1, name: nm, alt, price, category, error };
       });
       // A header line ("Name, Price, Category") is skipped.
       if (rows[0]?.error && /price/i.test(text.value.split(/\r?\n/)[0])) rows.shift();
@@ -3372,80 +3590,42 @@ async function renderMenuAdmin() {
           h('td', { class: 'muted' }, r.line), h('td', {}, r.name, r.alt && h('div', { class: 'alt', lang: 'th' }, r.alt)), h('td', { class: 'num' }, r.price != null ? money(r.price) : ''),
           h('td', {}, r.category || h('span', { class: 'muted' }, 'none'), r.category && !byCat(r) ? h('span', { class: 'badge' }, 'new') : ''),
           h('td', { class: 'field-error' }, r.error ?? ''))))) : '',
-        rows.length > 200 && h('div', { class: 'muted' }, `…and ${rows.length - 200} more`),
-        fresh.length > 0 && h('div', { class: 'muted' }, `New categories will be created: ${fresh.join(', ')}`),
-        h('div', { class: 'row' },
-          h('button', { class: 'primary', disabled: !rows.length || bad.length > 0, onclick: act(async () => {
-            const r = await call('import_items', { rows: rows.map((x) => ({ name: x.name, name_alt: x.alt || null, price_cents: x.price, category: x.category || null })) });
-            toast(`${r.items} items imported` + (r.new_categories.length ? `, ${r.new_categories.length} new categories` : ''));
-            await changed();
-          }) }, bad.length ? `Fix ${bad.length} line(s) first` : `Import ${rows.length} item(s)`),
-          h('button', { onclick: () => setKids(form) }, 'Cancel')));
+      rows.length > 200 && h('div', { class: 'muted' }, `…and ${rows.length - 200} more`),
+      fresh.length > 0 && h('div', { class: 'muted' }, `New categories: ${fresh.join(', ')}`));
+      if (s) { s.save.disabled = !rows.length || bad.length > 0; s.save.textContent = bad.length ? `Fix ${bad.length} line(s)` : `Import ${rows.length || ''} item(s)`.replace('  ', ' '); }
     };
     text.addEventListener('input', parse);
-    setKids(form, h('div', { class: 'card stack' },
-      h('h3', {}, 'Paste a menu'),
-      h('div', { class: 'muted' }, 'Copy rows from Excel or Google Sheets (columns: name, price, category, Thai name) and paste them here, or type one item per line like "Pad Thai, 9.50, Mains, ผัดไทย". ' +
-        'Missing categories are created; each item gets its category\'s tax and starter defaults. Check the preview, then import.'),
-      text, out));
+    let s = null;
+    s = sheet({ title: 'Paste a menu', wide: true, saveLabel: 'Import',
+      body: [ssec(null, [srow({ label: 'Rows', hint: 'Name, price, category, Thai name', tip: 'Copy rows from Excel or Google Sheets, or type one item per line like "Pad Thai, 9.50, Mains, ผัดไทย". Missing categories are created.', stacked: true, ctl: text })]), out],
+      onSave: async () => {
+        const r = await call('import_items', { rows: rows.map((x) => ({ name: x.name, name_alt: x.alt || null, price_cents: x.price, category: x.category || null })) }, { quiet: true });
+        toast(`${r.items} items imported` + (r.new_categories.length ? `, ${r.new_categories.length} new categories` : ''));
+        setTimeout(changed);
+      } });
     parse();
     tapFocus(text);
   }
 
-  // ---- 8: category tabs + drag to reorder categories ----
-  const drawTabs = () => setKids(tabs,
-    h('button', { class: state.menuTab === 'all' ? 'on' : '', onclick: () => { state.menuTab = 'all'; drawTabs(); loadProducts(); } }, 'All'),
-    catTree.filter((c) => c.active).map((c) => h('button', { class: `${state.menuTab === c.id ? 'on' : ''} ${isMain(c) ? '' : 'sub-tab'}`, style: catStyle(c.color),
-      onclick: () => { state.menuTab = c.id; search.value = ''; drawTabs(); loadProducts(); } }, h('span', { class: 'dot' }), isMain(c) ? c.name : `↳ ${c.name}`)),
-    h('button', { class: state.menuTab === 'none' ? 'on' : '', onclick: () => { state.menuTab = 'none'; drawTabs(); loadProducts(); } }, 'No category'));
-  drawTabs();
   let searchTimer;
-  search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadProducts, 150); });
-  showInactive.onchange = loadProducts;
-
-  const catChips = h('div', { class: 'row cat-chips' }, catTree.map((c) => h('button', {
-    'data-id': c.id, style: `border-left:6px solid ${c.color || '#d9dce1'}${c.active ? '' : ';opacity:.5'}`,
-    onclick: (e) => { if (!e.target.closest('.grip') && !e.currentTarget.dataset.dragged) editCategory(c); },
-    title: [c.tax_rate_bp != null ? `tax ${pct(c.tax_rate_bp)}%` : '', c.starter ? 'starters' : ''].filter(Boolean).join(' · '),
-  }, h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'), isMain(c) ? c.name : h('span', {}, h('span', { class: 'muted' }, '↳ '), c.name),
-    c.starter ? h('small', { class: 'muted' }, ' starters') : '')));
-  sortable(catChips, { item: 'button[data-id]', handle: '.grip', axis: 'x', onDrop: act(async (ids) => {
-    await call('reorder_categories', { ids });
-    state.menu = null;
-    toast('Category order saved');
-    await changed(true);
-  }) });
-
-  screen(h('div', { class: 'page' },
-    h('div', { class: 'stack' },
-      h('div', { class: 'grid2' }, h('div', { class: 'card stack' },
-        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Categories'),
-          isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete categories', cats.map((c) => ({ id: c.id, label: c.name })),
-            (ids) => deleteMany('category', ids, 'categor(ies)'), async () => { state.menuTab = 'all'; await changed(); }) }, 'Delete…'),
-          h('button', { onclick: () => editCategory(null) }, '+ Category')),
-        catChips,
-        cats.length > 1 && h('div', { class: 'muted small' }, 'Drag ⠿ to change the order. Tap a category to set its colour and defaults (tax, starters).')),
-      h('div', { class: 'card stack' },
-        h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, 'Options (sizes, extras…)'),
-          isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete option groups', groups.map((g) => ({ id: g.id, label: g.name, sub: groupRule(g) })),
-            (ids) => deleteMany('option_group', ids, 'group(s)'), () => changed()) }, 'Delete…'),
-          h('button', { onclick: () => editGroup(null) }, '+ Option group')),
-        h('div', { class: 'row' }, groups.length ? groups.map((g) => h('button', {
-          style: g.active ? '' : 'opacity:.5', onclick: () => editGroup(g), title: g.options.filter((o) => o.active).map((o) => o.name).join(', '),
-        }, g.name, h('small', { class: 'muted' }, ` ${groupRule(g)}`)))
-          : h('span', { class: 'muted' }, 'Create a group like "Size" or "Extras", then tick it on the menu items that use it.')))),
-      tabs,
-      h('div', { class: 'toolbar' },
-        h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Menu item'),
-        h('button', { onclick: act(() => editSet(null)) }, icon('plus', 18), 'Set menu'),
-        h('button', { onclick: pasteImport }, 'Paste a menu'),
-        h('div', { class: 'searchbox grow' }, icon('search', 18), search),
-        h('label', { class: 'switch' }, showInactive, h('span', {}), 'Show removed'),
-        isAdmin() && h('button', { onclick: () => bulkDelete('Delete menu items', (state.menuShown ?? []).map((p) => ({
-          id: p.id, label: p.name, sub: [catById[p.category_id]?.name, money(p.price_cents)].filter(Boolean).join(' · '),
-        })), (ids) => deleteMany('product', ids, 'item(s)'), () => changed()) }, 'Select…')),
-      h('div', { class: 'panel' }, list)),
-    form));
+  search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(drawProducts, 150); });
+  // ⋯ More: the rarer things.
+  const moreBtn = moreMenu('the menu', () => [
+    h('button', { onclick: act(() => editSet(null)) }, '+ Set menu'),
+    h('button', { onclick: pasteImport }, 'Paste a menu'),
+    h('button', { onclick: () => { state.menuRemoved = !state.menuRemoved; loadProducts(); } }, state.menuRemoved ? 'Hide removed' : 'Show removed'),
+    isAdmin() && h('button', { onclick: () => bulkDelete('Delete menu items', (state.menuShown ?? []).map((p) => ({
+      id: p.id, label: p.name, sub: [catById[p.category_id]?.name, money(p.price_cents)].filter(Boolean).join(' · '),
+    })), (ids) => deleteMany('product', ids, 'item(s)'), () => changed()) }, 'Delete several…'),
+    isAdmin() && h('button', { onclick: () => openManage('g:data', 'menu') }, 'Menu backups'),
+  ]);
+  moreBtn.classList.add('mmore');
+  screen({ action: h('button', { class: 'primary', onclick: () => editProduct(null) }, icon('plus', 18), 'Item') },
+    h('div', { class: 'menu-md' }, catPane,
+      h('div', { class: 'mmain' }, catChips,
+        h('div', { class: 'mtools' }, h('label', { class: 'searchbox grow' }, icon('search', 20), search), moreBtn),
+        h('div', { class: 'md-list' }, listHead, list))));
+  drawCats();
   await loadProducts();
 }
 
@@ -3658,69 +3838,116 @@ async function renderPlan() {
 
 async function renderUsers() {
   state.dirty = false;
-  const list = h('div');
-  const form = popupHost();
-  const load = async () => {
-    const users = await call('list_users');
-    setKids(list, h('table', {},
-      h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Role'), h('th', {}, 'Login'), h('th', {}, 'Last login')),
-      users.map((u) => h('tr', { class: 'click', onclick: () => { if (leaveOk()) edit(u); } },
-        h('td', {}, h('span', { class: 'row nowrap' }, h('span', { class: 'avatar sm' }, initials(u.name)), u.name)),
-        h('td', {}, h('span', { class: `chip ${u.role === 'staff' ? '' : 'info'}` }, ROLE_LABEL[u.role] ?? 'Staff')),
-        h('td', {}, h('span', { class: `pill ${u.active ? 'ok' : ''}` }, u.active ? 'Can log in' : 'Off')),
-        h('td', {}, u.last_login_at ? fmtTime(u.last_login_at) : '—')))));
+  const ROLES = [['staff', 'Staff'], ['manager', 'Manager'], ['admin', 'Admin']];
+  const ROLE_HINT = { staff: 'Takes orders and payments', manager: 'Also menu, reports, voids and kitchen settings', admin: 'Everything' };
+  let users = await call('list_users');
+  const list = h('div', { class: 'olist', role: 'list', 'aria-label': 'Staff' });
+  const detail = h('div', { class: 'md-body' });
+  const meta = (u) => [ROLE_LABEL[u.role] ?? 'Staff', u.active ? (u.last_login_at ? `in ${friendlyTime(u.last_login_at)}` : 'not in yet') : 'switched off'].join(' · ');
+  const drawList = () => setKids(list, users.map((u) => {
+    const row = h('div', { class: `urow${u.id === state.staffSel ? ' on' : ''}${u.active ? '' : ' off'}`, role: 'listitem', tabindex: 0, 'data-id': u.id,
+      onclick: () => pick(u.id), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(u.id); } } },
+    h('span', { class: 'avatar' }, initials(u.name)),
+    h('span', { class: 'u-text' }, h('strong', {}, u.name), h('small', {}, meta(u))),
+    !u.active && h('span', { class: 'pill' }, 'Off'),
+    h('span', { class: 'chev' }, icon('chev', 18)));
+    return row;
+  }));
+  const pick = (id) => { state.staffSel = id; drawList(); drawDetail(); md.show(); };
+  // Saves go through update_user with the whole person; your own change logs in again (name, role).
+  const saveUser = async (u, patch) => {
+    const next = { ...u, ...patch };
+    const saved = await call('update_user', { id: u.id, name: next.name, role: next.role, active: next.active }, { quiet: true });
+    Object.assign(u, saved);
+    drawList();
+    // The server has your new name and role already (or logged you out): show them.
+    if (u.id === state.session.user_id) setTimeout(() => { if (!saved.active) forgetSession(); start(); }, 300);
   };
-  function edit(u) {
-    const name = h('input', { value: u?.name ?? '', placeholder: 'Name' });
-    const ROLE_HINT = { staff: 'Takes orders and payments', manager: 'Also menu, reports, voids and kitchen settings', admin: 'Everything' };
-    const role = sseg([['staff', 'Staff'], ['manager', 'Manager'], ['admin', 'Admin']], u?.role ?? 'staff', (v) => { setHint(roleRow, ROLE_HINT[v]); bar.update(1); }, 'Role');
-    const roleRow = srow({ label: 'Role', hint: ROLE_HINT[u?.role ?? 'staff'], stacked: true, ctl: role });
-    const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: u ? 'New PIN (optional)' : 'PIN (4-8 digits)' });
-    for (const el of [name, pin]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
-    // Shared PINs are allowed, but say so before saving.
+  function drawDetail() {
+    const u = users.find((x) => x.id === state.staffSel);
+    if (!u) return setKids(detail, h('div', { class: 'sgroup md-empty' }, emptyState({ icon: 'users', title: 'Tap a person to see them' })));
+    const me = u.id === state.session.user_id;
+    const name = textRow({ id: 'name', label: 'Name', value: u.name, max: 40, validate: (v) => (v ? null : 'Type a name'),
+      save: (v) => saveUser(u, { name: v }), after: () => { title.textContent = u.name; } });
+    // Demoting yourself asks first, in a strip under the role.
+    const strip = h('div', { class: 'srow-strip', hidden: true });
+    const role = segRow({ id: 'role', label: 'Role', hint: ROLE_HINT[u.role], items: ROLES, value: u.role, stacked: true,
+      save: async (v) => {
+        if (me && u.role === 'admin' && v !== 'admin') {
+          setKids(strip, h('span', { class: 'grow' }, 'You will lose admin.'),
+            h('button', { class: 'ghost', onclick: () => { strip.hidden = true; rowState(role, 'idle'); } }, 'Keep'),
+            h('button', { class: 'danger solid', onclick: () => { strip.hidden = true; role.seg.set(v); doRole(v); } }, 'Change'));
+          strip.hidden = false;
+          throw new Error('confirm below');
+        }
+        await saveUser(u, { role: v });
+      },
+      after: (v) => setHint(role, ROLE_HINT[v]) });
+    const doRole = (v) => saveWith(role, () => saveUser(u, { role: v }), () => role.seg.set(u.role)).then((ok) => { if (ok) setHint(role, ROLE_HINT[v]); });
+    const active = switchRow({ id: 'active', label: 'Can log in', hint: (v) => (v ? '' : 'Off: cannot log in'), value: u.active, save: (v) => saveUser(u, { active: v }) });
+    const pinRow = navRow({ id: 'pin', label: 'PIN', value: 'Change', onOpen: (row) => pinSheet(u, row) });
+    const title = h('h3', {}, u.name);
+    setKids(detail, h('div', { class: 'ucard' },
+      h('div', { class: 'ucard-head' }, h('span', { class: 'avatar lg' }, initials(u.name)), title, me && h('span', { class: 'pill plain' }, 'You')),
+      ssec('Details', [name, role, strip, active, pinRow])));
+  }
+  // The PIN in a sheet, with the shared-PIN warning as one line.
+  const pinField = (u) => {
+    const pin = h('input', { type: 'password', inputmode: 'numeric', maxlength: 8, autocomplete: 'off', placeholder: '4 to 8 digits', 'aria-label': 'PIN' });
     const shared = h('div', { class: 'warn-box', hidden: true });
-    let pinTimer;
+    let t;
     pin.addEventListener('input', () => {
-      clearTimeout(pinTimer);
+      clearTimeout(t);
       const v = pin.value;
       if (!/^\d{4,8}$/.test(v)) { shared.hidden = true; return; }
-      pinTimer = setTimeout(async () => {
+      t = setTimeout(async () => {
         const names = await invoke('pin_shared', { pin: v, exceptUserId: u?.id ?? null }).catch(() => []);
         if (pin.value !== v) return;
         shared.hidden = !names.length;
-        shared.textContent = names.length ? `${names.join(', ')} already ${names.length > 1 ? 'use' : 'uses'} this PIN. Better give each person their own: when someone else types a shared PIN to approve, it counts as the lowest role among them.` : '';
+        shared.textContent = names.length ? `Also used by ${names.join(', ')}. Better one PIN each.` : '';
       }, 200);
     });
-    const saveIt = async () => {
-      if (u) {
-        await call('update_user', { id: u.id, name: name.value, role: role.value(), active: active.input.checked }, { quiet: true });
-        if (pin.value) await call('reset_pin', { id: u.id, pin: pin.value }, { quiet: true });
-      } else {
-        await call('create_user', { name: name.value, role: role.value(), pin: pin.value }, { quiet: true });
-      }
-      toast('Saved');
-      bar.update(0);
-      setKids(form);
-      await start(); // own role/name may have changed
-    };
-    const save = act(saveIt);
-    // Unsaved changes: the save bar, and Manage keeps you here until they are saved or let go.
-    const bar = saveBar({ text: 'Not saved yet', onSave: saveIt, onDiscard: () => setTimeout(() => setKids(form)) });
-    const active = switchRow({ label: 'Can log in', value: u ? u.active : true, onChange: () => bar.update(1) });
-    const card = h('div', { class: 'card stack staff-form' },
-      h('h3', {}, u ? `Edit ${u.name}` : 'New staff member'),
-      h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, 'Name', name),
-      h('div', { class: 'sgroup' }, roleRow, u && active),
-      h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, u ? 'New PIN' : 'PIN', pin,
-        h('span', { class: 'muted small' }, u ? 'Leave empty to keep the current PIN.' : '4 to 8 digits; used to log in.'), shared),
-      bar);
-    card.addEventListener('input', () => bar.update(1));
-    setKids(form, card);
+    return { pin, shared, ok: () => /^\d{4,8}$/.test(pin.value) };
+  };
+  function pinSheet(u, row) {
+    const f = pinField(u);
+    const s = sheet({ title: `New PIN for ${u.name}`, saveLabel: 'Save PIN', body: [ssec(null, [srow({ label: 'PIN', cls: 'text-row', ctl: f.pin })]), f.shared],
+      onSave: async () => {
+        if (!f.ok()) return 'Use 4 to 8 digits';
+        await call('reset_pin', { id: u.id, pin: f.pin.value }, { quiet: true });
+        rowState(row, 'saved');
+      } });
+    f.pin.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (f.ok()) s.save.click(); else OSK?.hide?.(); } });
+    tapFocus(f.pin);
+  }
+  // + Staff member: name, role and PIN in a sheet.
+  function addSheet() {
+    const name = h('input', { placeholder: 'Name', maxlength: 40, 'aria-label': 'Name', enterkeyhint: 'next' });
+    const role = sseg(ROLES, 'staff', (v) => setHint(roleRow, ROLE_HINT[v]), 'Role');
+    const roleRow = srow({ label: 'Role', hint: ROLE_HINT.staff, stacked: true, ctl: role });
+    const f = pinField(null);
+    const s = sheet({ title: 'New staff member', saveLabel: 'Add',
+      body: [ssec(null, [srow({ label: 'Name', cls: 'text-row', ctl: name }), roleRow, srow({ label: 'PIN', cls: 'text-row', ctl: f.pin })]), f.shared],
+      onSave: async () => {
+        if (!name.value.trim()) { tapFocus(name); return 'Type a name'; }
+        if (!f.ok()) return 'PIN: use 4 to 8 digits';
+        const made = await call('create_user', { name: name.value, role: role.value(), pin: f.pin.value }, { quiet: true });
+        users = await call('list_users');
+        state.staffSel = made.id;
+        drawList();
+        drawDetail();
+        md.show();
+      } });
+    // The keyboard's Done (Enter) moves on to the PIN; Enter on a complete form adds.
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (name.value.trim()) tapFocus(f.pin); } });
+    f.pin.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (name.value.trim() && f.ok()) s.save.click(); } });
     tapFocus(name);
   }
-  screen({ action: h('button', { class: 'primary', onclick: () => { if (leaveOk()) edit(null); } }, icon('plus', 18), 'Staff member') }, h('div', { class: 'page' },
-    h('div', { class: 'panel' }, list), form));
-  await load();
+  if (!users.some((u) => u.id === state.staffSel)) state.staffSel = wideQ.matches ? users[0]?.id ?? null : null;
+  const md = masterDetail({ cls: 'md-staff', back: 'Staff', list: h('div', { class: 'md-list' }, list), detail });
+  drawList();
+  drawDetail();
+  screen({ action: h('button', { class: 'primary', onclick: addSheet }, icon('plus', 18), 'Staff member') }, md);
 }
 
 // ---------- reports (admin) ----------
@@ -3865,197 +4092,258 @@ async function renderKitchen() {
 
 /// Shift & cash: open with a float, money in / out, close by counting.
 /// `shown`: a report to show straight away (the shift just closed).
-async function renderShift(shown = null) {
+async function renderShift() {
   const [cur, past] = await Promise.all([call('current_shift'), call('list_shifts', { limit: 20 }).catch(() => [])]);
-  const report = h('pre', { class: 'report', hidden: !shown }, shown ?? '');
-  const moneyIn = (placeholder) => h('input', { inputmode: 'decimal', placeholder, style: 'width:140px' });
+  const moneyIn = (label, placeholder = '0.00') => h('input', { inputmode: 'decimal', placeholder, 'aria-label': label, class: 'money-in' });
   const cents = (el) => { try { return el.value.trim() ? parseMoney(el.value) : null; } catch { return null; } };
   let main;
   if (!cur) {
-    const float = moneyIn('e.g. 100');
-    main = h('div', { class: 'card stack shift-start' },
-      h('h3', {}, 'Start a shift'),
-      h('div', { class: 'muted' }, 'Count the float first.'),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Cash in the drawer', float),
-        h('button', { class: 'primary lg', onclick: act(async () => {
-          const c = cents(float);
-          if (c == null) return toast('Enter the cash in the drawer (0 if empty)', true);
-          await call('open_shift', { floatCents: c });
-          toast('Shift open');
-          renderShift();
-        }) }, 'Open shift')));
+    // No shift: one card to open it with the float.
+    const float = moneyIn('Cash in the drawer', 'e.g. 100.00');
+    const open = act(async () => {
+      const c = cents(float);
+      if (c == null) { nudge(float); return toast('Type the cash in the drawer (0 if empty)', true); }
+      await call('open_shift', { floatCents: c });
+      toast('Shift open');
+      renderShift();
+    });
+    float.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (float.value.trim()) open(e); } });
+    main = h('div', { class: 'scard shift-start' },
+      h('div', { class: 'scard-head' }, h('span', { class: 'lead' }, icon('shift', 22)), h('div', {}, h('h3', {}, 'Start a shift'), h('span', { class: 'muted' }, 'Count the float first.'))),
+      h('label', { class: 'money-field' }, h('span', {}, 'Cash in the drawer'), float),
+      h('button', { class: 'primary lg', onclick: open }, 'Open shift'));
   } else {
-    const box = h('div', {});
+    // Money in / out: amount and reason in a sheet.
     const move = (kind) => {
       const amt = moneyIn('Amount');
-      const why = h('input', { placeholder: kind === 'in' ? 'Reason (optional), e.g. more change' : 'What for? e.g. milk, supplier', style: 'flex:1' });
-      setKids(box, h('div', { class: 'card stack' }, h('strong', {}, kind === 'in' ? 'Put money in the drawer' : 'Take money out of the drawer'),
-        h('div', { class: 'row' }, amt, why,
-          h('button', { class: 'primary', onclick: act(async () => {
-            const c = cents(amt);
-            if (!c) return toast('Enter an amount', true);
-            const r = await call('cash_move', { kind, amountCents: c, reason: why.value });
-            toast(`${kind === 'in' ? 'Money in' : 'Money out'}: ${money(c)}` + (r.print.error ? ` (drawer did not open: ${r.print.error})` : ''));
-            renderShift();
-          }) }, 'Save'), h('button', { onclick: () => setKids(box) }, 'Cancel'))));
+      const why = h('input', { placeholder: kind === 'in' ? 'e.g. more change' : 'e.g. milk, supplier', 'aria-label': 'Reason', maxlength: 80 });
+      sheet({ title: kind === 'in' ? 'Money in' : 'Money out', saveLabel: kind === 'in' ? 'Put in' : 'Take out',
+        body: ssec(null, [srow({ label: 'Amount', cls: 'text-row', ctl: amt }), srow({ label: 'Reason', hint: kind === 'in' ? 'Optional' : '', cls: 'text-row', ctl: why })]),
+        onSave: async () => {
+          const c = cents(amt);
+          if (!c) return 'Type an amount';
+          const r = await call('cash_move', { kind, amountCents: c, reason: why.value }, { quiet: true });
+          toast(`${kind === 'in' ? 'Money in' : 'Money out'}: ${money(c)}` + (r.print.error ? ` (drawer did not open: ${r.print.error})` : ''));
+          setTimeout(renderShift);
+        } });
       tapFocus(amt);
     };
-    const count = moneyIn('Counted');
-    const note = h('input', { placeholder: 'Note (optional)', style: 'flex:1' });
-    const diff = h('strong', {});
+    const line = (label, c, cls = '') => h('div', { class: `sum-row ${cls}` }, h('span', {}, label), h('strong', {}, money(c)));
+    const count = moneyIn('Cash counted');
+    const note = h('input', { placeholder: 'Note (optional)', 'aria-label': 'Note', maxlength: 120 });
+    const diff = h('span', { class: 'pill plain diff', hidden: true });
     const showDiff = () => {
       const c = cents(count);
-      diff.textContent = c == null ? '' : c === cur.expected_cents ? 'Exactly right' : c < cur.expected_cents ? `Short ${money(cur.expected_cents - c)}` : `Over ${money(c - cur.expected_cents)}`;
-      diff.className = c != null && c < cur.expected_cents ? 'short' : '';
+      diff.hidden = c == null;
+      if (c == null) return;
+      const d = c - cur.expected_cents;
+      diff.className = `pill diff ${d === 0 ? 'ok' : d < 0 ? 'bad' : 'plain'}`;
+      diff.textContent = d === 0 ? 'Exactly right' : d < 0 ? `Short ${money(-d)}` : `Over ${money(d)}`;
     };
     count.addEventListener('input', showDiff);
-    const line = (label, c, cls = '') => h('tr', { class: cls }, h('td', {}, label), h('td', { class: 'num' }, money(c)));
-    main = h('div', { class: 'grid2' },
-      h('div', { class: 'card stack' },
-        h('h3', {}, 'Shift open'),
-        h('div', { class: 'muted' }, `Since ${fmtTime(cur.opened_at)} · opened by ${cur.opened_by_name} · ${cur.payment_count} payment(s)`),
-        h('table', {},
+    const closeBtn = h('button', { class: 'primary lg' }, icon('printer', 18), 'Close shift & print');
+    let sureTimer;
+    const unsure = () => { clearTimeout(sureTimer); delete closeBtn.dataset.sure; closeBtn.classList.remove('danger', 'solid'); closeBtn.classList.add('primary'); setKids(closeBtn, icon('printer', 18), 'Close shift & print'); };
+    count.addEventListener('input', () => { if (closeBtn.dataset.sure) unsure(); });
+    const close = act(async () => {
+      const c = cents(count);
+      if (c == null) { nudge(count); return toast('Type the cash you counted', true); }
+      // Short: a second tap closes it, so a typing slip is not printed as missing cash.
+      if (c < cur.expected_cents && !closeBtn.dataset.sure) {
+        closeBtn.dataset.sure = '1';
+        closeBtn.classList.remove('primary'); closeBtn.classList.add('danger', 'solid');
+        setKids(closeBtn, `Short ${money(cur.expected_cents - c)}: tap again to close`);
+        sureTimer = setTimeout(unsure, 6000);
+        return;
+      }
+      clearTimeout(sureTimer);
+      const r = await call('close_shift', { countedCents: c, note: note.value });
+      toast('Shift closed' + (r.print.error ? ` (report did not print: ${r.print.error})` : r.print.attempted ? ' · report printed' : ''), !!r.print.error);
+      await renderShift();
+      reportSheet('Shift closed', r.text, r.shift?.id ? () => call('print_shift', { id: r.shift.id }) : null);
+    });
+    main = h('div', { class: 'shift-grid' },
+      h('section', { class: 'scard' },
+        h('div', { class: 'scard-title' }, h('h3', {}, 'Drawer now'), h('span', { class: 'pill ok' }, 'Open')),
+        h('div', { class: 'muted small' }, `Since ${friendlyTime(cur.opened_at)} · ${cur.opened_by_name} · ${cur.payment_count} payment${cur.payment_count === 1 ? '' : 's'}`),
+        h('div', { class: 'kpi-big' }, h('small', {}, 'Should be in the drawer'), h('strong', {}, money(cur.expected_cents))),
+        h('div', { class: 'scard-acts' }, h('button', { onclick: () => move('in') }, icon('plus', 18), 'Money in'), h('button', { onclick: () => move('out') }, icon('minus', 18), 'Money out')),
+        h('div', { class: 'sum-rows' },
           line('Float', cur.float_cents), line(`${payName('cash')} sales`, cur.cash_cents),
-          cur.cash_tip_cents ? line(`${payName('cash')} tips`, cur.cash_tip_cents) : '',
-          cur.paid_in_cents ? line('Money in', cur.paid_in_cents) : '', cur.paid_out_cents ? line('Money out', -cur.paid_out_cents) : '',
-          cur.refund_cents ? line(`${payName('cash')} refunds (voids)`, -cur.refund_cents) : '',
-          line('Cash that should be in the drawer', cur.expected_cents, 'grand'),
-          line(payName('card'), cur.card_cents), cur.card_tip_cents ? line(`${payName('card')} tips`, cur.card_tip_cents) : '',
-          cur.other_cents ? line('Platforms / other', cur.other_cents) : ''),
-        cur.moves.length > 0 && h('div', { class: 'muted small' }, cur.moves.map((m) => `${m.kind === 'in' ? '+' : '−'}${money(m.amount_cents)} ${m.reason ?? ''} (${m.user_name})`).join(' · ')),
-        h('div', { class: 'row' }, h('button', { onclick: () => move('in') }, 'Money in'), h('button', { onclick: () => move('out') }, 'Money out')),
-        box),
-      h('div', { class: 'card stack' },
-        h('h3', {}, 'Close the shift'),
-        h('div', { class: 'muted' }, 'Count all the cash in the drawer and type the total.'),
-        h('div', { class: 'row' }, h('label', { class: 'field' }, 'Cash counted', count), diff),
-        h('div', { class: 'row' }, note),
-        h('button', { class: 'primary lg', onclick: act(async () => {
-          const c = cents(count);
-          if (c == null) return toast('Type the cash you counted', true);
-          const r = await call('close_shift', { countedCents: c, note: note.value });
-          toast('Shift closed' + (r.print.error ? ` (report did not print: ${r.print.error})` : r.print.attempted ? ' · report printed' : ''), !!r.print.error);
-          await renderShift(r.text);
-          document.querySelector('pre.report')?.scrollIntoView({ block: 'nearest' });
-        }) }, 'Close shift & print')));
+          cur.cash_tip_cents ? line(`${payName('cash')} tips`, cur.cash_tip_cents) : null,
+          cur.paid_in_cents ? line('Money in', cur.paid_in_cents) : null, cur.paid_out_cents ? line('Money out', -cur.paid_out_cents) : null,
+          cur.refund_cents ? line(`${payName('cash')} refunds`, -cur.refund_cents) : null,
+          h('div', { class: 'sum-sep' }),
+          line(payName('card'), cur.card_cents), cur.card_tip_cents ? line(`${payName('card')} tips`, cur.card_tip_cents) : null,
+          cur.other_cents ? line('Delivery apps / other', cur.other_cents) : null),
+        cur.moves.length > 0 && h('div', { class: 'moves' }, cur.moves.map((m) => h('div', { class: 'move' },
+          h('span', {}, [m.kind === 'in' ? 'Money in' : 'Money out', m.reason, m.user_name].filter(Boolean).join(' · ')),
+          h('strong', {}, `${m.kind === 'in' ? '' : '−'}${money(m.amount_cents)}`))))),
+      h('section', { class: 'scard' },
+        h('div', { class: 'scard-title' }, h('h3', {}, 'Close shift')),
+        h('label', { class: 'money-field' }, h('span', {}, 'Cash counted'), count),
+        h('div', { class: 'diff-row' }, h('span', { class: 'muted small' }, `Expected ${money(cur.expected_cents)}`), diff),
+        note,
+        closeBtn));
+    closeBtn.onclick = close;
   }
   const closed = past.filter((p) => p.shift.closed_at);
-  screen(h('div', { class: 'page' }, main,
+  const t = (x) => new Date(x * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  screen(h('div', { class: 'spage' }, main,
     closed.length > 0 && ssec('Past shifts', closed.map((p) => {
       const d = p.shift.difference_cents;
-      const t = (x) => new Date(x * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      return srow({ id: `shift${p.shift.id}`, label: friendlyTime(p.shift.opened_at), cls: 'brow',
-        hint: `to ${t(p.shift.closed_at)} · ${p.shift.closed_by_name} · Expected ${money(p.shift.expected_cents)}`,
+      return srow({ id: `shift${p.shift.id}`, label: `${friendlyTime(p.shift.opened_at).replace(/^./, (c) => c.toUpperCase())} – ${t(p.shift.closed_at)}`, cls: 'brow',
+        hint: `${p.shift.closed_by_name} · Expected ${money(p.shift.expected_cents)}`,
         ctl: [h('span', { class: `pill ${d === 0 ? 'ok' : d < 0 ? 'bad' : 'plain'}` }, d === 0 ? 'Exactly right' : `${d < 0 ? 'Short' : 'Over'} ${money(Math.abs(d))}`),
-          moreMenu('this shift', () => [h('button', { onclick: () => { report.textContent = p.text; report.hidden = false; report.scrollIntoView({ block: 'nearest' }); } }, 'View'),
+          moreMenu('this shift', () => [h('button', { onclick: () => reportSheet(friendlyTime(p.shift.opened_at), p.text, () => call('print_shift', { id: p.shift.id })) }, 'View'),
             h('button', { onclick: act(async () => printResult(await call('print_shift', { id: p.shift.id }), 'Shift report printed')) }, 'Print')])] });
-    })),
-    report));
+    }))));
+  if (!cur && wideQ.matches) main.querySelector('input')?.focus();
 }
 
 async function renderReports() {
-  const date = h('input', { type: 'date', value: today() });
-  const out = h('div');
-  const eod = h('div', { class: 'card stack' });
-  const none = () => h('div', { class: 'muted', style: 'margin-top:6px' }, 'No sales yet');
-  const rows = (pairs) => pairs.length ? h('table', {}, pairs.map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'num' }, v)))) : none();
+  // The report text (a day close, a shift) in a sheet, with Print where it can be printed again.
+  const eod = h('div', { class: 'eod' });
+  const kpis = h('div', { class: 'kpis kpis5' });
+  const period = h('h3', { class: 'ssec-title rperiod' });
+  const cards = h('div', { class: 'rcards' });
+  let mode = 'today', picked = today();
+  const dayOf = () => (mode === 'today' ? today() : mode === 'yesterday' ? isoDate(new Date(Date.now() - 86400000)) : picked);
+  const dayBtn = h('button', { class: 'daybtn', 'aria-label': 'Pick a day', onclick: () => pickDay() });
+  const seg = sseg([['today', 'Today'], ['yesterday', 'Yesterday']], mode, (v) => { mode = v; load(); }, 'Day');
+  const drawDayBtn = () => {
+    dayBtn.classList.toggle('on', mode === 'day');
+    setKids(dayBtn, icon('calendar', 20), mode === 'day' && h('span', {}, dayLabel(picked)));
+    seg.set(mode === 'day' ? null : mode);
+  };
+  function pickDay() {
+    const date = h('input', { type: 'date', value: picked, max: today(), 'aria-label': 'Day' });
+    sheet({ title: 'Sales on one day', saveLabel: 'Show', body: ssec(null, [srow({ label: 'Day', ctl: date, cls: 'text-row' })]), onSave: () => {
+      if (!date.value) return 'Pick a day';
+      picked = date.value; mode = 'day'; load();
+    } });
+  }
+  const bars = (title, rows, empty = 'No sales yet') => {
+    const max = Math.max(1, ...rows.map((r) => r.v));
+    return h('section', { class: 'rcard' }, h('h3', { class: 'ssec-title' }, title),
+      rows.length ? h('div', { class: 'bars' }, rows.map((r) => h('div', { class: 'bar-row' },
+        h('span', { class: 'bar-l' }, r.label), h('strong', {}, r.text),
+        h('span', { class: 'meter', role: 'img', 'aria-label': `${Math.round(r.v * 100 / (r.sum || max))}%` }, h('span', { class: 'fill', style: `width:${Math.max(2, Math.round(r.v * 100 / max))}%` })))))
+        : h('div', { class: 'rnone' }, empty));
+  };
+  const share = (list, label) => {
+    const sum = list.reduce((n, g) => n + g.total_cents, 0);
+    return list.map((g) => ({ label: label(g.key), v: g.total_cents, sum, text: `${g.count} · ${money(g.total_cents)}` }));
+  };
 
   // End of day: the open business day so far, the close button, past closes.
-  const drawEod = async (shown = null) => {
+  let prevOpen = false;
+  const drawEod = async () => {
     const day = await call('business_day');
     const now = Math.floor(Date.now() / 1000) + 1;
     const [s, closes] = await Promise.all([call('sales_summary', { from: day.since, to: now }), call('day_closes', { limit: 30 })]);
-    const report = h('pre', { class: 'report', hidden: !shown }, shown?.text ?? '');
-    const closeBtn = h('button', { class: 'primary', disabled: day.open_orders > 0 }, 'Close day & print summary');
-    closeBtn.onclick = act(async () => {
-      if (!closeBtn.dataset.sure) {
-        closeBtn.dataset.sure = '1';
-        closeBtn.textContent = `Tap again to close ${dayLabel(day.date)}`;
-        return;
-      }
-      closeBtn.disabled = true;
-      const r = await call('close_day');
-      await drawBusinessDay();
-      const c = r.view.close;
-      const msg = `${dayLabel(c.business_date)} closed: ${c.summary.order_count} orders, ${money(c.summary.total_cents)}. Now on ${dayLabel(state.day.date)}`;
-      if (r.empty) toast(`${dayLabel(c.business_date)} closed. No sales today, so nothing was printed. Now on ${dayLabel(state.day.date)}`);
-      else if (r.print.error) toast(`${msg}. The summary did not print (${r.print.error}); reprint it below.`, true);
-      else toast(r.print.attempted ? `${msg} · summary printed` : `${msg} · no receipt printer, summary shown below`);
-      await drawEod(r.view);
-    });
-    setKids(eod, 
-      h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, `End of day · ${dayLabel(day.date)}`),
-        h('span', { class: 'muted' }, `since ${friendlyTime(day.since)}`)),
-      h('div', { class: 'row' },
-        h('span', {}, `${s.order_count} paid orders · `, h('strong', {}, money(s.total_cents))),
-        ...s.by_payment.map((g) => h('span', { class: 'badge' }, `${payName(g.key, 'platform')} ${money(g.total_cents)}`)),
-        h('span', { style: 'flex:1' }),
-        day.open_orders > 0 && h('span', { class: 'badge warn' }, `${day.open_orders} open order(s): pay or cancel them first`),
+    // "Other" payments are the delivery apps': by its name when there was only one.
+    const platforms = s.by_channel.filter((c) => c.key !== 'Direct');
+    const apps = platforms.length === 1 ? platforms[0].key : 'Delivery apps';
+    const closeBtn = h('button', { class: 'primary', disabled: day.open_orders > 0, onclick: () => sheet({ title: `Close ${dayLabel(day.date)}?`, saveLabel: 'Close day',
+      body: ssec(null, [srow({ label: `${s.order_count} paid · ${money(s.total_cents)}`, hint: 'Prints the summary and starts the next day.' })]),
+      onSave: async () => {
+        const r = await call('close_day', {}, { quiet: true });
+        await drawBusinessDay();
+        const c = r.view.close;
+        const msg = `${dayLabel(c.business_date)} closed: ${c.summary.order_count} orders, ${money(c.summary.total_cents)}`;
+        if (r.empty) toast(`${dayLabel(c.business_date)} closed. No sales, nothing printed.`);
+        else if (r.print.error) toast(`${msg}. The summary did not print (${r.print.error})`, true);
+        else toast(r.print.attempted ? `${msg} · summary printed` : `${msg} · no receipt printer`);
+        setTimeout(async () => { await drawEod(); if (!r.empty) reportSheet(`${dayLabel(c.business_date)}`, r.view.text, () => call('reprint_day_close', { id: c.id })); });
+      } }) }, 'Close day');
+    setKids(eod,
+      h('div', { class: 'eod-main' },
+        h('div', { class: 'eod-text' }, h('strong', {}, `Business day · ${dayLabel(day.date)}`),
+          h('span', {}, `Since ${friendlyTime(day.since)} · ${s.order_count} paid · ${money(s.total_cents)}`),
+          s.by_payment.length > 0 && h('span', { class: 'eod-chips' }, s.by_payment.map((g) => h('span', { class: 'chip' }, `${payName(g.key, apps)} ${money(g.total_cents)}`)))),
+        day.open_orders > 0 && h('button', { class: 'pill bad pill-btn', onclick: () => go('orders') }, `${day.open_orders} open order${day.open_orders === 1 ? '' : 's'}`),
         closeBtn),
-      h('div', { class: 'muted' }, 'Closing prints the day\'s sales summary on the receipt printer and moves the business day to the next date.'),
-      report,
-      closes.length ? h('details', {}, h('summary', {}, 'Previous days'), h('table', {},
-        closes.map((v) => h('tr', {},
-          h('td', {}, dayLabel(v.close.business_date)), h('td', { class: 'muted' }, `closed ${fmtTime(v.close.to)} by ${v.close.closed_by_name}`),
-          h('td', { class: 'num' }, v.close.summary.order_count), h('td', { class: 'num' }, money(v.close.summary.total_cents)),
-          h('td', {}, h('button', { onclick: () => { report.textContent = v.text; report.hidden = false; } }, 'View'),
-            h('button', { onclick: act(async () => printResult(await call('reprint_day_close', { id: v.close.id }), 'Summary printed')) }, 'Print')))))) : '');
+      h('details', { class: 'eod-prev', open: prevOpen }, h('summary', { onclick: (e) => { prevOpen = !e.currentTarget.parentNode.open; } }, icon('chev', 16), 'Previous days', h('small', {}, `${closes.length}`)),
+        h('div', { class: 'eod-list' }, !closes.length && h('div', { class: 'rnone eod-none' }, 'No day closed yet'), closes.map((v) => srow({ label: dayLabel(v.close.business_date), cls: 'brow',
+          hint: `${v.close.closed_by_name} · ${ordersText(v.close.summary.order_count)} · ${friendlyTime(v.close.to)}`,
+          ctl: [h('strong', { class: 'eod-total' }, money(v.close.summary.total_cents)),
+            moreMenu(dayLabel(v.close.business_date), () => [h('button', { onclick: () => reportSheet(dayLabel(v.close.business_date), v.text, () => call('reprint_day_close', { id: v.close.id })) }, 'View'),
+              h('button', { onclick: act(async () => printResult(await call('reprint_day_close', { id: v.close.id }), 'Summary printed')) }, 'Print')])] })))));
   };
 
+  let loads = 0;
   const load = act(async () => {
-    const [from, to] = dayRange(date.value);
+    drawDayBtn();
+    const mine = ++loads;
+    const [from, to] = dayRange(dayOf());
     const [s, top] = await Promise.all([call('sales_summary', { from, to }), call('top_products', { from, to, limit: 20 })]);
-    setKids(out, h('div', { class: 'grid2' },
-      h('div', { class: 'stack' },
-        h('div', { class: 'card' }, h('h3', {}, 'Summary'), rows([
-          ['Paid orders', s.order_count], [s.tax_included_cents ? 'Sales (menu prices)' : 'Gross', money(s.subtotal_cents)], ['Discounts', money(s.discount_cents)],
-          ...(s.tax_cents - s.tax_included_cents ? [['Tax added on top', money(s.tax_cents - s.tax_included_cents)]] : []),
-          ['Service charge', money(s.service_cents)], ['Total', money(s.total_cents)],
-          ...(s.tip_cents ? [['Tips (not in total)', money(s.tip_cents)]] : []),
-          ...(s.tax_included_cents ? [['Tax included in prices', money(s.tax_included_cents)]] : []),
-          ['Voided / refunded', `${s.voided_count} (${money(s.voided_total_cents)})`], ['Cancelled', s.cancelled_count]])),
-        h('div', { class: 'card' }, h('h3', {}, 'By order type'),
-          rows(s.by_type.map((g) => [TYPE[g.key] ?? g.key, `${g.count} · ${money(g.total_cents)}`]))),
-        h('div', { class: 'card' }, h('h3', {}, 'By platform'),
-          rows(s.by_channel.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
-        h('div', { class: 'card' }, h('h3', {}, 'By payment'),
-          rows(s.by_payment.map((g) => [payName(g.key, 'Other / platform'), `${g.count} · ${money(g.total_cents)}`])))),
-      h('div', { class: 'stack' },
-        h('div', { class: 'card' }, h('h3', {}, 'By category (before tax)'),
-          rows(s.by_category.map((g) => [g.key, `${g.count} · ${money(g.total_cents)}`]))),
-        h('div', { class: 'card' }, h('h3', {}, 'Top items'), top.length ? h('table', {},
-          top.map((t) => h('tr', {}, h('td', {}, t.name), h('td', { class: 'num' }, t.qty), h('td', { class: 'num' }, money(t.revenue_cents))))) : none()))));
+    if (mine !== loads) return;
+    const pay = (k) => s.by_payment.find((g) => g.key === k)?.total_cents ?? 0;
+    period.textContent = `${{ today: 'Today · ', yesterday: 'Yesterday · ' }[mode] ?? ''}${dayLabel(dayOf())}`;
+    const kpi = (label, value, sub = null) => h('div', { class: 'kpi' }, h('small', {}, label), h('strong', {}, value), sub && h('span', { class: 'kpi-sub' }, sub));
+    setKids(kpis,
+      kpi('Sales', money(s.total_cents)),
+      kpi('Orders', String(s.order_count), s.voided_count ? `${s.voided_count} voided` : null),
+      kpi('Average bill', s.order_count ? money(Math.round(s.total_cents / s.order_count)) : '—'),
+      kpi('Tips', money(s.tip_cents), 'Not in sales'),
+      kpi(`${payName('cash')} · ${payName('card')}`, `${money(pay('cash'))} · ${money(pay('card'))}`));
+    const line = (k, v) => h('div', { class: 'sum-row' }, h('span', {}, k), h('strong', {}, v));
+    setKids(cards,
+      h('section', { class: 'rcard' }, h('h3', { class: 'ssec-title' }, 'Summary'), h('div', { class: 'sum-rows' },
+        line('Paid orders', s.order_count), line(s.tax_included_cents ? 'Sales (menu prices)' : 'Gross', money(s.subtotal_cents)), line('Discounts', money(s.discount_cents)),
+        s.tax_cents - s.tax_included_cents ? line('Tax added on top', money(s.tax_cents - s.tax_included_cents)) : null,
+        line('Service charge', money(s.service_cents)), h('div', { class: 'sum-row grand' }, h('span', {}, 'Total'), h('strong', {}, money(s.total_cents))),
+        s.tip_cents ? line('Tips (not in total)', money(s.tip_cents)) : null,
+        s.tax_included_cents ? line('Tax included in prices', money(s.tax_included_cents)) : null,
+        line('Voided / refunded', `${s.voided_count} · ${money(s.voided_total_cents)}`), line('Cancelled', s.cancelled_count))),
+      bars('By payment', share(s.by_payment, (k) => payName(k, 'Other / platform'))),
+      bars('By order type', share(s.by_type, (k) => TYPE[k] ?? k)),
+      s.by_channel.length > 0 && bars('By delivery app', share(s.by_channel, (k) => k)),
+      bars('By category (before tax)', share(s.by_category, (k) => k)),
+      bars('Top items', top.map((t) => ({ label: t.name, v: t.revenue_cents, text: `${t.qty} · ${money(t.revenue_cents)}` }))));
   });
-  date.onchange = load;
-  screen(h('div', { class: 'page' }, eod, h('div', { class: 'section-title' }, h('h3', {}, 'Sales by calendar day'), h('span', { class: 'spacer' }), date), out));
+  screen({ action: h('div', { class: 'dhead-tools' }, seg, dayBtn) }, h('div', { class: 'rpage' }, eod, h('div', { class: 'rperiod-wrap' }, period, kpis), cards));
   await Promise.all([drawEod(), load()]);
+}
+/// A printed report (day close, shift) as text in a sheet; `print()` prints it again.
+function reportSheet(title, text, print = null) {
+  sheet({ title, body: h('pre', { class: 'report' }, text),
+    left: print && h('button', { onclick: act(async () => printResult(await print(), 'Printed')) }, icon('printer', 18), 'Print') });
 }
 
 // ---------- settings (admin) ----------
 
 // ---------- customers ----------
 
+const ordersText = (n) => `${n} order${n === 1 ? '' : 's'}`;
 async function renderCustomers() {
   state.dirty = false;
-  const q = h('input', { placeholder: 'Phone, name or postcode', 'aria-label': 'Search customers', style: 'flex:1' });
-  const list = h('div');
-  const panel = h('div', { 'data-hint': 'Tap a customer to see them' });
+  const q = h('input', { type: 'search', placeholder: 'Phone, name or postcode', 'aria-label': 'Search customers', enterkeyhint: 'search' });
+  const list = h('div', { class: 'olist', role: 'list', 'aria-label': 'Customers' });
+  const panel = h('div', { class: 'md-body' });
+  const blank = () => setKids(panel, h('div', { class: 'sgroup md-empty' }, emptyState({ icon: 'customers', title: 'Tap a customer to see them' })));
   let timer;
   let found = [];
+  let openId = null;
   const load = async () => {
     found = await call('search_customers', { query: q.value, limit: 100 });
-    setKids(list, found.length ? h('table', {},
-      h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Phone'), h('th', {}, 'Address'), h('th', { class: 'num' }, 'Orders')),
-      found.map((c) => h('tr', { class: 'click', onclick: () => edit(c) },
-        h('td', {}, c.name), h('td', {}, c.phone ?? ''), h('td', { class: 'muted' }, addressText(c)),
-        h('td', { class: 'num' }, c.order_count))))
-      : emptyState({ icon: 'customers', title: q.value ? 'Nothing found' : 'No saved customers', text: q.value ? 'Try a phone number or postcode.' : 'They are added with delivery and collection orders.' }));
+    setKids(list, found.length ? found.map((c) => h('div', { class: `urow crow${c.id === openId ? ' on' : ''}`, role: 'listitem', tabindex: 0, 'data-id': c.id,
+      onclick: () => edit(c), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); edit(c); } } },
+    h('span', { class: 'avatar' }, initials(c.name || '?')),
+    h('span', { class: 'u-text' }, h('strong', {}, c.name || c.phone || '—'), h('small', {}, [c.phone, c.postcode].filter(Boolean).join(' · ') || addressText(c))),
+    c.order_count > 0 ? h('span', { class: 'pill plain' }, ordersText(c.order_count)) : h('span', {}),
+    h('span', { class: 'chev' }, icon('chev', 18))))
+      : emptyState({ icon: 'customers', title: q.value ? 'Nothing found' : 'No saved customers', text: q.value ? 'Try a phone number or postcode.' : 'They are added with delivery and collection orders.',
+        action: !q.value && h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Customer') }));
   };
   q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => load().catch(() => {}), 150); });
+  const mark = (id) => { openId = id; for (const r of list.querySelectorAll('.crow')) r.classList.toggle('on', Number(r.dataset.id) === id); };
 
   async function edit(c) {
     if (!leaveOk()) return;
-    const ce = customerEditor({ customer: c, search: false, saveToggle: false });
+    mark(c?.id ?? null);
+    const ce = customerEditor({ customer: c, search: false, saveToggle: false, rows: true });
     const history = h('div');
     const orderFor = (type) => act(async () => {
       await ce.commit(true);
@@ -4064,39 +4352,44 @@ async function renderCustomers() {
     });
     // Typed changes: the save bar (and Manage keeps you here until saved or let go).
     const bar = saveBar({ text: 'Not saved yet', onSave: async () => { const saved = await ce.commit(true); toast('Saved'); bar.update(0); await load(); await edit(saved); },
-      onDiscard: () => setTimeout(() => (c ? edit(c) : setKids(panel))) });
+      onDiscard: () => setTimeout(() => (c ? edit(c) : (blank(), md.close(true)))) });
     ce.el.addEventListener('input', () => bar.update(1));
     bar.classList.add('askable');
-    bar.closeTo = () => setKids(panel);
-    const close = () => (state.dirty ? bar.ask(bar.closeTo) : setKids(panel));
-    setKids(panel, h('div', { class: 'card stack' },
-      h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, c ? c.name : 'New customer'),
-        h('button', { class: 'ghost icon-btn', title: 'Close (Esc)', 'aria-label': 'Close', onclick: close }, icon('x'))),
-      ce.el, bar,
-      h('div', { class: 'row' },
-        c && typeShown('delivery') && h('button', { onclick: orderFor('delivery') }, 'New delivery order'),
-        c && typeShown('collection') && h('button', { onclick: orderFor('collection') }, 'New collection order'),
-        c && isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => {
-          await call('delete_customer', { id: c.id }); bar.update(0); toast('Customer removed'); setKids(panel); await load();
-        }, 'danger')),
+    bar.closeTo = () => { mark(null); blank(); md.close(true); };
+    setKids(panel, h('div', { class: 'ccard' },
+      h('div', { class: 'ucard-head' }, h('span', { class: 'avatar lg' }, initials(c?.name || '+')),
+        h('div', { class: 'ucard-title' }, h('h3', {}, c ? c.name || c.phone : 'New customer'), c && h('small', {}, ordersText(c.order_count))),
+        c && isAdmin() && moreMenu(c.name || 'customer', () => [confirmBtn('Delete', 'Tap again to delete', async () => {
+          closeInfoPop();
+          await call('delete_customer', { id: c.id }); bar.update(0); toast('Customer removed'); mark(null); blank(); md.close(true); await load();
+        }, 'ghost danger')])),
+      ce.el,
+      bar,
+      c && (typeShown('delivery') || typeShown('collection')) && h('div', { class: 'ccard-acts' },
+        typeShown('delivery') && h('button', { onclick: orderFor('delivery') }, icon('bike', 18), 'New delivery'),
+        typeShown('collection') && h('button', { onclick: orderFor('collection') }, icon('walk', 18), 'New collection')),
       history));
+    md.show();
     if (c) {
       const orders = await call('customer_orders', { id: c.id });
-      setKids(history, orders.length ? h('div', { class: 'stack' }, h('strong', {}, 'Recent orders'), h('table', {},
-        orders.map((o) => h('tr', { class: 'click', onclick: () => { if (leaveOk()) openOrder(o.id); } },
-          h('td', {}, `#${o.id}`), h('td', {}, fmtTime(o.opened_at)), h('td', {}, TYPE[o.order_type]),
-          h('td', {}, o.status), h('td', { class: 'num' }, money(o.total_cents)))))) : '');
+      setKids(history, orders.length ? ssec('Recent orders', orders.map((o) => h('div', { class: 'orow', role: 'button', tabindex: 0, onclick: () => { if (leaveOk()) openOrder(o.id); } },
+        h('span', { class: 'o-main' }, h('span', { class: 'o-l1' }, h('strong', {}, `#${o.id}`), h('span', { class: 'o-time' }, friendlyTime(o.opened_at)), typeChip(o.order_type)),
+          h('span', { class: 'o-l2' }, statusPill(o.status))),
+        h('strong', { class: 'o-total' }, money(o.total_cents)), h('span', { class: 'chev' }, icon('chev', 18))))) : '');
     }
     if (!c) { ce.focus(); tapFocus(document.activeElement); }
   }
 
-  screen({ action: h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Customer') }, h('div', { class: 'page split' },
-    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('div', { class: 'searchbox grow' }, icon('search', 20), q),
+  const md = masterDetail({ cls: 'md-customers', back: 'Customers',
+    list: [h('div', { class: 'md-tools' }, h('label', { class: 'searchbox grow' }, icon('search', 20), q),
       isAdmin() && h('button', { onclick: () => bulkDelete('Delete customers', found.map((c) => ({ id: c.id, label: c.name, sub: c.phone ?? '' })),
-        (ids) => deleteMany('customer', ids, 'customer(s)'), async () => { if (!state.dirty) setKids(panel); await load(); }) }, 'Select…')), h('div', { class: 'panel' }, list)),
-    h('div', { class: 'stack sticky' }, panel)));
+        (ids) => deleteMany('customer', ids, 'customer(s)'), async () => { if (!state.dirty) { mark(null); blank(); } await load(); }) }, 'Select…')),
+    h('div', { class: 'md-list' }, list)],
+    detail: panel });
+  blank();
+  screen({ action: h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Customer') }, md);
   await load();
-  q.focus();
+  if (wideQ.matches) q.focus();
 }
 
 /// Printer "Image mode" choices (saved value, label), numbered as on the
@@ -4217,7 +4510,8 @@ function leaveOk() {
   if (state.dirty) {
     toast('Save or discard first', true);
     const bar = document.querySelector('.savebar:not([hidden])');
-    if (bar) nudge(bar);
+    // Scrolled away (a phone, down at the table editor): bring it back into view.
+    if (bar) { bar.scrollIntoView({ block: 'nearest' }); nudge(bar); }
     return false;
   }
   return true;
@@ -4250,6 +4544,7 @@ window.addEventListener('popstate', () => {
   if (ignorePops) { ignorePops--; return; }
   const kind = backStack.pop();
   if (kind === 'sheet') return state.sheetBack?.();
+  if (kind === 'item') return state.itemBack?.();
   if (kind === 'sub') {
     if (!leaveOk()) { pushBack('sub'); return; }
     state.groupSub = null;
@@ -4267,7 +4562,7 @@ function manageBack() {
   state.groupSub = null;
   renderShell();
 }
-const tapBack = () => { if (!leaveOk()) return; if (backStack.at(-1) === 'detail') history.back(); else manageBack(); };
+const tapBack = () => { if (!leaveOk()) return; if (['detail', 'item'].includes(backStack.at(-1))) history.back(); else manageBack(); };
 
 /// Open a page ("p:history") or a settings group ("g:printers"), optionally
 /// showing one of its rows (a search result).
@@ -4291,9 +4586,11 @@ function openManage(item, row = null) {
 let mshell = null;
 /// Nothing of Manage outlives a login: unsaved list changes (the save bar's
 /// state.dirty), the open group, a search result to show, the side list, the
-/// phone's back steps. Called on every logout and login.
+/// phone's back steps, the Menu page's tab, order mode, removed items and
+/// open editor, the person picked in Staff. Called on every logout and login.
 function resetManage() {
-  Object.assign(state, { dirty: false, settingsTab: null, groupSub: null, findRow: null, sheetBack: null, groupGen: (state.groupGen ?? 0) + 1 });
+  Object.assign(state, { dirty: false, settingsTab: null, groupSub: null, findRow: null, sheetBack: null, itemBack: null, groupGen: (state.groupGen ?? 0) + 1,
+    menuTab: null, menuShown: null, menuReorder: false, menuRemoved: false, newSubOf: null, openEditor: null, staffSel: null });
   mshell = null;
   if (backStack.length) clearBack();
 }
@@ -4529,7 +4826,7 @@ const MANAGE_INDEX = [
   ['g:orders#show_delivery', 'Delivery', 'order types delivery own drivers button', 'admin'],
   ['g:orders#labels', 'Names on tickets', 'words labels dine-in takeaway collection delivery table call mains tickets bills', 'admin'],
   ['g:orders#discount_presets', 'Discount buttons', 'discount discounts percent', 'admin'],
-  ['g:orders#discount_staff_max_pct', 'Staff limit', 'discount limit manager pin', 'admin'],
+  ['g:orders#discount_staff_max_pct', 'Staff limit', 'discount discounts limit manager pin percent', 'manager'],
   ['g:orders#starter_choice', 'Ask “Starter or main?”', 'starter main course courses', 'kitchen'],
   ['g:orders#quick_notes', 'Quick notes', 'quick notes no onions extra spicy', 'kitchen'],
   ['g:orders#print_cancelled_order', 'Print CANCELLED ticket', 'cancel cancelled cancelling kitchen ticket', 'kitchen'],
@@ -5444,8 +5741,8 @@ async function ordersGroup() {
       keySwitch(raw, 'show_delivery', 'Delivery', { hint: 'Your own drivers' }),
       navRow({ id: 'labels', label: 'Names on tickets', value: labelsCustom ? 'Custom' : 'Standard', onOpen: () => labelsSheet(raw) }),
     ], 'Dine-in always shows. Open orders keep working.'),
-    admin && ssec('Discounts', [
-      chipRow({ id: 'discount_presets', label: 'Discount buttons', values: ui.discountPresets, max: 8, unit: '%',
+    ssec('Discounts', [
+      admin && chipRow({ id: 'discount_presets', label: 'Discount buttons', values: ui.discountPresets, max: 8, unit: '%',
         validate: (l) => { const i = l.findIndex((n) => !Number.isInteger(n) || n < 1 || n > 100); return i >= 0 ? { msg: 'Use whole numbers from 1 to 100 %', index: i } : null; },
         save: (l) => saveKey('discount_presets', l.join(',')) }),
       staffLimitRow(ui.discountLimit),
@@ -5458,16 +5755,16 @@ async function ordersGroup() {
     ssec('Cancel & fix', [
       keySwitch(raw, 'print_cancelled_order', 'Print CANCELLED ticket', { hint: 'When a whole order is cancelled',
         tip: 'Lists dishes still cooking. Off: nothing prints, so tell the kitchen. Removing one dish always prints.' }),
-      admin && keySwitch(raw, 'staff_cancel_sent', 'Staff can fix sent dishes', { hint: 'Off: admins only' }),
+      admin && keySwitch(raw, 'staff_cancel_sent', 'Staff can fix sent dishes', { hint: 'With a manager PIN. Off: managers and admins only' }),
     ]),
   ];
 }
 /// Staff limit on discounts: No limit, or Up to N % (more needs a manager's PIN).
 function staffLimitRow(limit) {
   let saved = limit, timer, row;
-  const step = stepper({ value: limit ?? 20, min: 0, max: 100, step: 5, unit: '%', label: 'Staff limit', onChange: (v) => {
+  const step = stepper({ value: limit ?? DISCOUNT_LIMIT_DEFAULT, min: 0, max: 100, step: 5, unit: '%', label: 'Staff limit', onChange: (v) => {
     clearTimeout(timer);
-    timer = setTimeout(async () => { if (await saveWith(row, () => saveKey('discount_staff_max_pct', v), () => step.set(saved ?? 20))) saved = v; }, 600);
+    timer = setTimeout(async () => { if (await saveWith(row, () => saveKey('discount_staff_max_pct', v), () => step.set(saved ?? DISCOUNT_LIMIT_DEFAULT))) saved = v; }, 600);
   } });
   step.hidden = limit == null;
   const seg = sseg([['none', 'No limit'], ['upto', 'Up to']], limit == null ? 'none' : 'upto', async (v, prev) => {
@@ -5852,7 +6149,8 @@ async function dataGroup() {
     invoke('backup_folder').catch(() => null)]);
   const [KMIN, KMAX, KDEF] = KEEP_LIMITS;
   const kept = Number(raw);
-  const last = files[0];
+  // The newest regular backup (daily, or Back up now): not a copy made before a restore, reset or update.
+  const last = files.find((f) => backupKind(f.name) === 'Backup');
   const backupBtn = h('button', { class: 'primary', onclick: async () => {
     const row = backupBtn.closest('.srow');
     backupBtn.disabled = true;

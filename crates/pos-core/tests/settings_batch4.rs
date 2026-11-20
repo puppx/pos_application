@@ -21,7 +21,7 @@ fn setup() -> Shop {
     let curry = pos
         .create_product(&admin, NewProduct {
             category_id: None, sku: None, barcode: None, name: "Curry".into(), price_cents: 1000,
-            cost_cents: 0, tax_rate_bp: 2000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(2000), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap();
     Shop { pos, admin, staff, curry }
@@ -88,14 +88,17 @@ fn hidden_order_types_still_work_on_the_server() {
 }
 
 #[test]
-fn without_a_limit_staff_discounts_work_as_before() {
+fn never_set_the_limit_is_10_percent_and_no_limit_is_stored_empty() {
     let mut shop = setup();
     let (_, line) = two_curries(&mut shop);
     let s = shop.staff.clone();
-    let o = shop.pos.update_item(&s, line, &disc(2, 1500)).unwrap();
-    assert_eq!(o.discount_cents, 1500);
-    // An empty limit is no limit too.
+    // Never set: staff may give up to 10% (2.00 of 20.00) alone.
+    assert_eq!(shop.pos.update_item(&s, line, &disc(2, 200)).unwrap().discount_cents, 200);
+    let err = shop.pos.update_item(&s, line, &disc(2, 1500)).unwrap_err();
+    assert_eq!(err.to_string(), "a discount over 10% needs a manager PIN");
+    // "No limit" (an empty value) is no limit.
     shop.pos.set_setting(&shop.admin, DISCOUNT_LIMIT_KEY, "").unwrap();
+    assert_eq!(shop.pos.update_item(&s, line, &disc(2, 1500)).unwrap().discount_cents, 1500);
     assert_eq!(shop.pos.update_item(&s, line, &disc(2, 2000)).unwrap().discount_cents, 2000);
 }
 
@@ -204,7 +207,7 @@ fn a_discount_at_the_limit_rounds_to_the_nearest_penny() {
     let fries = shop.pos
         .create_product(&admin, NewProduct {
             category_id: None, sku: None, barcode: None, name: "Fries".into(), price_cents: 350,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap();
     let o = takeaway(&mut shop.pos, &s);

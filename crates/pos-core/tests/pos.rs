@@ -23,7 +23,7 @@ fn item(pos: &mut Pos, admin: &Session, name: &str, price: i64, tax_bp: i64, sto
             name: name.into(),
             price_cents: price,
             cost_cents: 0,
-            tax_rate_bp: tax_bp,
+            tax_rate_bp: Some(tax_bp),
             stock_qty: stock.unwrap_or(0),
             track_stock: stock.is_some(),
             starter: false, name_alt: None, prep: false, team_id: None,
@@ -233,6 +233,8 @@ fn sent_items_need_admin_to_remove() {
     let s = staff(&mut pos, &admin);
     let (_, g, _, _) = floors(&mut pos, &admin);
     let burger = item(&mut pos, &admin, "Burger", 1000, 0, None);
+    // No staff discount limit here (see money_approval.rs for the limit).
+    pos.set_setting(&admin, DISCOUNT_LIMIT_KEY, "").unwrap();
     let o = pos.open_order(&s, &dine_in(g[0].id)).unwrap();
     let o = pos.add_item(&s, o.id, burger.id, 2, None, None, &[]).unwrap();
     let line = o.items[0].id;
@@ -248,8 +250,11 @@ fn sent_items_need_admin_to_remove() {
     // Discount on a sent item is fine for staff.
     let o = pos.update_item(&s, line, &ItemUpdate { qty: 3, discount_cents: 500, note: keep_note.clone() }).unwrap();
     assert_eq!(o.total_cents, 2500);
-    // By default staff may fix a mistake: reduce a sent line and change its note.
-    let o = pos.update_item(&s, line, &reduce).unwrap();
+    // By default staff may fix a mistake with a manager's or admin's PIN:
+    // reduce a sent line; its note they change alone.
+    assert!(pos.update_item(&s, line, &reduce).unwrap_err().to_string().contains("needs a manager PIN"));
+    let owner = pos.pin_owner_for("1111", Some(s.user_id)).unwrap();
+    let o = pos.update_item_approved(&s, Some(&owner), line, &reduce).unwrap();
     assert_eq!(o.items[0].qty, 2);
     let o = pos.update_item(&s, line, &ItemUpdate { qty: 2, discount_cents: 500, note: Some("no onion".into()) }).unwrap();
     assert_eq!(o.items[0].note.as_deref(), Some("no onion"));
@@ -354,7 +359,7 @@ fn price_is_fixed_when_item_is_added() {
     pos.add_item(&admin, o.id, p.id, 1, None, None, &[]).unwrap();
     let upd = ProductUpdate {
         category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 900,
-        cost_cents: 0, tax_rate_bp: 0, track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
+        cost_cents: 0, tax_rate_bp: Some(0), track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
     };
     pos.update_product(&admin, p.id, upd).unwrap();
     // Existing line keeps 5.00; a new tap at 9.00 becomes its own line.
@@ -375,7 +380,7 @@ fn categories_and_menu_order() {
     for (name, cat) in [("Water", Some(drinks.id)), ("Steak", Some(mains.id)), ("Bread", None), ("Cola", Some(drinks.id))] {
         pos.create_product(&admin, NewProduct {
             category_id: cat, sku: None, barcode: None, name: name.into(), price_cents: 100,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         }).unwrap();
     }
     let names: Vec<_> = pos.menu(&admin).unwrap().into_iter().map(|p| p.name).collect();
@@ -384,7 +389,7 @@ fn categories_and_menu_order() {
     assert_eq!(pos.list_categories(&admin, false).unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Mains", "Drinks"]);
     let bad = NewProduct {
         category_id: Some(999), sku: None, barcode: None, name: "X".into(), price_cents: 1,
-        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+        cost_cents: 0, tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     };
     assert!(pos.create_product(&admin, bad).is_err());
 }
@@ -395,7 +400,7 @@ fn search_and_barcode_lookup() {
     for (name, code) in [("Coca Cola 330ml", "500"), ("Chocolate Cake", "501"), ("100% Juice", "502")] {
         pos.create_product(&admin, NewProduct {
             category_id: None, sku: None, barcode: Some(code.into()), name: name.into(), price_cents: 100,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         }).unwrap();
     }
     let names = |v: Vec<Product>| v.into_iter().map(|p| p.name).collect::<Vec<_>>();

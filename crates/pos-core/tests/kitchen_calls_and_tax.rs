@@ -19,7 +19,7 @@ fn setup() -> (Pos, Session, Menu, i64) {
     let mut item = |name: &str, price, cat: i64, starter| {
         pos.create_product(&admin, NewProduct {
             category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter, name_alt: None, prep: false, team_id: None,
         })
         .unwrap()
     };
@@ -126,7 +126,7 @@ fn tax_can_be_changed_on_one_order() {
     let p = &m.burger;
     pos.update_product(&s, p.id, ProductUpdate {
         category_id: p.category_id, sku: None, barcode: None, name: p.name.clone(), price_cents: 1000, cost_cents: 0,
-        tax_rate_bp: 2000, track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
+        tax_rate_bp: Some(2000), track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap();
     pos.create_user(&s, "Sam", Role::Staff, "2222").unwrap();
@@ -136,23 +136,25 @@ fn tax_can_be_changed_on_one_order() {
     pos.add_item(&staff, o.id, m.cola.id, 1, None, None, &[]).unwrap();
     assert_eq!((o.tax_bp, o.tax_cents), (None, 200));
 
-    // Staff set 0% (tax-free customer): every line, and lines added after.
-    let o = pos.set_order_tax(&staff, o.id, Some(0)).unwrap();
+    // Staff set 0% (tax-free customer) with a manager's say-so: every line, and lines added after.
+    let err = pos.set_order_tax(&staff, o.id, Some(0)).unwrap_err();
+    assert_eq!(err.to_string(), "changing the tax on an order needs a manager PIN");
+    let o = pos.set_order_tax_approved(&staff, Some(&s), o.id, Some(0)).unwrap();
     assert_eq!((o.tax_bp, o.tax_cents, o.total_cents), (Some(0), 0, 1250));
     let o = pos.add_item(&staff, o.id, m.burger.id, 1, Some("no salt"), None, &[]).unwrap();
     assert_eq!(o.tax_cents, 0);
     // A different rate.
-    let o = pos.set_order_tax(&staff, o.id, Some(500)).unwrap();
+    let o = pos.set_order_tax_approved(&staff, Some(&s), o.id, Some(500)).unwrap();
     assert!(o.items.iter().all(|i| i.tax_rate_bp == 500));
-    assert!(pos.set_order_tax(&staff, o.id, Some(10_001)).is_err());
-    // Back to the menu rates.
+    assert!(pos.set_order_tax(&s, o.id, Some(10_001)).is_err());
+    // Back to the menu rates: anyone's.
     let o = pos.set_order_tax(&staff, o.id, None).unwrap();
     assert_eq!(o.tax_bp, None);
     assert_eq!(o.items.iter().map(|i| i.tax_rate_bp).collect::<Vec<_>>(), [2000, 0, 2000]);
     assert_eq!(o.tax_cents, 400);
 
     // Paid orders keep their tax.
-    let o = pos.set_order_tax(&staff, o.id, Some(0)).unwrap();
+    let o = pos.set_order_tax(&s, o.id, Some(0)).unwrap();
     let paid = pos.pay_order(&staff, o.id, PaymentMethod::Card, 0).unwrap();
     assert_eq!((paid.tax_cents, paid.total_cents), (0, 2250));
     assert!(pos.set_order_tax(&staff, paid.id, None).is_err());

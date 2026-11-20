@@ -14,7 +14,7 @@ fn staff(pos: &mut Pos, admin: &Session) -> Session {
 fn item(pos: &mut Pos, admin: &Session) -> Product {
     pos.create_product(admin, NewProduct {
         category_id: None, sku: None, barcode: None, name: "Pizza".into(), price_cents: 1000,
-        cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+        cost_cents: 0, tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap()
 }
@@ -210,7 +210,7 @@ fn old_paid_orders_get_their_payment_on_upgrade() {
         let admin = pos.setup_first_admin("Owner", "1111").unwrap();
         let soup = pos
             .create_product(&admin, NewProduct {
-                category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: 0,
+                category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: Some(0),
                 stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
             })
             .unwrap();

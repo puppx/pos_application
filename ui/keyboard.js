@@ -103,9 +103,11 @@
     if (!el) return;
     if (el.tagName === 'TEXTAREA') return insert('\n');
     const init = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    // Closes once the tap is over, unless the app's Enter moved on to another
+    // field with OSK.open (e.g. a form's next box): then it stays for that one.
+    hideAfterKey();
     el.dispatchEvent(new KeyboardEvent('keydown', init));
     el.dispatchEvent(new KeyboardEvent('keyup', init));
-    hideAfterKey();
   }
   // The field after this one in the same dialog, pop-up, form or card, for
   // the Next key (null on the last field, or a field on its own).
@@ -357,6 +359,7 @@
       if (!S.enabled || !el) return;
       clearTimeout(pendingHide);
       hideAfterTap = false;
+      hideAfterKeyTap = false;
       if (S.el !== el || !S.visible) show(el);
     },
   };

@@ -29,7 +29,7 @@ fn setup() -> (Pos, Session, Menu) {
     let mut item = |name: &str, price, cat: Option<i64>| {
         pos.create_product(&admin, NewProduct {
             category_id: cat, sku: None, barcode: None, name: name.into(), price_cents: price,
-            cost_cents: 0, tax_rate_bp: 1000, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(1000), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap()
     };
@@ -216,7 +216,7 @@ fn staff_copy_breaks_the_tax_down_by_class() {
     let (mut pos, s, m) = setup();
     // Bread at 0%, the rest at 10%, prices on top of tax.
     pos.update_product(&s, m.bread.id, ProductUpdate {
-        category_id: None, sku: None, barcode: None, name: "Bread".into(), price_cents: 200, cost_cents: 0, tax_rate_bp: 0,
+        category_id: None, sku: None, barcode: None, name: "Bread".into(), price_cents: 200, cost_cents: 0, tax_rate_bp: Some(0),
         track_stock: false, active: true, starter: false, name_alt: None, prep: false, team_id: None,
     })
     .unwrap();

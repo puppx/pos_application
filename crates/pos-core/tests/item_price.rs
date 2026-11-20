@@ -14,7 +14,7 @@ fn setup() -> (Pos, Session, Session, Session, i64) {
     let p = pos
         .create_product(&admin, NewProduct {
             category_id: Some(cat.id), sku: None, barcode: None, name: "Curry".into(), price_cents: 1000,
-            cost_cents: 0, tax_rate_bp: 0, stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            cost_cents: 0, tax_rate_bp: Some(0), stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap();
     (pos, admin, staff, manager, p.id)

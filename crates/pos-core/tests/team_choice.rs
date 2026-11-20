@@ -26,7 +26,7 @@ fn setup() -> Kit {
     let cat = pos.create_category(&s, "Food", None, 1).unwrap().id;
     let item = |pos: &mut Pos, name: &str, is_starter: bool, team: i64| {
         pos.create_product(&s, NewProduct {
-            category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 0,
+            category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(0),
             stock_qty: 0, track_stock: false, starter: is_starter, name_alt: None, prep: false, team_id: Some(team),
         })
         .unwrap()
@@ -195,7 +195,7 @@ fn dishes_without_a_move_follow_the_menu_as_before() {
     k.pos
         .update_product(&k.s, p.id, ProductUpdate {
             category_id: p.category_id, sku: p.sku.clone(), barcode: p.barcode.clone(), name: p.name.clone(), price_cents: p.price_cents,
-            cost_cents: p.cost_cents, tax_rate_bp: p.tax_rate_bp, track_stock: p.track_stock, active: true, starter: p.starter,
+            cost_cents: p.cost_cents, tax_rate_bp: Some(p.tax_rate_bp), track_stock: p.track_stock, active: true, starter: p.starter,
             name_alt: None, prep: false, team_id: Some(k.main),
         })
         .unwrap();

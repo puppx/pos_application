@@ -19,7 +19,7 @@ fn setup() -> Kit {
     let cat = pos.create_category(&s, "Food", None, 1).unwrap().id;
     let item = |pos: &mut Pos, name: &str, price: i64| {
         pos.create_product(&s, NewProduct {
-            category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: price, cost_cents: 0, tax_rate_bp: 1000,
+            category_id: Some(cat), sku: None, barcode: None, name: name.into(), price_cents: price, cost_cents: 0, tax_rate_bp: Some(1000),
             stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         })
         .unwrap()
@@ -182,7 +182,7 @@ fn sets_and_their_dishes_can_be_deleted() {
 fn a_section_can_say_what_its_dishes_come_with() {
     let mut k = setup();
     let noodles = k.pos.create_product(&k.s, NewProduct {
-        category_id: None, sku: None, barcode: None, name: "Egg noodles".into(), price_cents: 0, cost_cents: 0, tax_rate_bp: 0,
+        category_id: None, sku: None, barcode: None, name: "Egg noodles".into(), price_cents: 0, cost_cents: 0, tax_rate_bp: Some(0),
         stock_qty: 0, track_stock: false, starter: false, name_alt: Some("บะหมี่".into()), prep: false, team_id: None,
     }).unwrap();
     // Main comes with rice or noodles; two mains to choose.
@@ -224,7 +224,7 @@ fn set_dishes_can_have_choices_and_options() {
     let mut k = setup();
     // Pad Thai: chicken or beef (a choice), and extras (prawns +2.00).
     let pad = k.pos.create_product(&k.s, NewProduct {
-        category_id: None, sku: None, barcode: None, name: "Pad Thai".into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: 1000,
+        category_id: None, sku: None, barcode: None, name: "Pad Thai".into(), price_cents: 1000, cost_cents: 0, tax_rate_bp: Some(1000),
         stock_qty: 0, track_stock: false, starter: false, name_alt: Some("ผัดไทย".into()), prep: false, team_id: None,
     }).unwrap();
     let vs = k.pos.set_variants(&k.s, pad.id, &[

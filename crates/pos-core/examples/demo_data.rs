@@ -69,7 +69,7 @@ fn main() -> Result<()> {
                 name: (*name).into(),
                 price_cents: *price,
                 cost_cents: 0,
-                tax_rate_bp: 1000,
+                tax_rate_bp: Some(1000),
                 stock_qty: 0,
                 track_stock: false,
                 starter: *cat == "Starters", name_alt: None, prep: false, team_id: None,

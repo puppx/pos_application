@@ -62,13 +62,10 @@ pub struct TableLayout {
     pub y: i64,
     pub w: i64,
     pub h: i64,
-    /// See `DiningTable::is_table`; a table unless the editor says otherwise.
-    #[serde(default = "yes")]
-    pub is_table: bool,
-}
-
-fn yes() -> bool {
-    true
+    /// See `DiningTable::is_table`. Missing (None), e.g. from a till with an
+    /// older page open: a kept shape stays as it is and a new one is a table.
+    #[serde(default)]
+    pub is_table: Option<bool>,
 }
 
 /// A table plus its open order, if any, for the live floor view.
@@ -296,7 +293,7 @@ impl Pos {
         }
         for (id, name, busy) in &existing {
             // A table with an open bill stays a table until the bill is closed.
-            if *busy && tables.iter().any(|t| t.id == Some(*id) && !t.is_table) {
+            if *busy && tables.iter().any(|t| t.id == Some(*id) && t.is_table == Some(false)) {
                 return invalid(format!("table {name} has an open order: it stays a table until that order is paid or moved"));
             }
             if !keep.contains(id) {
@@ -314,7 +311,7 @@ impl Pos {
         )?;
         {
             let mut upd = tx.prepare(
-                "UPDATE dining_tables SET name = ?2, shape = ?3, x = ?4, y = ?5, w = ?6, h = ?7, is_table = ?8 WHERE id = ?1",
+                "UPDATE dining_tables SET name = ?2, shape = ?3, x = ?4, y = ?5, w = ?6, h = ?7, is_table = COALESCE(?8, is_table) WHERE id = ?1",
             )?;
             let mut ins = tx.prepare(
                 "INSERT INTO dining_tables (floor_id, name, shape, x, y, w, h, is_table) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -322,7 +319,7 @@ impl Pos {
             for (t, name) in &cleaned {
                 match t.id {
                     Some(id) => upd.execute(params![id, name, t.shape.as_str(), t.x, t.y, t.w, t.h, t.is_table])?,
-                    None => ins.execute(params![floor_id, name, t.shape.as_str(), t.x, t.y, t.w, t.h, t.is_table])?,
+                    None => ins.execute(params![floor_id, name, t.shape.as_str(), t.x, t.y, t.w, t.h, t.is_table.unwrap_or(true)])?,
                 };
             }
         }

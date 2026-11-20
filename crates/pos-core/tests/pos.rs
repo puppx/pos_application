@@ -33,7 +33,7 @@ fn item(pos: &mut Pos, admin: &Session, name: &str, price: i64, tax_bp: i64, sto
 }
 
 fn layout(id: Option<i64>, name: &str, x: i64) -> TableLayout {
-    TableLayout { is_table: true, id, name: name.into(), shape: TableShape::Rect, x, y: 10, w: 80, h: 80 }
+    TableLayout { is_table: Some(true), id, name: name.into(), shape: TableShape::Rect, x, y: 10, w: 80, h: 80 }
 }
 
 /// Two floors: "Ground" with T1, T2 and "First" with T10.
@@ -128,7 +128,7 @@ fn multi_floor_layout_editing() {
             &admin,
             ground.id,
             &[
-                TableLayout { is_table: true, id: Some(g[0].id), name: "T2".into(), shape: TableShape::Round, x: 500, y: 300, w: 100, h: 100 },
+                TableLayout { is_table: Some(true), id: Some(g[0].id), name: "T2".into(), shape: TableShape::Round, x: 500, y: 300, w: 100, h: 100 },
                 layout(Some(g[1].id), "T1", 120),
                 layout(None, "T3", 240),
             ],

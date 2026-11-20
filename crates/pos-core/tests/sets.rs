@@ -39,7 +39,7 @@ fn setup() -> Kit {
     let set = pos.get_product(&s, set.id).unwrap();
     let floor = pos.create_floor(&s, "Ground").unwrap();
     let t = pos
-        .save_floor_layout(&s, floor.id, &[TableLayout { is_table: true, id: None, name: "4".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+        .save_floor_layout(&s, floor.id, &[TableLayout { is_table: Some(true), id: None, name: "4".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
     pos.set_kitchen_printer(&s, &PrinterConfig {
         target: PrinterTarget::File { path: std::env::temp_dir().join("pos-sets-unused.bin").display().to_string() },

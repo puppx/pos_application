@@ -546,9 +546,10 @@ fn copy_line(tx: &Transaction, item: i64, order_id: i64, qty: i64, discount: i64
     tx.execute(
         "INSERT INTO order_items (order_id, product_id, name, unit_price_cents, tax_rate_bp, qty, discount_cents, note, sent_at,
                                   added_by, added_at, name_alt, starter, held, variant_id, prep, prep_sent_at, is_set,
-                                  parent_id, section_name, section_alt, with_name, with_alt, team_id)
+                                  parent_id, section_name, section_alt, with_name, with_alt, team_id, menu_price_cents)
          SELECT ?2, product_id, name, unit_price_cents, tax_rate_bp, ?3, ?4, note, sent_at, added_by, added_at, name_alt, starter,
-                held, variant_id, prep, prep_sent_at, is_set, COALESCE(?5, parent_id), section_name, section_alt, with_name, with_alt, team_id
+                held, variant_id, prep, prep_sent_at, is_set, COALESCE(?5, parent_id), section_name, section_alt, with_name, with_alt, team_id,
+                menu_price_cents
          FROM order_items WHERE id = ?1",
         params![item, order_id, qty, discount, parent],
     )?;
@@ -976,7 +977,7 @@ impl Pos {
                     "SELECT id FROM order_items
                      WHERE order_id = ?1 AND product_id = ?2 AND sent_at IS NULL AND note IS NULL
                        AND parent_id IS NULL AND is_set = 0 AND discount_cents = 0 AND unit_price_cents = ?3 AND qty + ?4 <= ?5
-                       AND variant_id IS ?6 AND starter = ?7 AND team_id IS ?8
+                       AND variant_id IS ?6 AND starter = ?7 AND team_id IS ?8 AND menu_price_cents IS NULL
                      ORDER BY id DESC",
                 )?
                 .query_map(params![order_id, product_id, price, qty, MAX_QTY, variant_id, starter, team], |r| r.get(0))?
@@ -1187,6 +1188,27 @@ impl Pos {
             if !(0..=cur.unit_price_cents * upd.qty).contains(&upd.discount_cents) {
                 return invalid(format!("invalid discount on {}", cur.name));
             }
+            // More of a dish whose price was made cheaper on this order: the
+            // same say-so as the cheaper price (set_item_price), or one
+            // approved line becomes many.
+            if upd.qty > cur.qty && !s.role.can(Permission::AnyDiscount) {
+                let menu: Option<i64> =
+                    tx.query_row("SELECT menu_price_cents FROM order_items WHERE id = ?1", [item_id], |r| r.get(0))?;
+                if menu.is_some_and(|m| cur.unit_price_cents < m) {
+                    match approver {
+                        None => return invalid("more of a dish at a changed price needs a manager PIN"),
+                        Some(a) if !a.role.can(Permission::AnyDiscount) => {
+                            return invalid("more of a dish at a changed price needs a manager's or admin's PIN")
+                        }
+                        Some(a) => audit_tx(
+                            &tx,
+                            a.user_id,
+                            "order.price_qty_approved",
+                            &format!("order {order_id} {} x{} -> x{} at {} for {}", cur.name, cur.qty, upd.qty, cur.unit_price_cents, s.name),
+                        )?,
+                    }
+                }
+            }
             // A bigger share off than before, over the staff limit: a manager's or admin's say-so.
             let more = upd.discount_cents * cur.qty > cur.discount_cents * upd.qty;
             if more && !s.role.can(Permission::AnyDiscount) {
@@ -1257,8 +1279,9 @@ impl Pos {
             }
         };
         let discount = cur.discount_cents.min(price_cents * cur.qty);
+        // The first price stays as the line's menu price (see update_item_approved).
         tx.execute(
-            "UPDATE order_items SET unit_price_cents = ?2, discount_cents = ?3 WHERE id = ?1",
+            "UPDATE order_items SET unit_price_cents = ?2, discount_cents = ?3, menu_price_cents = COALESCE(menu_price_cents, unit_price_cents) WHERE id = ?1",
             params![item_id, price_cents, discount],
         )?;
         audit_tx(

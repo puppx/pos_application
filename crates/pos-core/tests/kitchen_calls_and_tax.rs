@@ -147,8 +147,11 @@ fn tax_can_be_changed_on_one_order() {
     let o = pos.set_order_tax_approved(&staff, Some(&s), o.id, Some(500)).unwrap();
     assert!(o.items.iter().all(|i| i.tax_rate_bp == 500));
     assert!(pos.set_order_tax(&s, o.id, Some(10_001)).is_err());
-    // Back to the menu rates: anyone's.
-    let o = pos.set_order_tax(&staff, o.id, None).unwrap();
+    // Back to the menu rates: the cola would drop from 5% to its 0%, so staff
+    // need a manager's say-so (raising or keeping the tax would be theirs).
+    let err = pos.set_order_tax(&staff, o.id, None).unwrap_err();
+    assert_eq!(err.to_string(), "changing the tax on an order needs a manager PIN");
+    let o = pos.set_order_tax_approved(&staff, Some(&s), o.id, None).unwrap();
     assert_eq!(o.tax_bp, None);
     assert_eq!(o.items.iter().map(|i| i.tax_rate_bp).collect::<Vec<_>>(), [2000, 0, 2000]);
     assert_eq!(o.tax_cents, 400);

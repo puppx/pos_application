@@ -1906,7 +1906,7 @@ async function renderOrder() {
     const presets = [...new Set([0, state.defaultTax || 0, 500, 2000])].sort((a, b) => a - b);
     const custom = h('input', { inputmode: 'decimal', placeholder: '%', style: 'width:80px', value: order.tax_bp != null ? pct(order.tax_bp) : '' });
     const set = (bp) => act(async () => {
-      // A rate for the whole order: staff need a manager's PIN ("Menu rates" never does).
+      // A rate for the whole order, or "Menu rates" when that lowers the tax: staff need a manager's PIN.
       const label = (v) => (v == null ? 'menu rates' : `${pct(v)}%`);
       const r = await managerRetry('set_order_tax', { orderId, rateBp: bp }, {
         hint: `Tax on this order: ${label(order.tax_bp)} → ${label(bp)}. A manager or admin enters their PIN to approve.`,

@@ -404,3 +404,91 @@ fn staff_pay_by_other_only_on_delivery_app_orders_or_with_a_managers_pin() {
     k.pos.add_item(&k.staff, d.id, k.curry.id, 1, None, None, &[]).unwrap();
     assert_eq!(k.pos.pay_order(&k.staff, d.id, PaymentMethod::Other, 0).unwrap().status, "paid");
 }
+
+#[test]
+fn staff_moving_dishes_off_a_bill_with_a_higher_tax_onto_menu_rates_need_a_managers_pin() {
+    let mut k = setup();
+    let floor = k.pos.create_floor(&k.admin, "Upstairs").unwrap();
+    let layout: Vec<TableLayout> =
+        (2..=4).map(|n| TableLayout { is_table: Some(true), id: None, name: n.to_string(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }).collect();
+    let tables: Vec<i64> = k.pos.save_floor_layout(&k.admin, floor.id, &layout).unwrap().into_iter().map(|t| t.id).collect();
+    // Table 1's bill: 25% for the whole bill (above the curry's 20%), set by the owner.
+    let a = open(&mut k);
+    k.pos.set_order_tax(&k.admin, a.id, Some(2500)).unwrap();
+    let line = a.items[0].id;
+    // Table 2's bill at the menu's rates.
+    let b = k.pos.open_order(&k.staff, &NewOrder { order_type: OrderType::DineIn, table_id: Some(tables[0]), channel_id: None, details: Default::default() }).unwrap();
+    k.pos.add_item(&k.staff, b.id, k.curry.id, 1, None, None, &[]).unwrap();
+    let tax = "moving dishes to a bill with a lower tax";
+
+    // The moved curry would drop from 25% to 20%: refused alone, and nothing moves.
+    let err = k.pos.move_items(&k.staff, a.id, tables[0], &[(line, 1)]).unwrap_err();
+    assert_eq!(err.to_string(), format!("{tax} needs a manager PIN"));
+    let own = k.pos.pin_owner_for("2222", Some(k.staff.user_id)).unwrap();
+    let err = k.pos.move_items_approved(&k.staff, Some(&own), a.id, tables[0], &[(line, 1)]).unwrap_err();
+    assert_eq!(err.to_string(), format!("{tax} needs a manager's or admin's PIN"));
+    assert_eq!(k.pos.get_order(&k.staff, a.id).unwrap().items[0].qty, 2);
+    assert_eq!(k.pos.get_order(&k.staff, b.id).unwrap().items.len(), 1);
+    let err = k.pos.merge_into_table(&k.staff, a.id, tables[0]).unwrap_err();
+    assert_eq!(err.to_string(), format!("{tax} needs a manager PIN"));
+
+    // With Quinn's PIN: moved, at the menu's 20%, and logged.
+    let quinn = k.pos.pin_owner_for("4646", Some(k.staff.user_id)).unwrap();
+    let o = k.pos.move_items_approved(&k.staff, Some(&quinn), a.id, tables[0], &[(line, 1)]).unwrap();
+    assert_eq!(o.id, b.id);
+    assert!(o.items.iter().all(|i| i.tax_rate_bp == 2000), "{:?}", o.items);
+    let note = format!("(PIN of Quinn #{}, manager)", k.manager.user_id);
+    assert!(last_audit(&k.pos, "order.move_items").unwrap().1.ends_with(&note));
+    let o = k.pos.merge_into_table_approved(&k.staff, Some(&quinn), a.id, tables[0]).unwrap();
+    assert_eq!((o.id, o.items.iter().map(|i| i.qty).sum::<i64>()), (b.id, 3));
+    assert!(last_audit(&k.pos, "order.merge").unwrap().1.ends_with(&note));
+
+    // The same rate stays free: off a 25% bill onto another 25% bill, or a free table.
+    let c = k.pos.open_order(&k.staff, &NewOrder { order_type: OrderType::DineIn, table_id: Some(tables[1]), channel_id: None, details: Default::default() }).unwrap();
+    let c = k.pos.add_item(&k.staff, c.id, k.curry.id, 2, None, None, &[]).unwrap();
+    k.pos.set_order_tax(&k.admin, c.id, Some(2500)).unwrap();
+    let o = k.pos.move_items(&k.staff, c.id, tables[2], &[(c.items[0].id, 1)]).unwrap();
+    assert_eq!((o.tax_bp, o.items[0].tax_rate_bp), (Some(2500), 2500));
+    let o = k.pos.merge_into_table(&k.staff, c.id, tables[2]).unwrap();
+    assert!(o.items.iter().all(|i| i.tax_rate_bp == 2500));
+    assert!(!last_audit(&k.pos, "order.merge").unwrap().1.contains("PIN"));
+}
+
+#[test]
+fn staff_go_back_to_menu_rates_freely_only_when_that_does_not_lower_the_tax() {
+    let mut k = setup();
+    let o = open(&mut k);
+    // The owner set 25% for the whole bill, above the curry's 20%.
+    k.pos.set_order_tax(&k.admin, o.id, Some(2500)).unwrap();
+    let logged = audits(&k.pos, "order.tax");
+    let err = k.pos.set_order_tax(&k.staff, o.id, None).unwrap_err();
+    assert_eq!(err.to_string(), "changing the tax on an order needs a manager PIN");
+    let own = k.pos.pin_owner_for("2222", Some(k.staff.user_id)).unwrap();
+    let err = k.pos.set_order_tax_approved(&k.staff, Some(&own), o.id, None).unwrap_err();
+    assert_eq!(err.to_string(), "changing the tax on an order needs a manager's or admin's PIN");
+    let o = k.pos.get_order(&k.staff, o.id).unwrap();
+    assert_eq!(o.tax_bp, Some(2500));
+    assert!(o.items.iter().all(|i| i.tax_rate_bp == 2500));
+    assert_eq!(audits(&k.pos, "order.tax"), logged);
+
+    // With Quinn's PIN: back to 20%, and the log says who approved it.
+    let quinn = k.pos.pin_owner_for("4646", Some(k.staff.user_id)).unwrap();
+    let o = k.pos.set_order_tax_approved(&k.staff, Some(&quinn), o.id, None).unwrap();
+    assert_eq!(o.tax_bp, None);
+    assert!(o.items.iter().all(|i| i.tax_rate_bp == 2000));
+    let (user, detail) = last_audit(&k.pos, "order.tax").unwrap();
+    assert_eq!(user, Some(k.staff.user_id));
+    assert_eq!(detail, format!("{} None (was Some(2500)) (PIN of Quinn #{}, manager)", o.id, k.manager.user_id));
+
+    // From the same rate (20%) or a lower one (5%), menu rates are staff's own.
+    for rate in [2000, 500] {
+        k.pos.set_order_tax(&k.admin, o.id, Some(rate)).unwrap();
+        let o = k.pos.set_order_tax(&k.staff, o.id, None).unwrap();
+        assert!(o.items.iter().all(|i| i.tax_rate_bp == 2000));
+        assert!(last_audit(&k.pos, "order.tax").unwrap().1.ends_with(&format!("(was Some({rate})) (no PIN, staff)")));
+    }
+    // A manager is never asked.
+    k.pos.set_order_tax(&k.admin, o.id, Some(2500)).unwrap();
+    k.pos.set_order_tax(&k.manager, o.id, None).unwrap();
+    assert!(last_audit(&k.pos, "order.tax").unwrap().1.ends_with("(no PIN, manager)"));
+}

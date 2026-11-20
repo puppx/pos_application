@@ -148,3 +148,39 @@ fn backups_imports_and_copies_keep_thai() {
     let too_long = [ImportRow { name_alt: Some("ก".repeat(121)), ..rows[0].clone() }];
     assert!(pos.import_items(&s, &too_long).unwrap_err().to_string().contains("line 1"));
 }
+
+/// Printed width: Thai vowel and tone marks take none.
+fn cols(t: &str) -> usize {
+    t.chars().filter(|c| !matches!(c, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}')).count()
+}
+
+#[test]
+fn prices_line_up_after_thai_dish_names_on_receipts() {
+    let mut pos = Pos::open_in_memory().unwrap();
+    let s = pos.setup_first_admin("Owner", "1111").unwrap();
+    let o = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    for name in ["Green curry แกงเขียวหวานไก่", "Tom yum ต้มยำกุ้งน้ำข้น", "Cashew chicken ไก่ผัดเม็ดมะม่วงหิมพานต์", "Mango sticky rice ข้าวเหนียวมะม่วง", "Pad Thai"] {
+        let p = pos
+            .create_product(&s, NewProduct {
+                category_id: None, sku: None, barcode: None, name: name.into(), price_cents: 1295, cost_cents: 0, tax_rate_bp: Some(2000),
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap();
+        pos.add_item(&s, o.id, p.id, 1, None, None, &[]).unwrap();
+    }
+    let r = pos.receipt(&s, o.id).unwrap();
+    for w in [32, 42] {
+        for text in [r.to_text(w), r.staff_to_text(w)] {
+            // Every line with an amount ends at the paper's edge (TOTAL is
+            // double width; the staff copy's tax table has its own columns).
+            let tax_row = |l: &str| l.starts_with("Total ") || l.as_bytes().get(2).is_some_and(u8::is_ascii_digit);
+            let priced: Vec<&str> = text.lines().filter(|l| l.contains('£') && !tax_row(l)).collect();
+            assert!(priced.len() >= 6, "{text}");
+            for l in priced {
+                let want = if l.starts_with("TOTAL") { w / 2 } else { w };
+                assert_eq!(cols(l), want, "{l:?} at {w}\n{text}");
+            }
+            assert!(text.contains("ต้มยำกุ้งน้ำข้น"), "{text}");
+        }
+    }
+}

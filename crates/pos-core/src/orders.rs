@@ -624,22 +624,34 @@ fn copy_line(tx: &Transaction, item: i64, order_id: i64, qty: i64, discount: i64
 }
 
 /// Who answers for dishes moving from order `from` onto the bill `to`
-/// when it charges less for them: a lower service charge, or a tax for the
-/// whole bill below `top_tax` (the highest rate of the priced dishes that
-/// go; they take the bill's). A manager's or admin's say-so, as lowering
-/// either on the bill itself is (see [`approved_by`]); None when the move
-/// costs nothing.
-fn move_approval<'a>(tx: &Transaction, s: &'a Session, approver: Option<&'a Session>, from: i64, to: i64, top_tax: Option<i64>) -> Result<Option<&'a Session>> {
-    let rates = |id: i64| tx.query_row("SELECT COALESCE(service_bp, 0), tax_bp FROM orders WHERE id = ?1", [id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)));
-    let ((service_from, _), (service_to, tax_to)) = (rates(from)?, rates(to)?);
-    let what = if service_to < service_from {
+/// when it charges less for them: a lower service charge, or a lower tax
+/// on any priced dish that goes (`tax_lowered`, see [`tax_lowered`]). A
+/// manager's or admin's say-so, as lowering either on the bill itself is
+/// (see [`approved_by`]); None when the move costs nothing.
+fn move_approval<'a>(tx: &Transaction, s: &'a Session, approver: Option<&'a Session>, from: i64, to: i64, tax_lowered: bool) -> Result<Option<&'a Session>> {
+    let service = |id: i64| tx.query_row("SELECT COALESCE(service_bp, 0) FROM orders WHERE id = ?1", [id], |r| r.get::<_, i64>(0));
+    let what = if service(to)? < service(from)? {
         MOVE_SERVICE_NEEDS_PIN
-    } else if tax_to.zip(top_tax).is_some_and(|(to, top)| to < top) {
+    } else if tax_lowered {
         MOVE_TAX_NEEDS_PIN
     } else {
         return Ok(None);
     };
     approved_by(s, approver, MONEY_APPROVAL, what).map(Some)
+}
+
+/// The tax rates of the priced lines among `ids` (None for the others), to
+/// compare before and after [`take_order_tax`].
+fn priced_rates(tx: &Transaction, ids: &[i64]) -> Result<Vec<Option<i64>>> {
+    let mut q = tx.prepare_cached("SELECT tax_rate_bp FROM order_items WHERE id = ?1 AND unit_price_cents > 0")?;
+    ids.iter().map(|id| Ok(q.query_row([id], |r| r.get(0)).optional()?)).collect()
+}
+
+/// True when a priced line pays less tax `after` a move than `before`
+/// (both from [`priced_rates`]): onto a bill with a lower rate of its own,
+/// or from a bill with a rate of its own onto one at the menu's rates.
+fn tax_lowered(before: &[Option<i64>], after: &[Option<i64>]) -> bool {
+    before.iter().zip(after).any(|(b, a)| a.zip(*b).is_some_and(|(a, b)| a < b))
 }
 
 /// For the audit log: " (PIN of Quinn #3, manager)" after a move onto a
@@ -969,9 +981,6 @@ impl Pos {
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let target = move_target(&tx, s, order_id, table_id)?;
         let lines = load_items(&tx, order_id)?;
-        // The highest tax on the dishes that go (a set's dishes with it).
-        let going = |i: &OrderItem| items.iter().any(|&(id, q)| q > 0 && (i.id == id || i.parent_id == Some(id)));
-        let top_tax = lines.iter().filter(|i| going(i) && i.unit_price_cents > 0).map(|i| i.tax_rate_bp).max();
         let mut moved = 0;
         // The lines now on the target order.
         let mut ids = Vec::new();
@@ -1010,8 +1019,9 @@ impl Pos {
         if count > MAX_ITEMS {
             return invalid("that table's order would have too many lines");
         }
-        let by = move_approval(&tx, s, approver, order_id, target, top_tax)?;
+        let before = priced_rates(&tx, &ids)?;
         take_order_tax(&tx, order_id, target, &ids)?;
+        let by = move_approval(&tx, s, approver, order_id, target, tax_lowered(&before, &priced_rates(&tx, &ids)?))?;
         drop_if_empty(&tx, order_id)?;
         audit_tx(&tx, s.user_id, "order.move_items", &format!("{order_id} -> order {target}: {moved} dish(es){}", move_note(s, by)))?;
         tx.commit()?;
@@ -1049,15 +1059,14 @@ impl Pos {
         if count > MAX_ITEMS {
             return invalid("the joined bill would have too many lines");
         }
-        let top_tax: Option<i64> =
-            tx.query_row("SELECT MAX(tax_rate_bp) FROM order_items WHERE order_id = ?1 AND unit_price_cents > 0", [order_id], |r| r.get(0))?;
-        let by = move_approval(&tx, s, approver, order_id, target, top_tax)?;
         let ids: Vec<i64> = tx
             .prepare("SELECT id FROM order_items WHERE order_id = ?1")?
             .query_map([order_id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        let before = priced_rates(&tx, &ids)?;
         tx.execute("UPDATE order_items SET order_id = ?2 WHERE order_id = ?1", params![order_id, target])?;
         take_order_tax(&tx, order_id, target, &ids)?;
+        let by = move_approval(&tx, s, approver, order_id, target, tax_lowered(&before, &priced_rates(&tx, &ids)?))?;
         drop_if_empty(&tx, order_id)?;
         audit_tx(&tx, s.user_id, "order.merge", &format!("{order_id} -> order {target}{}", move_note(s, by)))?;
         tx.commit()?;
@@ -1627,9 +1636,11 @@ impl Pos {
 
     /// Set one tax rate for every line of an open order (e.g. 0% for a
     /// tax-exempt customer), or None to go back to each item's menu rate.
-    /// Going back to the menu rates is anyone's; a rate of the order's own
-    /// is a manager's or admin's (staff need `approver`, see
-    /// [`Pos::set_order_tax_approved`]). Logged.
+    /// A rate of the order's own, or going back to the menu rates when that
+    /// lowers the tax on a priced line (from an order rate above its menu
+    /// rate), is a manager's or admin's (staff need `approver`, see
+    /// [`Pos::set_order_tax_approved`]); back to menu rates that keep or
+    /// raise the tax is anyone's. Logged.
     pub fn set_order_tax(&mut self, s: &Session, order_id: i64, rate_bp: Option<i64>) -> Result<Order> {
         self.set_order_tax_approved(s, None, order_id, rate_bp)
     }
@@ -1645,12 +1656,22 @@ impl Pos {
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
         let was: Option<i64> = tx.query_row("SELECT tax_bp FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
-        // The menu's own rates are always right; any other rate (0% for a
-        // tax-free customer, or one that is higher or lower) is not staff's
-        // to choose.
+        // Any rate of the order's own (0% for a tax-free customer, or one
+        // that is higher or lower) is not staff's to choose. Back to the
+        // menu's rates is theirs unless it lowers the tax on a priced line
+        // (an order rate above that dish's menu rate), as a move onto a
+        // bill at menu rates is (see `move_approval`).
         // Unchanged (e.g. "Menu rates" tapped again): nothing to write or log.
         if rate_bp != was {
-            let by = if rate_bp.is_some() { approved_by(s, approver, MONEY_APPROVAL, TAX_NEEDS_PIN)? } else { s };
+            let lowers = || -> Result<bool> {
+                Ok(tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM order_items i JOIN products p ON p.id = i.product_id
+                                    WHERE i.order_id = ?1 AND i.unit_price_cents > 0 AND p.tax_rate_bp < i.tax_rate_bp)",
+                    [order_id],
+                    |r| r.get(0),
+                )?)
+            };
+            let by = if rate_bp.is_some() || lowers()? { approved_by(s, approver, MONEY_APPROVAL, TAX_NEEDS_PIN)? } else { s };
             tx.execute("UPDATE orders SET tax_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
             match rate_bp {
                 Some(r) => tx.execute("UPDATE order_items SET tax_rate_bp = ?2 WHERE order_id = ?1", params![order_id, r])?,

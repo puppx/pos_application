@@ -1339,8 +1339,8 @@ commands! {
     }
 
     /// One tax rate for the whole order; null = each item's menu rate.
-    /// A rate of the order's own: staff pass `pin`, a manager's or admin's
-    /// PIN approving it.
+    /// A rate of the order's own, or menu rates that lower the tax on a
+    /// dish: staff pass `pin`, a manager's or admin's PIN approving it.
     fn set_order_tax(app, t, order_id: i64, rate_bp: Option<i64>, pin: Option<String>) -> Order {
         let pin = approval_pin(app, pin);
         app.with_session(t, |pos, s| {
@@ -2108,7 +2108,7 @@ mod tests {
         let o = dispatch(&app, LOCAL, "set_service_charge", json!({ "orderId": id, "rateBp": 1000 })).unwrap();
         assert_eq!(o["service_bp"], 1000);
 
-        // A tax rate for the order; the menu rates are staff's own.
+        // A tax rate for the order; back to menu rates that do not lower it is staff's own.
         let err = dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": 0 })).unwrap_err();
         assert_eq!(err.to_string(), format!("changing the tax on an order {needs}"));
         let err = dispatch(&app, LOCAL, "set_order_tax", json!({ "orderId": id, "rateBp": 0, "pin": "2222" })).unwrap_err();

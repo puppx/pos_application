@@ -846,11 +846,22 @@ pub(crate) struct Line {
     /// in the app's font the first of these that fits prints, as big as it
     /// fits (double size first). Empty for an ordinary line.
     pub fit: Vec<String>,
+    /// A line of two columns (a dish and its price): the left words and the
+    /// amount that `text` pads to the right edge. When the line prints as
+    /// an image (Thai), the amount is drawn at the paper's edge, as the
+    /// padding in characters does not match the Thai font's widths.
+    pub columns: Option<(String, String)>,
 }
 
 impl Line {
     pub fn new(size: Size, bold: bool, center: bool, text: impl Into<String>) -> Line {
-        Line { size, bold, center, text: text.into(), inverse: false, fit: Vec::new() }
+        Line { size, bold, center, text: text.into(), inverse: false, fit: Vec::new(), columns: None }
+    }
+
+    /// This line as `left` and `right` columns (see [`Line::columns`]).
+    pub fn with_columns(mut self, left: &str, right: &str) -> Line {
+        self.columns = Some((left.to_string(), right.to_string()));
+        self
     }
 
     /// This line on one line in the app's font: the first of `words` that
@@ -861,7 +872,7 @@ impl Line {
     }
 
     pub fn banner(text: impl Into<String>) -> Line {
-        Line { size: Size::Big, bold: true, center: true, text: text.into(), inverse: true, fit: Vec::new() }
+        Line { size: Size::Big, bold: true, center: true, text: text.into(), inverse: true, fit: Vec::new(), columns: None }
     }
 }
 
@@ -974,6 +985,10 @@ pub(crate) fn render_escpos_in(lines: &[Line], width: usize, bold: bool, app_fon
             b.extend(crate::raster::escpos_line_in(text, size, l.center, dots, mode));
             continue;
         }
+        if let Some((left, right)) = l.columns.as_ref().filter(|_| crate::raster::needs_raster(&l.text)) {
+            b.extend(crate::raster::escpos_columns_in(left, right, l.size, dots, mode));
+            continue;
+        }
         if crate::raster::needs_raster(&l.text) || (app_font && !is_rule(&l.text)) {
             b.extend(crate::raster::escpos_line_in(l.text.trim_end(), l.size, l.center, dots, mode));
             continue;
@@ -1018,7 +1033,7 @@ pub(crate) fn wrap(text: &str, width: usize, first: &str, indent: &str) -> Vec<S
                 start = cols(indent);
                 continue;
             }
-            // Split an over-long word, keeping marks with their letter.
+            // Split an over-long word where Thai allows (see `may_break`).
             let room = width.saturating_sub(used).max(1);
             let mut take = 0;
             let mut seen = 0;
@@ -1026,6 +1041,7 @@ pub(crate) fn wrap(text: &str, width: usize, first: &str, indent: &str) -> Vec<S
                 seen += usize::from(!is_mark(word[take]));
                 take += 1;
             }
+            let take = split_at(&word, take, room as f32, |i| word[..i].iter().filter(|c| !is_mark(**c)).count() as f32);
             cur.extend(word.drain(..take));
             out.push(std::mem::replace(&mut cur, indent.to_string()));
             start = cols(indent);
@@ -1046,9 +1062,107 @@ fn is_mark(c: char) -> bool {
     matches!(c, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}')
 }
 
+/// Thai vowels written before the consonant they follow in speech
+/// (เ แ โ ใ ไ): they always start a syllable.
+fn is_leading_vowel(c: char) -> bool {
+    matches!(c, '\u{0E40}'..='\u{0E44}')
+}
+
+/// True when a word may be split before `chars[i]` (Thai has no spaces
+/// between words). Never inside a letter's cluster (its vowel and tone
+/// marks, sara am), never after a leading vowel (it goes with the next
+/// letter), never before a vowel that cannot start a syllable (ะ า ำ ๅ),
+/// ๆ or ฯ, and never before a letter silenced by ์ or the letter before
+/// that (they end the syllable: "พานต์", "ศุกร์"). Any other place is
+/// allowed, as in English.
+pub(crate) fn may_break(chars: &[char], i: usize) -> bool {
+    if i == 0 || i >= chars.len() {
+        return false;
+    }
+    let (prev, next) = (chars[i - 1], chars[i]);
+    if is_mark(next) || matches!(next, '\u{0E30}' | '\u{0E32}' | '\u{0E33}' | '\u{0E45}' | '\u{0E46}' | '\u{0E2F}') || is_leading_vowel(prev) {
+        return false;
+    }
+    let marks = |k: usize| chars.get(k + 1..).unwrap_or_default().iter().take_while(|c| is_mark(**c));
+    let silenced = |k: usize| marks(k).any(|c| *c == '\u{0E4C}');
+    let after = i + 1 + marks(i).count();
+    !(silenced(i) || (after < chars.len() && silenced(after)))
+}
+
+/// A place [`may_break`] allows that most likely starts a Thai syllable:
+/// before a leading vowel, or after ะ, ำ or ๆ. Preferred when it does not
+/// leave the line too short.
+pub(crate) fn good_break(chars: &[char], i: usize) -> bool {
+    may_break(chars, i) && (is_leading_vowel(chars[i]) || matches!(chars[i - 1], '\u{0E30}' | '\u{0E33}' | '\u{0E46}'))
+}
+
+/// True when `chars[i]` is most likely the last letter of a syllable: a
+/// bare Thai consonant at the end of the word or before a leading vowel
+/// (the น of "หวานไก่"). Splitting before it is allowed, but a poor choice.
+fn ends_syllable(chars: &[char], i: usize) -> bool {
+    let bare = matches!(chars[i], '\u{0E01}'..='\u{0E2E}') && !chars.get(i + 1).is_some_and(|c| is_mark(*c));
+    bare && chars.get(i + 1).is_none_or(|c| is_leading_vowel(*c) || !matches!(c, '\u{0E00}'..='\u{0E7F}'))
+}
+
+/// Where to split a word that does not fit: the last place at or before
+/// `max` (characters) that [`may_break`] allows, preferring a likely
+/// syllable start (see [`good_break`]) that leaves the line at least half
+/// full (`fill(i)` is the width up to `i`, `room` the line's), then one that
+/// does not leave a syllable's last letter behind; `max` if none is allowed.
+pub(crate) fn split_at(chars: &[char], max: usize, room: f32, fill: impl Fn(usize) -> f32) -> usize {
+    let max = max.min(chars.len());
+    if max == chars.len() {
+        return max;
+    }
+    let last = |pick: &dyn Fn(usize) -> bool| (1..=max).rev().find(|&i| pick(i));
+    last(&|i| good_break(chars, i))
+        .filter(|&i| fill(i) * 2.0 >= room)
+        .or_else(|| last(&|i| may_break(chars, i) && !ends_syllable(chars, i)))
+        .or_else(|| last(&|i| may_break(chars, i)))
+        .unwrap_or(max)
+}
+
+/// Real dish names, and one with English and Thai.
+#[cfg(test)]
+pub(crate) const THAI_DISHES: [&str; 6] =
+    ["แกงเขียวหวานไก่", "ผัดไทยกุ้งสด", "ต้มยำกุ้งน้ำข้น", "ไก่ผัดเม็ดมะม่วงหิมพานต์", "ข้าวเหนียวมะม่วง", "Pad Thai ผัดไทย"];
+
+/// Checks pieces of wrapped text, written apart from `may_break`: no
+/// piece starts with a mark, sara am or a vowel that cannot start a
+/// syllable, and none ends with a leading vowel.
+#[cfg(test)]
+pub(crate) fn assert_thai_breaks(pieces: &[String]) {
+    for pair in pieces.windows(2) {
+        let (a, b) = (pair[0].trim(), pair[1].trim());
+        let (Some(last), Some(first)) = (a.chars().last(), b.chars().next()) else { continue };
+        assert!(!('\u{0E40}'..='\u{0E44}').contains(&last), "leading vowel left at the end: {pieces:?}");
+        assert!(
+            !matches!(first, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}' | 'ะ' | 'า' | 'ำ' | 'ๅ' | 'ๆ' | 'ฯ'),
+            "piece starts with {first:?}: {pieces:?}"
+        );
+    }
+}
+
 /// Printed width in characters.
 pub(crate) fn cols(text: &str) -> usize {
     text.chars().filter(|c| !is_mark(*c)).count()
+}
+
+/// `text` cut to at most `w` printed columns, keeping the marks on the
+/// last letter.
+pub(crate) fn take_cols(text: &str, w: usize) -> String {
+    let mut n = 0;
+    text.chars()
+        .take_while(|c| {
+            n += usize::from(!is_mark(*c));
+            n <= w
+        })
+        .collect()
+}
+
+/// `text` padded with spaces to `w` printed columns.
+pub(crate) fn pad_cols(text: &str, w: usize) -> String {
+    format!("{text}{}", " ".repeat(w.saturating_sub(cols(text))))
 }
 
 /// The footer of a ticket sent with mains still waiting: "MAINS TO FOLLOW: 3".
@@ -2440,7 +2554,73 @@ mod tests {
         assert_eq!(wrap("", 8, "", ""), [""]);
         // Thai marks take no width: 6 letters + 3 marks fit in 6 columns.
         assert_eq!(wrap("+ ไข่ดาว", 8, "", ""), ["+ ไข่ดาว"]);
-        assert_eq!(wrap("ไข่ดาวไข่ดาว", 4, "", ""), ["ไข่ดา", "วไข่ด", "าว"]);
+        // Split only where Thai allows: never before า (it was "วไข่ด" / "าว"),
+        // and not after a syllable's last letter when there is a choice.
+        assert_eq!(wrap("ไข่ดาวไข่ดาว", 4, "", ""), ["ไข่", "ดาว", "ไข่", "ดาว"]);
+    }
+
+    #[test]
+    fn thai_names_on_tickets_and_receipts_break_between_syllables() {
+        let mut t = ticket();
+        t.items = THAI_DISHES
+            .iter()
+            .enumerate()
+            .map(|(i, th)| {
+                let name = if th.is_ascii() || th.contains(' ') { th.to_string() } else { format!("Dish {i}") };
+                let alt = (!th.contains(' ')).then(|| th.to_string());
+                TicketItem { team: None, set: None, category: None, qty: 1, name, name_alt: alt, options: vec![th.to_string()], note: Some(th.to_string()) }
+            })
+            .collect();
+        for width in [32, 42] {
+            for large in [false, true] {
+                t.large = large;
+                let lines = t.lines(width);
+                let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+                assert_thai_breaks(&texts);
+                for l in &lines {
+                    let w = if l.size == Size::Big { width / 2 } else { width };
+                    assert!(cols(&l.text) <= w, "{} at {width}", l.text);
+                    // And as the printer draws them, in the app's font or not.
+                    if crate::raster::needs_raster(&l.text) {
+                        assert_thai_breaks(&crate::raster::line_pieces(&l.text, l.size, l.center, width * crate::raster::DOTS_PER_CHAR).2);
+                    }
+                }
+                for app_font in [false, true] {
+                    for image_mode in [ImageMode::Raster, ImageMode::Column, ImageMode::RasterSmall] {
+                        let b = t.escpos_for(&PrinterConfig { width, app_font, image_mode, ..PrinterConfig::default() });
+                        assert!(b.ends_with(&[0x1D, b'V', 66, 0]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thai_dish_names_wrap_between_syllables() {
+        // The kitchen's double-size lines on 58 mm paper (16 columns): the
+        // curry wrapped as "…หวานไ" / "ก่", splitting ไ from its letter.
+        assert_eq!(wrap("แกงเขียวหวานไก่", 12, "", ""), ["แกงเขียวหวาน", "ไก่"]);
+        assert_eq!(wrap("1 x แกงเขียวหวานไก่", 16, "", "  "), ["1 x", "  แกงเขียวหวานไก่"]);
+        assert_eq!(wrap("ข้าวเหนียวมะม่วง", 12, "  ", "  "), ["  ข้าวเหนียวมะ", "  ม่วง"]);
+        assert_eq!(wrap("ไก่ผัดเม็ดมะม่วงหิมพานต์", 16, "  ", "  "), ["  ไก่ผัดเม็ดมะ", "  ม่วงหิมพานต์"]);
+        assert_eq!(wrap("ต้มยำกุ้งน้ำข้น", 5, "", ""), ["ต้มยำ", "กุ้งน้ำ", "ข้น"]);
+        // Never before a letter silenced by ์, or the letter before it
+        // ("หิมพา" / "นต์").
+        assert_eq!(wrap("หิมพานต์", 4, "", ""), ["หิม", "พานต์"]);
+        assert_eq!(wrap("ศุกร์ศุกร์", 3, "", ""), ["ศุกร์", "ศุกร์"]);
+        for width in [32, 42] {
+            for w in [width, width / 2, width / 3] {
+                for (first, indent) in [("1 x ", "    "), ("", ""), ("  ", "  "), ("   + ", "     ")] {
+                    for dish in THAI_DISHES {
+                        let lines = wrap(dish, w, first, indent);
+                        assert_thai_breaks(&lines);
+                        assert!(lines.iter().all(|l| cols(l) <= w), "{lines:?} at {w}");
+                        let joined: String = lines.concat().chars().filter(|c| !c.is_whitespace()).collect();
+                        assert_eq!(joined, format!("{first}{dish}").replace(' ', ""), "nothing lost at {w}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

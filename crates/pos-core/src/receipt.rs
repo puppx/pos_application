@@ -9,7 +9,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::printing::{rule, render_escpos, render_escpos_in, render_text, wrap, Line, Size};
+use crate::printing::{cols, pad_cols, render_escpos, render_escpos_in, render_text, rule, take_cols, wrap, Line, Size};
 use crate::{Order, OrderItem, OrderType, Permission, Pos, PosError, PrintJob, PrintNames, PrinterConfig, PrinterTarget, Result, Session};
 
 const SETTING_KEY: &str = "_receipt_printer";
@@ -187,7 +187,7 @@ pub struct Receipt {
 /// goes to the next line with the amount rather than being split.
 fn service_no_tax(v: &mut Vec<Line>, label: &str, amount: &str, w: usize) {
     let left = format!("{label} (no tax)");
-    if left.chars().count() + amount.chars().count() < w {
+    if cols(&left) + cols(amount) < w {
         return two_col(v, Size::Normal, false, &left, amount, w, "");
     }
     for p in wrap(label, w, "", "") {
@@ -197,17 +197,16 @@ fn service_no_tax(v: &mut Vec<Line>, label: &str, amount: &str, w: usize) {
 }
 
 pub(crate) fn two_col(v: &mut Vec<Line>, size: Size, bold: bool, left: &str, right: &str, w: usize, indent: &str) {
-    let room = w.saturating_sub(right.chars().count() + 1).max(8);
+    let room = w.saturating_sub(cols(right) + 1).max(8);
     let parts = wrap(left, room, "", indent);
     let last = parts.len() - 1;
     for (i, p) in parts.into_iter().enumerate() {
-        let text = if i == last {
-            let pad = w.saturating_sub(p.chars().count() + right.chars().count());
-            format!("{p}{}{right}", " ".repeat(pad))
+        if i == last {
+            let pad = w.saturating_sub(cols(&p) + cols(right));
+            v.push(Line::new(size, bold, false, format!("{p}{}{right}", " ".repeat(pad))).with_columns(&p, right));
         } else {
-            p
-        };
-        v.push(Line::new(size, bold, false, text));
+            v.push(Line::new(size, bold, false, p));
+        }
     }
 }
 
@@ -372,7 +371,7 @@ impl Receipt {
         // so every amount keeps a space before it and the row fits the paper.
         let mut label_w = 8;
         let mut col = width.saturating_sub(label_w) / 3;
-        let widest = |sign: bool| all.iter().map(|&c| self.amount(c, sign).chars().count()).max().unwrap_or(0);
+        let widest = |sign: bool| all.iter().map(|&c| cols(&self.amount(c, sign))).max().unwrap_or(0);
         let sign = widest(true) < col;
         if !sign {
             col = col.max(widest(false) + 1);
@@ -380,8 +379,8 @@ impl Receipt {
         }
         let cw = col.saturating_sub(1);
         let row = |a: &str, b: &str, c: &str, d: &str| {
-            let a: String = a.chars().take(label_w).collect();
-            format!("{a:<label_w$} {b:>cw$} {c:>cw$} {d:>cw$}")
+            let right = |s: &str| format!("{}{s}", " ".repeat(cw.saturating_sub(cols(s))));
+            format!("{} {} {} {}", pad_cols(&take_cols(a, label_w), label_w), right(b), right(c), right(d))
         };
         let cells = |r: [i64; 3]| r.map(|c| self.amount(c, sign));
         v.push(Line::new(Size::Normal, true, false, row("TAX", "NET", "VAT", "GROSS")));
@@ -717,5 +716,49 @@ impl Pos {
         };
         let p = &cfg.printer;
         Ok(PrintJob::copies(p.target.clone(), &[], r.escpos_for(p), p.copies, p.copy_delay_secs).paced(p.slow_send).about("Test receipt"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::printing::THAI_DISHES;
+
+    #[test]
+    fn prices_line_up_after_thai_names() {
+        for w in [32, 42] {
+            // English exactly as before: padded by characters.
+            let mut v = Vec::new();
+            two_col(&mut v, Size::Normal, false, "1 x Pad Thai", "£12.95", w, "    ");
+            assert_eq!(v[0].text, format!("1 x Pad Thai{}£12.95", " ".repeat(w - 18)));
+            // Thai marks take no width: the price ends at the edge all the same.
+            for dish in THAI_DISHES {
+                let mut v = Vec::new();
+                two_col(&mut v, Size::Normal, false, &format!("1 x {dish}"), "£12.95", w, "    ");
+                let last = &v.last().unwrap().text;
+                assert!(last.ends_with(" £12.95"), "{last}");
+                assert_eq!(cols(last), w, "{last:?} at {w}");
+                assert!(v.iter().all(|l| cols(&l.text) <= w));
+            }
+            let mut v = Vec::new();
+            service_no_tax(&mut v, "ค่าบริการ 10%", "£1.20", w);
+            assert_eq!((v.len(), cols(&v[0].text)), (1, w), "{:?}", v[0].text);
+        }
+        // On paper: the Thai line is an image with its price drawn at the
+        // edge; English lines print as text, exactly as before.
+        let mut v = Vec::new();
+        two_col(&mut v, Size::Normal, false, "1 x Pad Thai", "£12.95", 42, "    ");
+        two_col(&mut v, Size::Normal, false, "1 x Tom yum ต้มยำกุ้งน้ำข้น", "£12.95", 42, "    ");
+        assert_eq!(v[0].columns, Some(("1 x Pad Thai".into(), "£12.95".into())));
+        let b = render_escpos(&v[..1], 42, false);
+        assert!(b.windows(10).any(|w| w == b"1 x Pad Th"));
+        let both = render_escpos(&v, 42, false);
+        let img = crate::raster::escpos_columns_in("1 x Tom yum ต้มยำกุ้งน้ำข้น", "£12.95", Size::Normal, 504, crate::ImageMode::Raster);
+        assert!(both.windows(img.len()).any(|w| w == img.as_slice()));
+        // Cut to columns, the marks staying with their letter.
+        assert_eq!(take_cols("ต้มยำกุ้ง", 3), "ต้มย");
+        assert_eq!(take_cols("ต้มยำกุ้ง", 5), "ต้มยำกุ้");
+        assert_eq!(take_cols("Total", 3), "Tot");
+        assert_eq!(pad_cols("กุ้ง", 4), "กุ้ง  ");
     }
 }

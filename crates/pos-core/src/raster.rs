@@ -125,7 +125,8 @@ impl Shaped {
 }
 
 /// Split `text` into pieces at most `room` dots wide. Breaks at spaces when
-/// it can, otherwise between characters (Thai is written without spaces).
+/// it can, otherwise where Thai allows (it is written without spaces; see
+/// `printing::may_break`).
 fn wrap_dots(text: &str, room: f32, scale: f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut rest = text.trim().to_string();
@@ -163,6 +164,15 @@ fn wrap_dots(text: &str, room: f32, scale: f32) -> Vec<String> {
         if let Some(sp) = rest[..fit].rfind(' ').filter(|&sp| sp > 0) {
             if !rest[fit..].starts_with(' ') {
                 cut = sp;
+            }
+        }
+        if cut == fit && fit < rest.len() && !rest[fit..].starts_with(' ') {
+            // No space to break at: back to a place Thai allows.
+            let starts: Vec<usize> = rest.char_indices().map(|(b, _)| b).collect();
+            let chars: Vec<char> = rest.chars().collect();
+            if let Ok(max) = starts.binary_search(&fit) {
+                let at = crate::printing::split_at(&chars, max, room, |i| shape(&rest[..starts[i]], scale).width());
+                cut = starts.get(at).copied().unwrap_or(rest.len());
             }
         }
         lines.push(rest[..cut].trim_end().to_string());
@@ -352,11 +362,46 @@ pub(crate) fn fits_line(text: &str, size: Size, dots: usize) -> bool {
 /// Images for one laid-out line, wrapped to the paper. Leading spaces in
 /// `text` become the indent of every wrapped piece.
 pub(crate) fn line_images(text: &str, size: Size, center: bool, dots: usize) -> Vec<Bitmap> {
+    let (scale, indent, pieces) = line_pieces(text, size, center, dots);
+    pieces.iter().map(|l| draw(l, scale, dots, indent, center)).collect()
+}
+
+/// The pieces [`line_images`] draws, with their scale and indent in dots.
+pub(crate) fn line_pieces(text: &str, size: Size, center: bool, dots: usize) -> (f32, usize, Vec<String>) {
     let scale = px(size) / face().units_per_em() as f32;
     let spaces = text.chars().take_while(|c| *c == ' ').count();
     let indent = (spaces * if size == Size::Big { DOTS_PER_CHAR * 2 } else { DOTS_PER_CHAR }).min(dots / 2);
     let room = (dots - if center { 0 } else { indent }) as f32;
-    wrap_dots(text, room, scale).iter().map(|l| draw(l, scale, dots, indent, center)).collect()
+    (scale, indent, wrap_dots(text, room, scale))
+}
+
+/// Images for a line of two columns: `right` (an amount) drawn at the
+/// paper's right edge, and `left` before it, wrapped to the room that
+/// leaves (with a character's gap). Leading spaces in `left` indent it, as
+/// in [`line_images`]. The amount goes on the last piece.
+pub(crate) fn columns_images(left: &str, right: &str, size: Size, dots: usize) -> Vec<Bitmap> {
+    let scale = px(size) / face().units_per_em() as f32;
+    let right = right.trim();
+    let rw = (shape(right, scale).width().ceil() as usize).min(dots);
+    let spaces = left.chars().take_while(|c| *c == ' ').count();
+    let indent = (spaces * if size == Size::Big { DOTS_PER_CHAR * 2 } else { DOTS_PER_CHAR }).min(dots / 2);
+    let room = dots.saturating_sub(indent + rw + DOTS_PER_CHAR).max(dots / 3);
+    let mut out: Vec<Bitmap> = wrap_dots(left, room as f32, scale).iter().map(|l| draw(l, scale, dots, indent, false)).collect();
+    let amount = draw(right, scale, dots, dots - rw, false);
+    match out.last_mut() {
+        Some(last) => last.bits.iter_mut().zip(&amount.bits).for_each(|(a, b)| *a |= b),
+        None => out.push(amount),
+    }
+    out
+}
+
+/// ESC/POS bytes printing a line of two columns (see [`columns_images`]) in `mode`.
+pub(crate) fn escpos_columns_in(left: &str, right: &str, size: Size, dots: usize, mode: ImageMode) -> Vec<u8> {
+    let mut b = vec![0x1B, b'a', 0];
+    for img in columns_images(left, right, size, dots) {
+        b.extend(img.escpos_in(mode));
+    }
+    b
 }
 
 /// A big header: white text on a solid black bar `dots` wide. `text` is the
@@ -573,6 +618,68 @@ mod tests {
             assert!(!('\u{0E31}'..='\u{0E3A}').contains(&first) && !('\u{0E47}'..='\u{0E4E}').contains(&first), "{p}");
         }
         assert_eq!(wrap_dots("Pad Thai with prawns", 120.0, scale).concat().replace(' ', ""), "PadThaiwithprawns");
+    }
+
+    #[test]
+    fn thai_dish_names_break_between_syllables_in_every_mode() {
+        use crate::printing::{assert_thai_breaks, THAI_DISHES};
+        // The kitchen's double-size Thai name on 58 mm paper printed as
+        // "แกงเขียวหวานไ" / "ก่": ไ split from its letter.
+        assert_eq!(line_pieces("  แกงเขียวหวานไก่", Size::Big, false, 384).2, ["แกงเขียวหวาน", "ไก่"]);
+        assert_eq!(line_pieces("  ข้าวเหนียวมะม่วง", Size::Big, false, 384).2, ["ข้าวเหนียวมะ", "ม่วง"]);
+        // English still breaks at spaces, as before.
+        assert_eq!(line_pieces("1 x Chicken with cashew nuts", Size::Big, false, 384).2, ["1 x Chicken with", "cashew nuts"]);
+        for dots in [384, 504] {
+            for size in [Size::Normal, Size::Tall, Size::Big] {
+                for prefix in ["", "  ", "1 x ", "    "] {
+                    for dish in THAI_DISHES {
+                        let text = format!("{prefix}{dish}");
+                        let (scale, indent, pieces) = line_pieces(&text, size, false, dots);
+                        assert_thai_breaks(&pieces);
+                        assert_eq!(pieces.concat().replace(' ', ""), text.replace(' ', ""));
+                        for p in &pieces {
+                            assert!(shape(p, scale).width() <= (dots - indent) as f32, "{p} at {dots}");
+                        }
+                        // Every image mode prints exactly these pieces.
+                        for mode in [ImageMode::Raster, ImageMode::Column, ImageMode::RasterSmall] {
+                            let mut want = vec![0x1B, b'a', 0];
+                            pieces.iter().for_each(|p| want.extend(draw(p, scale, dots, indent, false).escpos_in(mode)));
+                            assert!(escpos_line_in(&text, size, false, dots, mode) == want, "{text} {mode:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_thai_dish_and_its_price_print_with_the_price_at_the_edge() {
+        let ink = |img: &Bitmap| (0..img.width).filter(|&x| (0..img.height).any(|y| img.get(x, y))).collect::<Vec<_>>();
+        for dots in [384, 504] {
+            for name in ["1 x Pad Thai ผัดไทย", "1 x Tom yum ต้มยำกุ้งน้ำข้น"] {
+                let imgs = columns_images(name, "£12.95", Size::Normal, dots);
+                // One line, but on 58 mm the long soup's price needs a second.
+                assert_eq!(imgs.len(), if dots == 384 && name.contains("ต้มยำ") { 2 } else { 1 }, "{name} at {dots}");
+                let x = ink(imgs.last().unwrap());
+                // The price ends at the paper's edge, the name starts at the left.
+                assert!(*x.last().unwrap() >= dots - 6 && ink(&imgs[0])[0] < 10, "{name} at {dots}");
+                if imgs.len() == 1 {
+                    // Exactly the name's image, with the price's laid over it.
+                    let alone = &line_images(name, Size::Normal, false, dots)[0];
+                    assert!((0..alone.height).all(|y| (0..dots).all(|x| !alone.get(x, y) || imgs[0].get(x, y))));
+                }
+            }
+            // Too long for one line: the name wraps, the price on its last piece.
+            let imgs = columns_images("1 x Cashew chicken ไก่ผัดเม็ดมะม่วงหิมพานต์ พิเศษ", "£12.95", Size::Normal, dots);
+            assert!(imgs.len() >= 2);
+            assert!(*ink(imgs.last().unwrap()).last().unwrap() >= dots - 6);
+            assert!(imgs[..imgs.len() - 1].iter().all(|i| *ink(i).last().unwrap() < dots - 70), "the price only once");
+            for mode in [ImageMode::Raster, ImageMode::Column, ImageMode::RasterSmall] {
+                let mut want = vec![0x1B, b'a', 0];
+                imgs.iter().for_each(|i| want.extend(i.escpos_in(mode)));
+                assert!(escpos_columns_in("1 x Cashew chicken ไก่ผัดเม็ดมะม่วงหิมพานต์ พิเศษ", "£12.95", Size::Normal, dots, mode) == want);
+            }
+        }
     }
 
     #[test]

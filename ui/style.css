@@ -10,9 +10,13 @@
   --line: #e4e7ec; --line-2: #d0d5dd; --fill: #eaecf0;
   --rail: #ffffff; --rail-2: #f2f4f7; --rail-ink: #5d6679;
   --brand: #1d5bd8; --brand-2: #1849b0; --brand-soft: #eaf1fe;
-  --go: #0b8a4c; --go-2: #08703d; --go-soft: #e3f8ec;
-  --warn: #c56a04; --warn-soft: #fff4dc; --sun: #fdb022; --amber-line: #f5a524; --danger: #d0301f; --danger-soft: #fdecea;
+  --go: #087d44; --go-2: #08703d; --go-soft: #e3f8ec;
+  --warn: #c56a04; --warn-soft: #fff4dc; --sun: #fdb022; --amber-line: #f5a524; --danger: #c92e1e; --danger-soft: #fdecea;
   --held: #0b8579; --held-2: #086b61; --held-soft: #dcf5f1;
+  /* Fills behind white text (buttons, badges, pills): at least 4.5:1 with white in both themes.
+     --danger / --go / --held are for text, borders and rings; in dark they are brightened for text. */
+  --danger-fill: #c92e1e; --danger-fill-2: #a42818; --go-fill: #08703d; --go-fill-2: #065a31;
+  --held-fill: #0a7c71; --held-fill-2: #086b61; --warn-fill: #a65a02; --on-warn-fill: #fff;
   --radius: 12px; --radius-sm: 9px;
   --shadow: 0 1px 2px rgba(16, 24, 40, .06);
   --shadow-md: 0 2px 6px -1px rgba(16, 24, 40, .08), 0 1px 2px rgba(16, 24, 40, .05);
@@ -29,10 +33,12 @@
   --line: #242d3c; --line-2: #344055; --fill: #1d2534;
   --rail: #10151f; --rail-2: #1b2331; --rail-ink: #98a1b2;
   --brand: #2f6fe4; --brand-2: #2860c8; --brand-soft: #172647; --brand-ink: #8fb5ff;
-  --go: #13924f; --go-2: #0f7c43; --go-soft: #10301f;
+  --go: #1fa862; --go-2: #63d592; --go-soft: #10301f;
   --warn: #f0a23b; --warn-soft: #33260f; --sun: #f0b12c; --amber-line: #c98418; --amber-ink: #f5c46c;
   --danger: #ec5545; --danger-soft: #3a1815;
   --held: #149a8c; --held-2: #5fd3c6; --held-soft: #0f2d2a;
+  --danger-fill: #c8372a; --danger-fill-2: #a92e23; --go-fill: #0b7a43; --go-fill-2: #09683a;
+  --held-fill: #0b7268; --held-fill-2: #095f57; --warn-fill: #f0a23b; --on-warn-fill: #0c1018;
   --solid: #e9edf4; --on-solid: #0c1018; --hover-line: #4a5872; --dot: #252f40;
   --shadow: 0 1px 2px rgba(0, 0, 0, .35);
   --shadow-md: 0 2px 8px -1px rgba(0, 0, 0, .45);
@@ -71,8 +77,8 @@ button:active:not(:disabled) { transform: scale(.97); }
 button:disabled { background: var(--surface-2) !important; border: 1px dashed var(--line-2) !important; color: var(--hover-line) !important; cursor: default; }
 button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
 button.primary:hover { background: var(--brand-2); border-color: var(--brand-ink); }
-button.go { background: var(--go); border-color: var(--go); color: #fff; }
-button.go:hover { background: var(--go-2); border-color: var(--go-2); }
+button.go { background: var(--go-fill); border-color: var(--go-fill); color: #fff; }
+button.go:hover { background: var(--go-fill-2); border-color: var(--go-fill-2); }
 button.ghost { background: transparent; border-color: transparent; box-shadow: none; }
 button.ghost:hover { background: var(--fill); border-color: transparent; }
 button.danger { color: var(--danger); }
@@ -130,13 +136,13 @@ label.check input[type=checkbox] { width: 22px; height: 22px; flex: none; margin
 .chip.type-collection { background: var(--held-soft); color: var(--held-2); }
 .chip.type-delivery { background: var(--go-soft); color: var(--go-2); }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 4px; border: 1px solid var(--line-2); font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
-.badge.warn { background: var(--danger); border-color: var(--danger); color: #fff; }
-.badge.held { background: var(--held); border-color: var(--held); color: #fff; }
-.badge.ok { background: var(--go); border-color: var(--go); color: #fff; }
+.badge.warn { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
+.badge.held { background: var(--held-fill); border-color: var(--held-fill); color: #fff; }
+.badge.ok { background: var(--go-fill); border-color: var(--go-fill); color: #fff; }
 .status { display: inline-block; padding: 1px 9px; border-radius: 4px; font-size: 12.5px; font-weight: 600; text-transform: capitalize; background: var(--fill); color: var(--ink-2); }
-.status.s-paid { background: var(--go); color: #fff; }
+.status.s-paid { background: var(--go-fill); color: #fff; }
 .status.s-open { background: var(--brand); color: #fff; }
-.status.s-voided, .status.s-cancelled { background: var(--danger); color: #fff; }
+.status.s-voided, .status.s-cancelled { background: var(--danger-fill); color: #fff; }
 .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); padding: 60px 20px; text-align: center; }
 .empty.small { padding: 30px 16px; }
 .empty .icon { color: var(--line-2); }
@@ -189,7 +195,7 @@ details summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
   background: var(--brand-soft); color: var(--brand-ink); font-weight: 700; font-size: 14px;
 }
 .avatar.sm { width: 30px; height: 30px; font-size: 12px; }
-#update { display: flex; gap: 8px; align-items: center; background: var(--go); color: #fff; font-weight: 600; border-radius: 6px; padding: 4px 4px 4px 14px; font-size: 14px; }
+#update { display: flex; gap: 8px; align-items: center; background: var(--go-fill); color: #fff; font-weight: 600; border-radius: 6px; padding: 4px 4px 4px 14px; font-size: 14px; }
 #update button { min-height: 32px; padding: 0 12px; border-radius: 4px; }
 main { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
 
@@ -261,7 +267,7 @@ body.locked main { padding: 0; }
 .lock-foot { margin-top: auto; color: var(--muted); font-size: 14px; padding-top: 40px; }
 .lock-stack { display: flex; flex-direction: column; align-items: center; gap: 16px; }
 button.quit { min-width: 180px; background: transparent; border: 1px solid var(--line-2); color: var(--muted); }
-button.quit:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.quit:hover { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
 .lock-main { display: grid; place-items: center; padding: 24px; background: var(--bg); position: relative; }
 .lock-theme { display: none; position: absolute; top: 10px; right: 10px; color: var(--muted); }
 @media (max-width: 900px) { .lock-main .lock-theme { display: inline-flex; } }
@@ -276,7 +282,7 @@ button.quit:hover { background: var(--danger); border-color: var(--danger); colo
 .pinpad { display: grid; grid-template-columns: repeat(3, 84px); gap: 14px; }
 .pinpad button { height: 84px; border-radius: 50%; font-size: 30px; font-weight: 600; background: var(--surface); border-color: var(--line); color: var(--ink); }
 .pinpad button:active:not(:disabled) { background: var(--brand-soft); }
-.pinpad button.go { font-size: 20px; font-weight: 700; background: var(--go); border-color: var(--go); color: #fff; }
+.pinpad button.go { font-size: 20px; font-weight: 700; background: var(--go-fill); border-color: var(--go-fill); color: #fff; }
 .pinpad button.ghost { font-size: 20px; color: var(--muted); box-shadow: none; }
 
 /* ---------- floor ---------- */
@@ -324,8 +330,8 @@ button.quit:hover { background: var(--danger); border-color: var(--danger); colo
 .tbl b { font-size: 17px; line-height: 1.1; color: var(--ink); }
 .tbl .amt { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ink); }
 .tbl .time { color: var(--muted); font-size: 12px; }
-.tbl .flag { font-size: 11px; font-weight: 700; color: #fff; background: var(--held); border-radius: 999px; padding: 0 7px; }
-.tbl .flag.bad { color: #fff; background: var(--danger); }
+.tbl .flag { font-size: 11px; font-weight: 700; color: #fff; background: var(--held-fill); border-radius: 999px; padding: 0 7px; }
+.tbl .flag.bad { color: #fff; background: var(--danger-fill); }
 .tbl.busy { background: var(--warn-soft); border: 2px solid var(--amber-line); }
 .tbl.busy .time { color: var(--amber-ink); }
 .tbl.held { background: var(--held-soft); border-color: var(--held); }
@@ -399,8 +405,8 @@ main.fill { padding: 12px; overflow: hidden; }
 .ticket-foot .send, .ticket-foot .mains { flex: 1; min-height: 52px; }
 .send.ready { background: var(--brand); border-color: var(--brand); color: #fff; }
 .send.ready:hover { background: var(--brand-2); border-color: var(--brand-ink); }
-.mains { background: var(--held); border-color: var(--held); color: #fff; }
-.mains:hover { background: var(--held-2); border-color: var(--held-2); }
+.mains { background: var(--held-fill); border-color: var(--held-fill); color: #fff; }
+.mains:hover { background: var(--held-fill-2); border-color: var(--held-fill-2); }
 button.pay { min-height: 64px; font-size: 20px; justify-content: space-between; padding: 0 20px; border-radius: var(--radius); }
 button.pay strong { font-size: 26px; font-variant-numeric: tabular-nums; }
 /* Order tools under the ticket's name: icon over label, quiet until pressed. */
@@ -480,14 +486,14 @@ button.small-btn { min-height: 36px; padding: 0 10px; font-size: 13px; margin-le
 .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .keypad button { min-height: 60px; font-size: 24px; font-weight: 600; background: var(--surface); }
 .keypad button:active:not(:disabled) { background: var(--brand-soft); }
-.dialog button.primary.paybig, .dialog > button.primary { background: var(--go); border-color: var(--go); }
+.dialog button.primary.paybig, .dialog > button.primary { background: var(--go-fill); border-color: var(--go-fill); }
 
 /* ---------- misc ---------- */
 #toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--solid); color: var(--on-solid); padding: 12px 20px;
   border-radius: 12px; z-index: 30; box-shadow: var(--shadow-lg); font-weight: 600; max-width: min(640px, calc(100vw - 32px)); animation: rise .18s ease-out;
 }
-#toast.err { background: var(--danger); }
+#toast.err { background: var(--danger-fill); color: #fff; }
 @keyframes rise { from { opacity: 0; transform: translate(-50%, 10px); } }
 pre.report { background: var(--surface); border: 1px dashed var(--line-2); border-radius: var(--radius-sm); padding: 14px; font: 13px/1.35 Consolas, "Cascadia Mono", monospace; max-height: 420px; overflow: auto; margin: 0; }
 .server-urls { display: flex; flex-direction: column; gap: 6px; background: var(--go-soft); border-radius: var(--radius-sm); padding: 12px 14px; }
@@ -636,12 +642,12 @@ pre.report { background: var(--surface); border: 1px dashed var(--line-2); borde
 /* settings: danger zone */
 .danger-zone { border-color: var(--danger); border-left-width: 6px; background: var(--danger-soft); }
 .danger-zone h3 { color: var(--danger); }
-button.danger.solid { background: var(--danger); border-color: var(--danger); color: #fff; }
-button.danger.solid:hover { background: #a42818; }
+button.danger.solid { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
+button.danger.solid:hover { background: var(--danger-fill-2); }
 
 /* order: service charge row */
 .service-row { cursor: pointer; }
-.service-row .edit-link { color: var(--brand); font-size: 12.5px; font-weight: 600; }
+.service-row .edit-link { color: var(--brand-ink); font-size: 12.5px; font-weight: 600; }
 
 /* history: delete order */
 .delete-order { border-top: 1px dashed var(--line-2); padding-top: 10px; }
@@ -731,8 +737,12 @@ body.kb-open #toast { bottom: calc(var(--kb-h) + 16px); }
 @media (max-width: 700px) { .osk-key { min-height: 44px; font-size: 18px; } .osk-key.fn { font-size: 14px; } }
 
 /* Finish & Pay: split bill, tips */
-.pay-parts { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--go-soft); display: flex; flex-direction: column; gap: 4px; }
-.pay-part { min-height: 0; }
+.pay-parts { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 6px 10px 8px; background: var(--go-soft); display: flex; flex-direction: column; gap: 2px; }
+.pay-part-list { display: flex; flex-direction: column; min-height: 44px; overflow-y: auto; overscroll-behavior: contain; }
+.pay-part-list > * { flex-shrink: 0; }
+.pay-part { min-height: 44px; }
+.pay-part .link-btn { min-height: 44px; min-width: 64px; }
+.pay-left-row { flex-shrink: 0; }
 .link-btn { min-height: 30px; padding: 0 10px; font-size: 13px; }
 .pay-now { background: var(--brand-soft); border-radius: var(--radius-sm); padding: 8px 10px; }
 .pay-extras button { min-height: 44px; }
@@ -774,10 +784,10 @@ td.short, strong.short { color: var(--danger); }
 .sold-btn { white-space: nowrap; padding: 0 12px; }
 /* Phones: the search box on its own row, the two buttons share the next one. */
 @media (max-width: 600px) { .menu-top .searchbox { flex-basis: 100%; } .menu-top .sold-btn { flex: 1; } }
-.sold-btn.on { background: var(--danger); border-color: var(--danger); color: #fff; }
+.sold-btn.on { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
 .tile.sold { opacity: .55; background: repeating-linear-gradient(135deg, var(--surface), var(--surface) 8px, var(--surface-2) 8px, var(--surface-2) 16px); }
 .tile.sold .name { text-decoration: line-through; }
-.tag.sold { background: var(--danger); color: #fff; }
+.tag.sold { background: var(--danger-fill); color: #fff; }
 .items.sold-mode .tile { outline: 2px dashed var(--danger); outline-offset: -4px; }
 
 /* Kitchen screen */
@@ -787,8 +797,8 @@ td.short, strong.short { color: var(--danger); }
 .kds-card.slow { border-color: var(--warn); }
 .kds-card.late { border-color: var(--danger); }
 .kds-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--solid); color: var(--on-solid); font-size: 20px; }
-.kds-card.slow .kds-head { background: var(--warn); }
-.kds-card.late .kds-head { background: var(--danger); }
+.kds-card.slow .kds-head { background: var(--warn-fill); color: var(--on-warn-fill); }
+.kds-card.late .kds-head { background: var(--danger-fill); color: #fff; }
 /* Colour swatches in the Kitchen screen settings card. */
 .kds-dot { width: 14px; height: 14px; border-radius: 4px; flex: none; }
 .kds-dot.slow { background: var(--warn); }
@@ -815,6 +825,7 @@ td.short, strong.short { color: var(--danger); }
 .pay-head { flex: none; display: flex; align-items: center; gap: 14px; padding: 14px 14px 14px 20px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .pay-head h3 { font-size: 21px; }
 .pay-head .grow { min-width: 0; }
+.pay-head .icon-btn { min-width: 44px; min-height: 44px; }
 .pay-head h3, .pay-head .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pay-total { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
 .pay-one { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 18px 22px; padding: 18px 20px 14px; }
@@ -830,7 +841,7 @@ td.short, strong.short { color: var(--danger); }
 .seg button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-md); }
 .seg button.on small { color: var(--muted); }
 .seg.methods button { min-height: 76px; font-size: 18px; gap: 4px; }
-.seg.methods button.on { background: var(--go); color: #fff; box-shadow: 0 1px 2px rgba(16, 24, 40, .12); }
+.seg.methods button.on { background: var(--go-fill); color: #fff; box-shadow: 0 1px 2px rgba(16, 24, 40, .12); }
 .pay-field { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 2px 10px; text-align: left; min-height: 64px; padding: 6px 14px; background: var(--surface); box-shadow: none; }
 .pay-field strong { text-align: right; font-size: 28px; font-variant-numeric: tabular-nums; }
 .pay-field small { grid-column: 1 / -1; text-align: right; font-size: 14px; font-weight: 700; color: var(--go); }
@@ -851,14 +862,16 @@ td.short, strong.short { color: var(--danger); }
   .pay-right .row.quick button { flex: 1 1 auto; min-width: 0; padding: 0 8px; }
   .pay-left > * { flex-shrink: 0; }
   .pay-left > .dish-pick { flex-shrink: 1; min-height: 96px; }
-  .pay-left > .pay-parts { flex-shrink: 1; min-height: 52px; overflow: auto; }
+  /* Many part payments: their list scrolls (one row stays in view), "Left to pay" never goes. */
+  .pay-left > .pay-parts { flex-shrink: 1; min-height: 104px; }
+  .pay-left > .pay-parts > .pay-part-list { flex: 0 1 auto; }
 }
 /* Finish & Pay fits on a 600px-high screen (1024 x 600) without scrolling. */
 @media (max-height: 660px) and (min-width: 761px) {
   .pay-head { padding-block: 6px; gap: 12px; }
   .pay-head h3 { font-size: 18px; }
   .pay-head .big { font-size: 22px; }
-  .pay-head .icon-btn { min-height: 40px; height: 40px; width: 40px; min-width: 40px; }
+  .pay-head .icon-btn { min-height: 44px; height: 44px; width: 44px; min-width: 44px; }
   .pay-one { padding: 10px 20px 8px; gap: 10px 22px; }
   .pay-left, .pay-right { gap: 6px; }
   .pay-label { margin-top: 0; }
@@ -867,9 +880,9 @@ td.short, strong.short { color: var(--danger); }
   .pay-field { min-height: 52px; padding: 3px 14px; }
   .pay-field strong { font-size: 24px; line-height: 1.15; }
   .pay-field small { line-height: 1.1; }
-  .row.quick button { min-height: 42px; }
+  .row.quick button { min-height: 44px; }
   .pay-right .keypad { gap: 5px; }
-  .pay-right .keypad button { min-height: 42px; font-size: 20px; }
+  .pay-right .keypad button { min-height: 44px; font-size: 20px; }
   .pay-foot { padding: 8px 20px 10px; }
   .pay-sum { padding: 6px 14px; }
   .pay-sum .grand { font-size: 19px; }
@@ -911,7 +924,7 @@ button.danger-outline:hover { background: var(--danger-soft); }
 .course-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .course-pick button { min-height: 110px; font-size: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
 .course-pick button small { font-size: 14px; font-weight: 500; opacity: .85; }
-.course-pick button.main { background: var(--held); border-color: var(--held); }
+.course-pick button.main { background: var(--held-fill); border-color: var(--held-fill); }
 /* Which team makes this? One big button per team; the dish's usual team is filled in. */
 .course-pick.team-pick { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .course-pick.team-pick button { min-height: 96px; font-size: 22px; }
@@ -1139,6 +1152,7 @@ body.big-buttons .new-tile { min-height: 112px; font-size: 19px; }
 @media (max-width: 600px) { #fullscreen { display: none; } }
 .dialog.help-dialog > button.primary { background: var(--brand); border-color: var(--brand); }
 :root[data-theme="dark"] .seg:not(.methods) button.on { background: #3a4760; color: #fff; }
+:root[data-theme="dark"] .seg:not(.methods) button.on small { color: var(--ink-2); }
 
 /* ==========================================================================
    Layout v2: one top bar (logo, page tabs, tools, user) instead of a side rail;
@@ -1308,7 +1322,7 @@ body.big-buttons .menu .cats button { min-height: 54px; font-size: 16.5px; }
 /* Choices in a segmented control stay on one line (Main course, floor names); a long set wraps as whole buttons. */
 .seg button { white-space: nowrap; }
 /* Dish editor: compact How many / Price each / Line total. */
-.edit-field > label { font-size: 11.5px; }
+.edit-field > label { font-size: 12.5px; }
 .edit-grid { gap: 12px 16px; }
 .qty-pick .step { min-width: 46px; min-height: 46px; font-size: 22px; }
 .qty-big { min-width: 34px; font-size: 19px; }
@@ -1339,19 +1353,19 @@ body.big-buttons .menu .cats button { min-height: 54px; font-size: 16.5px; }
    Choices (quick notes, discounts, starter/main, team) and inputs are 40px; the three actions are 44px. */
 .dialog.line-editor { width: min(520px, 100%); gap: 12px; padding: 18px 20px; }
 .line-editor .edit-head h3 { font-size: 19px; }
-.line-editor .edit-head .icon-btn { min-width: 40px; min-height: 40px; }
+.line-editor .edit-head .icon-btn { min-width: 44px; min-height: 44px; }
 .line-editor .edit-grid { gap: 10px 14px; }
 .line-editor .edit-field { gap: 6px; }
-.line-editor .edit-field > label { font-size: 11px; }
-.line-editor .qty-pick .step { min-width: 40px; min-height: 40px; font-size: 20px; }
+.line-editor .edit-field > label { font-size: 12.5px; }
+.line-editor .qty-pick .step { min-width: 44px; min-height: 44px; font-size: 20px; }
 .line-editor .qty-big { min-width: 30px; font-size: 17px; }
-.line-editor .price-input, .line-editor .edit-field > input { min-height: 40px; height: 40px; font-size: 16px; padding: 0 12px; }
+.line-editor .price-input, .line-editor .edit-field > input { min-height: 44px; height: 44px; font-size: 16px; padding: 0 12px; }
 .line-editor .price-input { max-width: 140px; font-weight: 700; }
-.line-editor .price-locked { min-height: 40px; }
-.line-editor .edit-total .line-total { min-height: 40px; font-size: 19px; }
+.line-editor .price-locked { min-height: 44px; }
+.line-editor .edit-total .line-total { min-height: 44px; font-size: 19px; }
 .line-editor .quick-notes { gap: 6px; }
 .line-editor .quick-notes button, .line-editor .edit-field .seg button {
-  min-height: 36px; height: 36px; padding: 0 12px; font-size: 14px; border-radius: 8px;
+  min-height: 44px; height: 44px; padding: 0 14px; font-size: 14.5px; border-radius: 8px;
 }
 .line-editor .edit-field .seg { padding: 2px; gap: 2px; }
 .line-editor .edit-actions { gap: 8px; padding-top: 12px; }
@@ -1359,7 +1373,7 @@ body.big-buttons .menu .cats button { min-height: 54px; font-size: 16.5px; }
 .line-editor .edit-actions .save-line { min-width: 120px; font-size: 15px; }
 .dialog.line-editor .edit-actions { bottom: -18px; margin-bottom: -18px; padding-bottom: 14px; }
 @media (max-width: 560px) { .dialog.line-editor { padding: 16px; } .dialog.line-editor .edit-actions { bottom: -16px; margin-bottom: -16px; } }
-body.big-buttons .line-editor .quick-notes button, body.big-buttons .line-editor .edit-field .seg button { min-height: 42px; height: 42px; }
+body.big-buttons .line-editor .quick-notes button, body.big-buttons .line-editor .edit-field .seg button { min-height: 48px; height: 48px; }
 
 /* ---------- floor plan editor: floors on top, tools under them, the plan with a card at the side ---------- */
 .plan-page { gap: 12px; }
@@ -1397,6 +1411,89 @@ body.big-buttons .line-editor .quick-notes button, body.big-buttons .line-editor
 
 /* Floor names (Tables screen and floor plan editor): small pills, not big buttons. */
 .floor-bar .seg, .plan-bar .seg { padding: 3px; gap: 3px; border-radius: 10px; flex: none; }
-.floor-bar .seg button, .plan-bar .seg button { flex: none; min-height: 34px; height: 34px; padding: 0 14px; font-size: 14px; border-radius: 8px; }
-.plan-bar > button { min-height: 40px; font-size: 14.5px; }
-body.big-buttons .floor-bar .seg button { min-height: 40px; height: 40px; }
+.floor-bar .seg button, .plan-bar .seg button { flex: none; min-height: 44px; height: 44px; padding: 0 16px; font-size: 14.5px; border-radius: 8px; }
+.plan-bar > button { min-height: 44px; font-size: 14.5px; }
+body.big-buttons .floor-bar .seg button { min-height: 48px; height: 48px; }
+
+/* The bill on any till: every button at least 44px to tap (− + ✎, ‹ back, the switch row). */
+@media (min-width: 901px) {
+  .order .ticket-head .back-ticket { min-height: 44px; min-width: 44px; }
+  .order .ticket-lines .stepper button, .order .ticket-lines td .icon-btn { min-height: 44px; min-width: 44px; }
+  .order .ticket-foot .switch { min-height: 44px; }
+  .order .ticket-foot .send, .order .ticket-foot .mains { min-height: 44px; }
+  .order .tools button { min-height: 44px; }
+}
+@media (min-width: 901px) and (max-height: 820px) {
+  .order .ticket-lines td { padding-top: 3px; padding-bottom: 3px; }
+  .order .ticket-lines td.num { padding-top: 14px; }
+}
+
+/* ---------- short landscape tills (1024 x 600): the bill keeps five dish lines ----------
+   The same foot as on a phone: Send and Finish & Pay side by side (each a full row
+   when "Call mains" shows too), only the tax / service and the total above them.
+   A slimmer header and tool row; every button on the bill stays at least 44px. */
+@media (min-width: 901px) and (max-height: 660px) {
+  main.fill { padding: 8px 10px; }
+  .order { --ticket-w: 380px; gap: 10px; }
+  .order .ticket-head { padding: 3px 10px 1px 8px; }
+  .order .ticket-head .back-ticket { min-height: 44px; min-width: 44px; }
+  .order .ticket-head .grow { min-width: 0; }
+  .order .ticket-head .big-id { font-size: 18px; }
+  .order .ticket-head .head-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
+  .order .tools { padding: 0 6px 3px; gap: 2px; }
+  .order .tools button { min-height: 44px; padding: 2px; }
+  .order .ticket-lines td { padding-top: 2px; padding-bottom: 2px; }
+  .order .ticket-lines td:first-child { padding-top: 4px; }
+  .order .ticket-lines td.num { padding-top: 13px; }
+  .order .ticket-lines .stepper button, .order .ticket-lines td .icon-btn { min-height: 44px; min-width: 44px; }
+  .order .ticket-lines .stepper span { min-width: 20px; }
+  .order .ticket-foot { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; padding: 5px 10px 8px; }
+  .order .ticket-foot > * { grid-column: 1 / -1; }
+  .order .ticket-foot > .send-row { grid-column: 1; }
+  .order .ticket-foot > button.pay { grid-column: 2; }
+  .order .ticket-foot:has(.mains:not([hidden])) > .send-row,
+  .order .ticket-foot:has(.mains:not([hidden])) > button.pay { grid-column: 1 / -1; }
+  .order .totals tr.sub-row { display: none; }
+  .order .totals td { font-size: 13.5px; }
+  .order .totals .grand td { font-size: 20px; padding-top: 0; line-height: 1.2; }
+  .order .ticket-foot .switch { min-height: 44px; }
+  .order .ticket-foot .send, .order .ticket-foot .mains { min-height: 48px; padding: 0 8px; white-space: nowrap; font-size: 15px; }
+  .order button.pay { min-height: 48px; flex-direction: column; justify-content: center; gap: 0; padding: 2px 8px; font-size: 14px; line-height: 1.15; }
+  .order button.pay strong { font-size: 20px; }
+  .order .ticket-foot:has(.mains:not([hidden])) > button.pay { flex-direction: row; justify-content: space-between; padding: 0 16px; font-size: 16px; min-height: 46px; }
+  body.big-buttons .order .ticket-foot .send, body.big-buttons .order .ticket-foot .mains { min-height: 52px; font-size: 15.5px; }
+  body.big-buttons .order button.pay { min-height: 52px; }
+  body.big-buttons .order .tools button { min-height: 46px; }
+}
+
+/* ---------- dish pop-up: the name, × and the kitchen warning stay at the top ---------- */
+.dialog.line-editor { padding-top: 0; scroll-padding-top: 76px; }
+.dialog.line-editor:has(.warn-box) { scroll-padding-top: 136px; }
+.line-editor .edit-top { position: sticky; top: 0; z-index: 2; display: flex; flex-direction: column; gap: 10px; padding-top: 18px; padding-bottom: 2px; background: var(--surface); }
+@media (max-width: 560px) { .line-editor .edit-top { padding-top: 16px; } }
+/* The on-screen keyboard is open: messages show at the top, not over the dialog's buttons above the keyboard. */
+body.kb-open #toast { top: 12px; bottom: auto; }
+
+/* ---------- phones ---------- */
+/* The order screen's search row, category pills and sub-categories keep their height; the dishes scroll. */
+@media (max-width: 900px) {
+  .menu > .menu-top, .menu > .cats, .menu > .subcats { flex-shrink: 0; }
+}
+/* Tables screen on a phone: the plan also takes the empty height below it (up to half
+   as tall again), so the tables grow; each is at least 44px to tap. */
+@media (max-width: 600px) {
+  .floor-page { display: flex; flex-direction: column; min-height: 100%; height: auto; }
+  .floor-page > .plan {
+    flex: 1 1 auto; aspect-ratio: auto !important; width: 100% !important;
+    min-height: calc((100vw - 24px) * var(--plan-ratio, .7));
+    max-height: calc((100vw - 24px) * var(--plan-ratio, .7) * 1.6);
+  }
+  .floor-page > .plan .tbl:not(.deco) { min-width: 44px; min-height: 44px; }
+}
+
+/* ---------- Finish & Pay: one height whatever is picked ----------
+   Cash (keypad) is taller than Card (a hint): the dialog keeps one height so the
+   method buttons and Take stay where they are when switching. */
+.dialog.pay-wide { height: min(720px, 100%); }
+.dialog.pay-wide > .pay-one { align-content: start; }
+@media (max-width: 760px) { .dialog.pay-wide { height: 100%; } }

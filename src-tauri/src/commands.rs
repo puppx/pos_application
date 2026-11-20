@@ -50,15 +50,45 @@ pub struct Inner {
 pub struct App {
     inner: Mutex<Inner>,
     pub backup_dir: PathBuf,
+    /// The database's PIN salt and cost, copied out so a PIN is hashed
+    /// (20-60 ms) before taking `inner`, not while every terminal waits.
+    /// Renewed by a restore; a stale one only costs hashing again.
+    hasher: Mutex<PinHasher>,
+    /// Held while the automatic backup copies the database, so a restore or
+    /// an update waits for it. True once an update is installing: no
+    /// automatic backup starts after that.
+    backup_gate: Mutex<bool>,
 }
 
 impl App {
     pub fn new(pos: Pos, backup_dir: PathBuf) -> App {
-        App { inner: Mutex::new(Inner { pos, logins: HashMap::new(), network_throttle: LoginThrottle::default(), local_throttle: LoginThrottle::default() }), backup_dir }
+        let hasher = Mutex::new(pos.pin_hasher());
+        App {
+            inner: Mutex::new(Inner { pos, logins: HashMap::new(), network_throttle: LoginThrottle::default(), local_throttle: LoginThrottle::default() }),
+            backup_dir,
+            hasher,
+            backup_gate: Mutex::new(false),
+        }
     }
 
     pub fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hash a typed PIN without the database lock (see [`HashedPin`]).
+    fn hash_pin(&self, pin: &str) -> HashedPin {
+        let hasher = self.hasher.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        hasher.hash(pin)
+    }
+
+    fn backup_gate(&self) -> MutexGuard<'_, bool> {
+        self.backup_gate.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// An update is about to replace the app: wait for an automatic backup
+    /// still copying, and start no other.
+    pub fn stop_auto_backups(&self) {
+        *self.backup_gate() = true;
     }
 
     /// Run `f` as the user logged in on terminal `t`, re-validated against
@@ -264,6 +294,48 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The automatic daily backup: a copy of the database file at `db` when the
+/// newest daily or manual backup is over a day old, then old ones pruned.
+/// Run in the background after the window opens (on a big database it takes
+/// a while). It copies through a connection of its own, so terminals keep
+/// working; restores and updates wait for it (`backup_gate`). The copy is
+/// written under a scratch name and renamed when complete, so a copy cut
+/// off (the app closed) is never taken for a backup. Returns the new file.
+pub fn auto_backup(app: &App, db: &Path, every: Duration) -> Option<PathBuf> {
+    let gate = app.backup_gate();
+    if *gate {
+        return None;
+    }
+    let dir = &app.backup_dir;
+    let (set_up, keep) = {
+        let g = app.lock();
+        (!g.pos.needs_setup().unwrap_or(true), g.pos.backups_kept().unwrap_or(BACKUPS_KEPT_DEFAULT))
+    };
+    // Only daily and manual backups count: a restore or a loaded file is not one.
+    let fresh = newest_regular_backup(dir).and_then(|t| t.elapsed().ok()).is_some_and(|age| age < every);
+    if fresh || !set_up {
+        return None;
+    }
+    remove_stale_uploads(dir);
+    let work = dir.join(format!("backup-work-{}-{}.tmp", unix_now(), std::process::id()));
+    let made = Pos::backup_database_file(db, &work).and_then(|()| {
+        let path = backup_path(dir);
+        std::fs::rename(&work, &path).map_err(|e| io_error(&e, "saving the backup"))?;
+        Ok(path)
+    });
+    let made = match made {
+        Ok(path) => Some(path),
+        Err(e) => {
+            eprintln!("auto backup failed: {e}");
+            let _ = std::fs::remove_file(&work);
+            None
+        }
+    };
+    prune_backups(dir, keep);
+    drop(gate);
+    made
+}
+
 /// A fresh scratch file for checking a backup (see `Pos::prepare_restore`);
 /// never the same twice, so two checks at once cannot share one.
 fn work_path(dir: &Path) -> PathBuf {
@@ -288,7 +360,8 @@ fn remove_stale_uploads(dir: &Path) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > day);
-        if old && ((name.starts_with("upload-") && name.ends_with(".part")) || (name.starts_with("restore-work-") && name.ends_with(".tmp"))) {
+        let scratch = (name.starts_with("restore-work-") || name.starts_with("backup-work-")) && name.ends_with(".tmp");
+        if old && ((name.starts_with("upload-") && name.ends_with(".part")) || scratch) {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -494,16 +567,23 @@ commands! {
     }
 
     /// `user_id`: the name picked on the login screen (PINs may be shared).
+    /// The PIN is hashed before the lock is taken (other terminals go on
+    /// meanwhile); a locked-out terminal is told at once, without hashing.
     fn login(app, t, pin: String, user_id: Option<i64>) -> Session {
+        {
+            let g = app.lock();
+            if t == LOCAL { &g.local_throttle } else { &g.network_throttle }.check(Instant::now())?;
+        }
+        let pin = app.hash_pin(&pin);
         let mut g = app.lock();
         let inner = &mut *g;
         let s = if t == LOCAL {
             let mut throttle = std::mem::take(&mut inner.local_throttle);
-            let r = inner.pos.login_as(user_id, &pin, &mut throttle);
+            let r = inner.pos.login_hashed(user_id, &pin, &mut throttle);
             inner.local_throttle = throttle;
             r?
         } else {
-            inner.pos.login_as(user_id, &pin, &mut inner.network_throttle)?
+            inner.pos.login_hashed(user_id, &pin, &mut inner.network_throttle)?
         };
         g.sign_in(t, &s);
         Ok(s)
@@ -738,12 +818,13 @@ commands! {
     /// `pin`: a manager's or admin's PIN approving a discount over the staff
     /// limit (it only approves; nobody is logged in or out).
     fn update_item(app, t, item_id: i64, update: ItemUpdate, pin: Option<String>, order_id: Option<i64>) -> Order {
+        let pin = pin.as_deref().map(|p| app.hash_pin(p));
         let (order, job) = app.with_session(t, |pos, s| {
             // The till says which order it shows: the dish must still be on it.
             if let Some(o) = order_id {
                 pos.check_item_on_order(o, item_id)?;
             }
-            let approver = pin.as_deref().map(|p| pos.pin_owner_for(p, Some(s.user_id))).transpose()?;
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
             pos.update_item_for_kitchen_approved(s, approver.as_ref(), item_id, &update)
         })?;
         // The change is saved either way; a printer problem must not undo it.
@@ -754,11 +835,12 @@ commands! {
     /// Change one line's price each. `pin`: a manager's or admin's PIN when
     /// staff change it (it only approves; nobody is logged in or out).
     fn set_item_price(app, t, item_id: i64, price_cents: i64, pin: Option<String>, order_id: Option<i64>) -> Order {
+        let pin = pin.as_deref().map(|p| app.hash_pin(p));
         app.with_session(t, |pos, s| {
             if let Some(o) = order_id {
                 pos.check_item_on_order(o, item_id)?;
             }
-            let approver = pin.as_deref().map(|p| pos.pin_owner_for(p, Some(s.user_id))).transpose()?;
+            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
             pos.set_item_price(s, approver.as_ref(), item_id, price_cents)
         })
     }
@@ -1017,7 +1099,8 @@ commands! {
     /// it is theirs, even if they share it. Dishes still cooking get a
     /// CANCELLED ticket. See `Pos::cancel_order_confirmed`.
     fn cancel_order(app, t, order_id: i64, reason: String, pin: Option<String>) -> PrintOutcome {
-        let job = app.with_session(t, |pos, s| pos.cancel_order_confirmed(s, order_id, &reason, pin.as_deref()))?;
+        let pin = pin.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(|p| app.hash_pin(p));
+        let job = app.with_session(t, |pos, s| pos.cancel_order_confirmed_hashed(s, order_id, &reason, pin.as_ref()))?;
         Ok(print(job))
     }
 
@@ -1038,8 +1121,15 @@ commands! {
         app.with_session(t, |pos, s| pos.list_orders(s, from, to, limit, offset))
     }
 
+    /// Also cancels open orders left empty for over half an hour, at most
+    /// every ten minutes (every till asks for this often).
     fn business_day(app, t) -> BusinessDay {
-        app.with_session(t, |pos, s| pos.business_day(s))
+        app.with_session(t, |pos, s| {
+            if let Err(e) = pos.sweep_empty_orders_if_due() {
+                eprintln!("empty orders: {e}");
+            }
+            pos.business_day(s)
+        })
     }
 
     fn close_day(app, t) -> CloseResult {
@@ -1432,6 +1522,8 @@ commands! {
             return Err(PosError::Validation("that is not a backup".into()));
         }
         let src = app.backup_dir.join(&name);
+        // Never while the automatic backup is copying the data being replaced.
+        let _gate = app.backup_gate();
         let (restored, keep) = app.with_session_inner(t, |inner, s| {
             require_restore(s)?;
             inner.pos.verify_pin(s, &pin)?;
@@ -1455,8 +1547,10 @@ commands! {
                 }
                 Ok(summary) => summary,
             };
-            // The data is replaced: sessions from the old staff list are void.
+            // The data is replaced: sessions from the old staff list are void,
+            // and PINs are hashed with the backup's salt.
             inner.log_everyone_out();
+            *app.hasher.lock().unwrap_or_else(|e| e.into_inner()) = inner.pos.pin_hasher();
             let keep = inner.pos.backups_kept().unwrap_or(BACKUPS_KEPT_DEFAULT);
             Ok((RestoreResult { summary, restored: name, safety_copy }, keep))
         })?;
@@ -2056,6 +2150,95 @@ mod tests {
         require_updates(&app, LOCAL).unwrap();
         dispatch(&app, LOCAL, "login", json!({ "pin": "4646" })).unwrap();
         assert!(matches!(require_updates(&app, LOCAL), Err(PosError::Forbidden)));
+    }
+
+    /// A till on a database file (as the app runs), Owner 1111 and Sam 2222,
+    /// backups in `dir/backups`; and a full backup from another PC (Nok
+    /// 4321) in that folder as "pos-1700000000.db".
+    fn till_on_disk(dir: &Path) -> (App, PathBuf) {
+        let backups = dir.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let mut other = Pos::open(dir.join("other.db")).unwrap();
+        let nok = other.setup_first_admin("Nok", "4321").unwrap();
+        other.set_setting(&nok, "store_name", "Old Shop").unwrap();
+        other.backup_unchecked(backups.join("pos-imported-1700000000.db")).unwrap();
+        let db = dir.join("pos.db");
+        let mut pos = Pos::open(&db).unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.set_setting(&admin, "store_name", "This Shop").unwrap();
+        (App::new(pos, backups), db)
+    }
+
+    fn store_name(path: &Path) -> String {
+        let c = Connection::open(path).unwrap();
+        c.query_row("SELECT value FROM settings WHERE key = 'store_name'", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn the_daily_backup_is_a_complete_copy_made_beside_the_till() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = till_on_disk(dir.path());
+        let day = Duration::from_secs(24 * 60 * 60);
+        // The tills keep working while it copies: it never holds their lock.
+        let made = std::thread::scope(|sc| {
+            let backup = sc.spawn(|| auto_backup(&app, &db, day));
+            for _ in 0..20 {
+                dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+            }
+            backup.join().unwrap()
+        });
+        let made = made.expect("a backup");
+        let name = made.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(is_kind(&name, "pos-"), "{name}");
+        assert_eq!(store_name(&made), "This Shop");
+        // No scratch file is left; one a day is enough.
+        assert_eq!(files(&app.backup_dir), [name.clone(), "pos-imported-1700000000.db".to_string()]);
+        assert!(auto_backup(&app, &db, day).is_none());
+        // A copy that cannot be made leaves nothing behind.
+        assert!(auto_backup(&app, &dir.path().join("missing.db"), Duration::ZERO).is_none());
+        assert_eq!(files(&app.backup_dir).len(), 2);
+        // Once an update is installing, none starts.
+        app.stop_auto_backups();
+        assert!(auto_backup(&app, &db, Duration::ZERO).is_none());
+        assert_eq!(files(&app.backup_dir).len(), 2);
+    }
+
+    #[test]
+    fn a_restore_waits_for_the_daily_backup_and_pins_follow_the_restored_salt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = till_on_disk(dir.path());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let before = format!("{:?}", app.hasher.lock().unwrap().clone());
+        // The daily backup is copying (it holds the gate) when the restore comes.
+        let waited = std::thread::scope(|sc| {
+            let gate = app.backup_gate();
+            let restore = sc.spawn(|| {
+                let t = Instant::now();
+                dispatch(&app, LOCAL, "restore_backup", json!({ "name": "pos-imported-1700000000.db", "pin": "1111", "confirm": "RESTORE" })).unwrap();
+                t.elapsed()
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            // The till still works meanwhile.
+            assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["store_name"], "This Shop");
+            drop(gate);
+            restore.join().unwrap()
+        });
+        assert!(waited >= Duration::from_millis(250), "{waited:?}");
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["store_name"], "Old Shop");
+        // The PIN salt came with the backup: the cached one is the new one.
+        let after = format!("{:?}", app.hasher.lock().unwrap().clone());
+        assert_ne!(before, after);
+        assert_eq!(after, format!("{:?}", app.lock().pos.pin_hasher()));
+        assert!(matches!(dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })), Err(PosError::InvalidPin)));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "4321" })).unwrap();
+        // A stale cached salt only costs hashing again, under the lock.
+        *app.hasher.lock().unwrap() = Pos::open_in_memory().unwrap().pin_hasher();
+        dispatch(&app, LOCAL, "login", json!({ "pin": "4321" })).unwrap();
+        assert!(matches!(dispatch(&app, LOCAL, "login", json!({ "pin": "9999" })), Err(PosError::InvalidPin)));
+        // And the daily backup after it copies the restored data.
+        let made = auto_backup(&app, &db, Duration::ZERO).unwrap();
+        assert_eq!(store_name(&made), "Old Shop");
     }
 
     #[test]

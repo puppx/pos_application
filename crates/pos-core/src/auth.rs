@@ -76,15 +76,74 @@ impl LoginThrottle {
     }
 }
 
+fn argon_hash(pin: &str, salt: &[u8; 16], params: &Params) -> Result<Vec<u8>> {
+    validate_pin(pin)?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.clone());
+    let mut out = vec![0u8; 32];
+    argon.hash_password_into(pin.as_bytes(), salt, &mut out).map_err(|e| PosError::Internal(e.to_string()))?;
+    Ok(out)
+}
+
+/// What this database hashes PINs with (its salt and the Argon2 cost), so a
+/// PIN can be hashed (20-60 ms) before taking the lock every terminal
+/// shares. See [`Pos::pin_hasher`].
+#[derive(Clone, Debug)]
+pub struct PinHasher {
+    salt: [u8; 16],
+    params: Params,
+}
+
+impl PinHasher {
+    pub fn hash(&self, pin: &str) -> HashedPin {
+        HashedPin { pin: pin.to_string(), done: Some((self.clone(), argon_hash(pin, &self.salt, &self.params).ok())) }
+    }
+}
+
+/// A typed PIN, hashed ahead of time or not. A hash made with another salt
+/// (the data was restored from a backup meanwhile) is not used: the PIN is
+/// hashed again with the database's own.
+#[derive(Debug)]
+pub struct HashedPin {
+    pin: String,
+    /// The hasher used, and the hash (None: not a valid PIN).
+    done: Option<(PinHasher, Option<Vec<u8>>)>,
+}
+
+impl HashedPin {
+    /// Not hashed yet: hashed when used.
+    pub fn later(pin: &str) -> HashedPin {
+        HashedPin { pin: pin.to_string(), done: None }
+    }
+
+    pub fn len(&self) -> usize {
+        self.pin.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pin.is_empty()
+    }
+}
+
 impl Pos {
     pub(crate) fn hash_pin(&self, pin: &str) -> Result<Vec<u8>> {
-        validate_pin(pin)?;
-        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, self.pin_params.clone());
-        let mut out = vec![0u8; 32];
-        argon
-            .hash_password_into(pin.as_bytes(), &self.pin_salt, &mut out)
-            .map_err(|e| PosError::Internal(e.to_string()))?;
-        Ok(out)
+        argon_hash(pin, &self.pin_salt, &self.pin_params)
+    }
+
+    /// The salt and cost PINs are hashed with here, to hash one without
+    /// the database (see [`HashedPin`]). It changes when a backup is restored.
+    pub fn pin_hasher(&self) -> PinHasher {
+        PinHasher { salt: self.pin_salt, params: self.pin_params.clone() }
+    }
+
+    /// The hash of `pin` for this database: the one made ahead of time if it
+    /// used this database's salt and cost, else made now.
+    fn hash_of(&self, pin: &HashedPin) -> Result<Vec<u8>> {
+        match &pin.done {
+            Some((h, hash)) if h.salt == self.pin_salt && h.params == self.pin_params => {
+                hash.clone().ok_or_else(|| PosError::Validation("PIN must be 4 to 8 digits".into()))
+            }
+            _ => self.hash_pin(&pin.pin),
+        }
     }
 
     /// True until the first admin has been created.
@@ -133,8 +192,14 @@ impl Pos {
     /// their PIN; with no user picked the PIN alone must name one person
     /// (two people may share a PIN, so then they must pick their name).
     pub fn login_as(&mut self, user_id: Option<i64>, pin: &str, throttle: &mut LoginThrottle) -> Result<Session> {
+        self.login_hashed(user_id, &HashedPin::later(pin), throttle)
+    }
+
+    /// [`Pos::login_as`] with a PIN that may be hashed already (see
+    /// [`Pos::pin_hasher`]), so the slow part ran before the lock was taken.
+    pub fn login_hashed(&mut self, user_id: Option<i64>, pin: &HashedPin, throttle: &mut LoginThrottle) -> Result<Session> {
         throttle.check(Instant::now())?;
-        let found: Vec<(i64, String, String)> = match self.hash_pin(pin) {
+        let found: Vec<(i64, String, String)> = match self.hash_of(pin) {
             Ok(hash) => self
                 .conn
                 .prepare_cached("SELECT id, name, role FROM users WHERE pin_hash = ?1 AND active = 1 AND (?2 IS NULL OR id = ?2)")?
@@ -171,8 +236,13 @@ impl Pos {
     /// own (whoever is logged in on this terminal) it counts as theirs: a
     /// manager sharing a PIN with staff can still approve on her own till.
     pub fn pin_owner_for(&mut self, pin: &str, current_user: Option<i64>) -> Result<Session> {
+        self.pin_owner_hashed(&HashedPin::later(pin), current_user)
+    }
+
+    /// [`Pos::pin_owner_for`] with a PIN that may be hashed already.
+    pub fn pin_owner_hashed(&mut self, pin: &HashedPin, current_user: Option<i64>) -> Result<Session> {
         self.throttle.check(Instant::now())?;
-        let found = match self.hash_pin(pin) {
+        let found = match self.hash_of(pin) {
             Ok(hash) => self
                 .conn
                 .prepare_cached(

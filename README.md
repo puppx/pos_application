@@ -48,7 +48,7 @@ run well on low-end desktops and laptops (4 GB RAM).
 - **Auto logout**: after 5 minutes without a touch or key press (Manage → Auto logout: never, 1–60 minutes), with a 30-second warning. Applies to the till and every device on the local server; open orders are kept
 - **Delete mistakes (admin)**: History → an order → **Delete order** removes an order entered by mistake from history and reports for good (stock is put back); use Void for real refunds. In Menu, **Delete item** and **Delete category** remove them for good (items named on past orders are hidden everywhere, and those orders keep their own copy of the name and price)
 - **History, voids/refunds and reports**: daily totals, tax, by order type, by payment method, by category, top items. History's **Today** is the open business day (from the last day close, as in the header), so orders after midnight before the day is closed are still under Today; **Yesterday** is the business day closed last and **Last 7 days** the business days dated in the last week. The **Day** picker shows calendar days (midnight to midnight). The line under the buttons says which times are shown
-- **Backups**: automatic daily copy at startup (the last 14 kept, or as set in Backup & data), plus "Back up everything now". **Restore** any full backup from the list or from a file (*Restore everything from a file…*), e.g. to move to a new PC: see [Moving to a new PC](#moving-to-a-new-pc)
+- **Backups**: automatic daily copy a few seconds after the app opens, in the background while you work (the last 14 kept, or as set in Backup & data), plus "Back up everything now". **Restore** any full backup from the list or from a file (*Restore everything from a file…*), e.g. to move to a new PC: see [Moving to a new PC](#moving-to-a-new-pc)
 - **Menu backup**: Manage → Menu backup saves just the menu (categories, items, choices, options, prices) to restore later or load on another till (*Restore from a file…*)
 - **Reset data (admin, danger zone)**: tick what to delete (sales history, all or before a date; customers; menu; floor plan; staff; settings) and keep the rest. Needs your PIN and typing RESET, and a full backup is saved automatically first
 - **Audit log** of logins, voids, discounts, removed items, menu, floor and user changes
@@ -333,7 +333,10 @@ cargo run -p pos-core --example demo_data -- "%APPDATA%\com.puppx.pos\pos.db"
 - `synchronous=FULL`, so a completed sale survives a power cut. This costs one fsync per sale.
 - A 16 MB page cache plus memory-mapped I/O. Every hot query uses an index, and prepared statements are cached.
 - The menu is loaded once per order screen and filtered in the UI, so tapping and searching items needs no database round trip.
-- The live floor view is a single query per refresh (about 0.25 ms with 30 busy tables).
+- The live floor view and the kitchen screen start from the open orders (and, for the kitchen, those paid in the last few hours), never from every dish ever sold: about 0.02 ms and 0.1 ms on a year of data (72,000 orders).
+- The local server sends every answer at once (TCP_NODELAY), about 1 ms per call on the network instead of 45 ms. Browsers keep the UI files and only ask whether they changed (ETag).
+- PINs are hashed (Argon2, 20–60 ms) before the database is locked, so a login never holds up the other terminals.
+- Orders left open with nothing on them for over 30 minutes (a table tapped, then left) are cancelled at startup and every 10 minutes, so they do not pile up on the Orders board. They stay out of History and reports, like any empty order.
 - Money is stored as integer cents and tax rates as basis points, so there is no floating-point drift.
 - The release build uses LTO, one codegen unit and stripped symbols.
 
@@ -342,6 +345,13 @@ To benchmark on your own machine (2,000-item menu, 60 tables on two floors,
 
 ```
 cargo test --release -p pos-core --test perf -- --ignored --nocapture
+```
+
+The kitchen screen and floor view can also be timed on a copy of a real
+database (never the live file: it is upgraded when opened):
+
+```
+POS_PERF_DB=copy-of-pos.db POS_PERF_PIN=1234 POS_PERF_USER=1 cargo test -p pos-core --test perf kitchen_and_floor -- --ignored --nocapture
 ```
 
 ## Users and security

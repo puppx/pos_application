@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
-pub use auth::{LoginThrottle, LoginUser};
+pub use auth::{HashedPin, LoginThrottle, LoginUser, PinHasher};
 pub use channels::{Channel, ChannelInput};
 pub use dayclose::{BusinessDay, DayClose};
 pub use customers::{normalize_postcode, phone_digits, Customer, CustomerInput};
@@ -54,7 +54,7 @@ pub use printing::{
     PRINT_CANCELLED_ORDER_KEY, SLOW_CHUNK, SLOW_PAUSE,
 };
 pub use orders::{
-    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, OPEN_ITEM_SKU,
+    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, EMPTY_ORDER_AGE, OPEN_ITEM_SKU,
 };
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
@@ -116,6 +116,8 @@ pub struct Pos {
     pin_salt: [u8; 16],
     pin_params: argon2::Params,
     throttle: LoginThrottle,
+    /// When forgotten empty orders were last cancelled (see `sweep_empty_orders_if_due`).
+    last_empty_sweep: Option<std::time::Instant>,
 }
 
 impl Pos {
@@ -143,14 +145,15 @@ impl Pos {
              PRAGMA cache_size = -16000;
              PRAGMA mmap_size = 134217728;",
         )?;
-        conn.set_prepared_statement_cache_capacity(64);
+        // Over a hundred statements are prepared once and reused; keep them all.
+        conn.set_prepared_statement_cache_capacity(256);
         migrate(&conn)?;
         conn.execute_batch(receipt::BILL_STALE_TRIGGERS)?;
         let pin_salt = load_or_create_salt(&conn)?;
         if database_id(&conn)?.is_none() {
             new_database_id(&conn)?;
         }
-        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default() })
+        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default(), last_empty_sweep: None })
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -202,6 +205,27 @@ impl Pos {
     pub fn backup_unchecked(&self, dest: impl AsRef<Path>) -> Result<()> {
         self.conn.backup(rusqlite::DatabaseName::Main, dest, None)?;
         Ok(())
+    }
+
+    /// Consistent copy of the database file at `src` into `dest` through a
+    /// connection of its own, so it needs no [`Pos`] (nor the lock around
+    /// one): in WAL mode the till keeps selling while it runs, and it sees
+    /// the data as it was when it started. For the automatic daily backup.
+    pub fn backup_database_file(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<()> {
+        use rusqlite::OpenFlags;
+        let src = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        src.busy_timeout(Duration::from_secs(5))?;
+        let mut dest = Connection::open(dest)?;
+        // One step: the whole copy in one read transaction. Steps of a few
+        // pages would start again after every sale made meanwhile.
+        let backup = rusqlite::backup::Backup::new(&src, &mut dest)?;
+        for _ in 0..20 {
+            match backup.step(-1)? {
+                rusqlite::backup::StepResult::Done => return Ok(()),
+                _ => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+        Err(PosError::Conflict("the database is busy; try again".into()))
     }
 
     /// Random id of this database's contents, changed by every restore, so

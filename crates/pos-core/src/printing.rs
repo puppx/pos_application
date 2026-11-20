@@ -1740,14 +1740,21 @@ impl Pos {
     ///
     /// The audit log records `s` as who cancelled it, and the PIN's owner.
     pub fn cancel_order_confirmed(&mut self, s: &Session, order_id: i64, reason: &str, pin: Option<&str>) -> Result<Option<PrintJob>> {
-        match pin.map(str::trim).filter(|p| !p.is_empty()) {
+        let pin = pin.map(str::trim).filter(|p| !p.is_empty()).map(crate::HashedPin::later);
+        self.cancel_order_confirmed_hashed(s, order_id, reason, pin.as_ref())
+    }
+
+    /// [`Pos::cancel_order_confirmed`] with the PIN (trimmed, not empty)
+    /// possibly hashed already, before the database lock was taken.
+    pub fn cancel_order_confirmed_hashed(&mut self, s: &Session, order_id: i64, reason: &str, pin: Option<&crate::HashedPin>) -> Result<Option<PrintJob>> {
+        match pin.filter(|p| !p.is_empty()) {
             None => {
                 s.require(Permission::CancelWithoutPin)?;
                 let note = format!("(no PIN, {})", s.role.as_str());
                 self.cancel_for_kitchen_logged(s, s, &note, order_id, reason)
             }
             Some(p) => {
-                let approver = self.pin_owner_for(p, Some(s.user_id))?;
+                let approver = self.pin_owner_hashed(p, Some(s.user_id))?;
                 let note = format!("(PIN of {} #{}, {})", approver.name, approver.user_id, approver.role.as_str());
                 self.cancel_for_kitchen_logged(&approver, s, &note, order_id, reason)
             }

@@ -335,9 +335,12 @@ const act = (fn) => async (ev) => {
 let refreshTimer;
 function screen(...kids) {
   clearInterval(refreshTimer);
-  // Pages opened from Manage get a way back to it.
-  const back = state.session && !state.orderId && inManage(state.view) && h('div', { class: 'manage-back' },
+  // Pages opened from Manage get a way back to it, then their name (as the settings
+  // pages have) and what the page is for.
+  const name = VIEWS.find(([id]) => id === state.view)?.[1];
+  const back = state.session && !state.orderId && inManage(state.view) && h('div', { class: 'manage-back settings-head' },
     h('button', { class: 'back-btn', onclick: () => go('settings') }, icon('back', 22), 'Manage'),
+    name && h('h2', {}, icon(state.view, 26), name),
     MANAGE_SUB[state.view] && h('span', { class: 'page-sub' }, MANAGE_SUB[state.view]));
   setKids(app, back, ...kids);
 }
@@ -757,6 +760,10 @@ function showHelp() {
     h('div', { class: 'muted small' }, 'Tap ? at the top whenever you need this again.'),
     h('button', { class: 'primary', onclick: closeModal }, 'Got it'));
   document.querySelector('#modal .dialog')?.classList.add('help-dialog');
+  // Esc closes it, like the other dialogs.
+  document.removeEventListener('keydown', state.modalKeys);
+  state.modalKeys = (e) => { if (e.key === 'Escape') closeModal(); };
+  document.addEventListener('keydown', state.modalKeys);
 }
 
 /// Top bar title: "Restaurant / Manage › Reports". `crumb` ("Manage") is left out on phones.
@@ -879,7 +886,7 @@ setInterval(() => {
 
 function planBox(reserve = 170) {
   const { w, h: ph } = state.plan;
-  return h('div', { class: 'plan', style: `aspect-ratio:${w}/${ph}; width:min(100%, calc((100vh - ${reserve}px) * ${w / ph}))` });
+  return h('div', { class: 'plan', style: `aspect-ratio:${w}/${ph}; width:min(100%, calc((100vh - ${reserve}px) * ${w / ph})); --plan-ratio:${ph / w}` });
 }
 
 function placeTable(el, t) {
@@ -1155,6 +1162,8 @@ async function renderOrder() {
   const phoneBar = h('button', { class: 'phone-bar', onclick: () => { layout.classList.toggle('show-ticket'); draw(); } });
   // Dine-in: starters go first and the rest waits for "Call mains", unless ticked.
   const allCourses = h('input', { type: 'checkbox' });
+  const coursesSwitch = h('label', { class: 'switch', title: 'Otherwise starters go first and the rest waits for "Call mains"' },
+    allCourses, h('span', {}), 'All courses together');
   // Customer details, service charge, tax: a card under the dishes.
   const extra = h('div', { class: 'ticket-extra' });
   let editing = null;
@@ -1532,13 +1541,27 @@ async function renderOrder() {
       const newNote = note.value.trim() || null;
       closeModal();
       const said = [];
-      let priceFailed = false;
+      let priceFailed = false, vanished = false;
       let pin = null;
       // The same answers as call() gives: logged out, or the order closed on another till.
+      // "not found" is not enough to leave: it is also the answer when only the dish
+      // went (removed or moved on another till) while the order stays open.
       const gone = (msg) => {
         if (msg === 'please log in') { forgetSession(); start(); return true; }
-        if (isDeadOrder(msg, { orderId })) { leaveDeadOrder(); return true; }
+        if (msg === ORDER_CLOSED && isDeadOrder(msg, { orderId })) { leaveDeadOrder(); return true; }
         return false;
+      };
+      // After "not found": leave only if the order itself is no longer open; else show it as it is now.
+      const dishGone = async () => {
+        let now = null;
+        try { now = await invoke('get_order', { id: orderId }); } catch (e) {
+          if (String(e?.message ?? e) === 'please log in') { forgetSession(); start(); return; }
+        }
+        if (state.orderId !== orderId) return;
+        if (!now || now.status !== 'open' || now.id !== orderId) { leaveDeadOrder(); return; }
+        order = now;
+        draw();
+        toast(`${it.name} was changed on another till: nothing saved`, true);
       };
       if (newPrice !== it.unit_price_cents) {
         const args = { orderId, itemId: it.id, priceCents: newPrice };
@@ -1548,23 +1571,22 @@ async function renderOrder() {
         } catch (e) {
           const msg = String(e?.message ?? e);
           if (gone(msg)) return;
-          if (msg === 'not found') {
-            order = await call('get_order', { id: orderId });
-            draw();
-            return toast(`${it.name} was changed on another till: nothing saved`, true);
-          }
+          if (msg === 'not found') return dishGone();
           if (/needs a manager/i.test(msg)) {
             const ok = await pinDialog({
               title: 'Manager PIN', hint: `${it.name}: ${money(it.unit_price_cents)} → ${money(newPrice)}. A manager or admin enters their PIN to approve the new price.`, okLabel: 'Approve price',
               submit: async (typed) => {
                 try { order = await invoke('set_item_price', { ...args, pin: typed }); pin = typed; } catch (e2) {
                   const m = String(e2?.message ?? e2);
-                  if (m === 'please log in' || isDeadOrder(m, { orderId })) { setTimeout(() => gone(m)); return m === 'please log in' ? 'Logged out: log in again' : 'This order was closed on another till'; }
+                  if (m === 'please log in' || m === ORDER_CLOSED) { setTimeout(() => gone(m)); return m === 'please log in' ? 'Logged out: log in again' : 'This order was closed on another till'; }
+                  // The dish (or the order) went while the PIN was typed: close this and look.
+                  if (m === 'not found') { vanished = true; setTimeout(closeModal); return 'Changed on another till'; }
                   return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
                 }
               },
             });
             if (!state.session || state.orderId !== orderId) return;
+            if (vanished) return dishGone();
             if (ok) said.push(`${it.name}: ${money(newPrice)} each`);
             else { priceFailed = true; said.push('price not changed (no manager PIN)'); }
           } else { priceFailed = true; said.push(`price not changed: ${msg}`); }
@@ -1598,11 +1620,13 @@ async function renderOrder() {
       toast(sent ? `${it.name} removed · CANCELLED ticket sent to the kitchen` : `${it.name} removed`);
     }) }, icon('x', 18), 'Remove');
     showModal(
-      h('div', { class: 'edit-head' },
-        h('div', { class: 'grow' }, h('h3', {}, it.name), it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt),
-          it.options.length > 0 && h('div', { class: 'muted small' }, it.options.map((o) => o.name).join(', '))),
-        h('button', { class: 'icon-btn ghost', 'aria-label': 'Close', title: 'Close (Esc)', onclick: closeModal }, icon('x'))),
-      sent && h('div', { class: 'warn-box' }, 'Already in the kitchen. Fewer or Remove prints a CANCELLED ticket; a new note prints a CHANGED ticket.'),
+      // The dish's name, × and the kitchen warning stay at the top while the rest scrolls (on-screen keyboard open).
+      h('div', { class: 'edit-top' },
+        h('div', { class: 'edit-head' },
+          h('div', { class: 'grow' }, h('h3', {}, it.name), it.name_alt && h('div', { class: 'alt', lang: 'th' }, it.name_alt),
+            it.options.length > 0 && h('div', { class: 'muted small' }, it.options.map((o) => o.name).join(', '))),
+          h('button', { class: 'icon-btn ghost', 'aria-label': 'Close', title: 'Close (Esc)', onclick: closeModal }, icon('x'))),
+        sent && h('div', { class: 'warn-box' }, 'Already in the kitchen. Fewer or Remove prints a CANCELLED ticket; a new note prints a CHANGED ticket.')),
       h('div', { class: 'edit-grid' },
         h('div', { class: 'edit-field' }, h('label', {}, 'How many'), h('div', { class: 'qty-pick' }, minus, qtyEl, plus)),
         h('div', { class: 'edit-field' }, h('label', {}, 'Price each'),
@@ -1671,8 +1695,9 @@ async function renderOrder() {
     })));
     if (!order.items.length) lines.append(h('div', { class: 'empty small' }, icon('orders', 36), h('p', {}, 'Tap menu items to add them')));
     setKids(totals, 
-      h('tr', {}, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(order.subtotal_cents))),
-      order.discount_cents ? h('tr', {}, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
+      // Subtotal and discount: the rows a short till drops first (style.css), the total and tax stay.
+      h('tr', { class: 'sub-row' }, h('td', {}, 'Subtotal'), h('td', { class: 'num' }, money(order.subtotal_cents))),
+      order.discount_cents ? h('tr', { class: 'sub-row' }, h('td', {}, 'Discount'), h('td', { class: 'num' }, '-' + money(order.discount_cents))) : '',
       h('tr', { class: 'service-row', onclick: showTax, title: 'Change the tax on this order' },
         h('td', {}, (order.tax_bp != null ? `Tax ${pct(order.tax_bp)}% ` : 'Tax ') + (order.tax_incl ? '(included) ' : ''), h('span', { class: 'edit-link' }, 'change')),
         h('td', { class: 'num' }, money(order.tax_cents))),
@@ -1688,6 +1713,8 @@ async function renderOrder() {
     const waiting = qty((i) => !i.sent_at && i.held);
     const starters = qty((i) => !i.sent_at && !i.held && i.starter);
     const byCourse = order.order_type === 'dine_in' && !allCourses.checked && (starters || waiting);
+    // "All courses together" only matters with starters still to send or mains waiting.
+    coursesSwitch.hidden = !(starters || waiting);
     sendBtn.textContent = !unsent ? 'Send to kitchen'
       : byCourse && starters ? `Send starters (${starters})` : `Send to kitchen (${unsent + (allCourses.checked ? waiting : 0)})`;
     sendBtn.disabled = !unsent && !(allCourses.checked && waiting);
@@ -1900,8 +1927,7 @@ async function renderOrder() {
       lines, extra,
       h('div', { class: 'ticket-foot' },
         totals,
-        order.order_type === 'dine_in' && h('label', { class: 'switch', title: 'Otherwise starters go first and the rest waits for "Call mains"' },
-          allCourses, h('span', {}), 'All courses together'),
+        order.order_type === 'dine_in' && coursesSwitch,
         h('div', { class: 'row nowrap send-row' }, sendBtn, mainsBtn),
         payBtn)),
     phoneBar);
@@ -2153,7 +2179,7 @@ async function payDialog(order, refresh, pay) {
     const enough = method !== 'cash' || (c != null && c >= tg);
     const okLabel = d <= 0 ? (mode === 'dishes' ? 'Tap the dishes this person pays for' : 'Enter an amount')
       : method === 'cash' ? (c > tg ? `${takeCash} ${money(tg)} · change ${money(c - tg)}` : `${takeCash} ${money(tg)}`)
-      : method === 'card' ? `${payName('card')} payment taken · ${money(tg)}` : `Paid by ${order.channel_name} · ${money(tg)}`;
+      : method === 'card' ? `Confirm ${payName('card') === 'Card' ? 'card' : payName('card')} payment · ${money(tg)}` : `Paid by ${order.channel_name} · ${money(tg)}`;
     // One clear total; the amount and the tip are listed above it only when there is a tip.
     const sum = (where) => h('div', { class: `pay-sum ${where}` },
       t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'To pay now'), h('strong', {}, money(d))),
@@ -2171,16 +2197,17 @@ async function payDialog(order, refresh, pay) {
         h('button', { class: 'icon-btn ghost', title: 'Close (Esc)', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
       h('div', { class: 'pay-one' },
         h('div', { class: 'pay-left stack' },
-          order.paid_cents > 0 && h('div', { class: 'pay-parts' },
-            order.payments.map((p) => h('div', { class: 'row pay-part' },
+          // The payments so far scroll in their own list; "Left to pay" under them always shows.
+          order.paid_cents > 0 && h('div', { class: 'pay-parts' }, h('div', { class: 'pay-part-list' },
+            order.payments.map((p) => h('div', { class: 'row nowrap pay-part' },
               h('span', { style: 'flex:1' }, `✓ ${payName(p.method, order.channel_name)} ${money(p.amount_cents)}`,
                 p.tip_cents ? h('span', { class: 'muted' }, ` + tip ${money(p.tip_cents)}`) : ''),
               h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(async () => {
                 order = await call('remove_payment', { orderId: order.id, paymentId: p.id });
                 mode = 'all'; even.done = 0; draw();
                 reload();
-              }) }, 'undo'))),
-            h('div', { class: 'row' }, h('strong', { style: 'flex:1' }, 'Left to pay'), h('span', { class: 'big' }, money(left())))),
+              }) }, 'undo')))),
+            h('div', { class: 'row nowrap pay-left-row' }, h('strong', { style: 'flex:1' }, 'Left to pay'), h('span', { class: 'big' }, money(left())))),
           h('div', { class: 'pay-label' }, 'Pay'),
           seg([['all', 'Everything', money(left())], ['even', 'Split evenly'], ['amount', 'Amount'], ['dishes', 'Dishes']], mode, (v) => {
             mode = v;
@@ -2222,6 +2249,9 @@ async function payDialog(order, refresh, pay) {
     document.querySelector('#modal .dialog')?.classList.add('pay-wide');
     const body = document.querySelector('#modal .pay-one');
     if (body) body.scrollTop = scrolled;
+    // Many part payments in a short list: the latest one shows.
+    const parts = document.querySelector('#modal .pay-part-list');
+    if (parts) parts.scrollTop = parts.scrollHeight;
     setKeys((e) => {
       if (/^[0-9.]$/.test(e.key)) key(e.key);
       else if (e.key === 'Backspace') key('⌫');
@@ -4692,8 +4722,18 @@ async function renderSettings() {
 /// and About for managers, only About (credits and version) for staff.
 function settingsGroups() {
   const kitchen = ['kitchen', 'tickets', 'orders', 'teams'];
-  return SETTINGS_GROUPS.filter(([id]) => isAdmin() || id === 'about' || (isManager() && kitchen.includes(id)));
+  return SETTINGS_GROUPS.filter(([id]) => isAdmin() || id === 'about' || (isManager() && kitchen.includes(id)))
+    .map((g) => (!isAdmin() && MANAGER_GROUPS[g[0]] ? [g[0], g[1], ...MANAGER_GROUPS[g[0]].slice(0, 2)] : g));
 }
+/// What a manager's tile says where they see less than an admin: Kitchen printer
+/// opens only the Kitchen screen card, Orders has no order types or discounts.
+/// [title, line, search words]
+const MANAGER_GROUPS = {
+  kitchen: ['Kitchen screen settings', 'When cards turn amber or red, refresh', 'kitchen screen tablet kds slow late colour color amber red refresh paid'],
+  orders: ['Orders', 'Starter or main, cancelling, quick notes', 'cancel cancelling quick notes courses starter main mains'],
+};
+/// Words that suggest what to type in the Manage search; only those that find a tile this person can open are shown.
+const FIND_EXAMPLES = ['printer', 'tax', 'PIN', 'backup', 'menu', 'reports', 'history', 'quick notes', 'staff'];
 
 /// Manage: big tiles for the other screens (History, Menu, Staff…) and,
 /// for admins, every settings area.
@@ -4701,6 +4741,7 @@ function renderManageHome() {
   state.settingsTab = null;
   drawTitle('Manage');
   const tiles = [];
+  const words = (g) => (!isAdmin() && MANAGER_GROUPS[g]?.[2]) || SETTING_WORDS[g];
   const tile = (id, ic, title, sub, words, onclick) => {
     const el = h('button', { class: 'settings-tile', 'data-group': id, onclick }, icon(ic, 32), h('strong', {}, title), sub && h('small', {}, sub));
     el.dataset.find = `${title} ${sub ?? ''} ${words ?? ''}`.toLowerCase();
@@ -4712,24 +4753,46 @@ function renderManageHome() {
   const open = (id) => () => { state.settingsTab = id; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
   const daily = h('div', { class: 'settings-tiles' }, pages.map(([id, label]) => tile(id, id, label, MANAGE_SUB[id], PAGE_WORDS[id], () => go(id))));
   const setTiles = groups.length > 0 && h('div', { class: 'settings-tiles' }, groups.map(([id, ic, title, sub]) =>
-    tile(id, ic, title, id === 'about' ? `Version ${state.version}` : sub, SETTING_WORDS[id], open(id))));
+    tile(id, ic, title, id === 'about' ? `Version ${state.version}` : sub, words(id), open(id))));
   const dailyHead = h('h3', { class: 'manage-title' }, 'Daily work');
   const setHead = groups.length > 0 && h('h3', { class: 'manage-title' }, 'Settings');
-  const none = h('div', { class: 'empty small', hidden: true }, icon('search', 36), h('p', {}, 'Nothing matches. Try another word, like "printer", "tax" or "PIN".'));
   // Every word typed must appear in the tile's name, its line or its search words.
-  const find = h('input', { type: 'search', placeholder: 'What are you looking for? e.g. printer, tax, PIN, backup', 'aria-label': 'Find a page or setting' });
+  const hits = (text, ws) => ws.every((w) => text.includes(w));
+  // The examples are words in the name or line of a tile this person can open.
+  const examples = FIND_EXAMPLES.filter((x) => tiles.some((t) => hits(t.textContent.toLowerCase(), x.toLowerCase().split(' '))));
+  const quoted = examples.slice(0, 3).map((x) => `"${x}"`);
+  const tryWords = quoted.length > 1 ? `${quoted.slice(0, -1).join(', ')} or ${quoted.at(-1)}` : quoted[0] ?? '';
+  // Pages and settings only an admin opens: a word that finds one of them says so.
+  const adminOnly = [
+    ...SETTINGS_GROUPS.filter(([id]) => !groups.some(([g]) => g === id)).map(([id, , title, sub]) => `${title} ${sub} ${SETTING_WORDS[id]}`),
+    ...VIEWS.filter(([id, , need]) => need && !canSee(need)).map(([id, label]) => `${label} ${MANAGE_SUB[id] ?? ''} ${PAGE_WORDS[id] ?? ''}`),
+    // What a manager's Kitchen printer and Orders tiles leave out.
+    ...(!isAdmin() ? ['kitchen printer printers receipt tickets copies font size large bold language routes bar test page raster',
+      'order types takeaway delivery collection discount discounts limit fix sent'] : []),
+  ].map((x) => x.toLowerCase());
+  const noneText = h('p');
+  const none = h('div', { class: 'empty small', hidden: true }, icon('search', 36), noneText);
+  const phone = matchMedia('(max-width: 600px)').matches;
+  const find = h('input', { type: 'search', 'aria-label': 'Find a page or setting',
+    placeholder: phone ? `Search${examples[0] ? `, e.g. ${examples[0]}` : ''}` : `What are you looking for?${examples.length ? ` e.g. ${examples.slice(0, 4).join(', ')}` : ''}` });
   const filter = () => {
-    const words = find.value.toLowerCase().split(/\s+/).filter(Boolean);
-    for (const t of tiles) t.hidden = !words.every((w) => t.dataset.find.includes(w));
+    const typed = find.value.trim();
+    const ws = typed.toLowerCase().split(/\s+/).filter(Boolean);
+    for (const t of tiles) t.hidden = !hits(t.dataset.find, ws);
     dailyHead.hidden = [...daily.children].every((t) => t.hidden);
     if (setTiles) setHead.hidden = [...setTiles.children].every((t) => t.hidden);
     none.hidden = tiles.some((t) => !t.hidden);
+    if (none.hidden) return;
+    const locked = adminOnly.some((x) => hits(x, ws));
+    noneText.textContent = locked ? `${typed.charAt(0).toUpperCase()}${typed.slice(1)} is changed by an admin. Ask an admin to log in on this till.`
+      : `Nothing matches. ${tryWords ? `Try another word, like ${tryWords}.` : 'Try another word.'}`;
   };
   find.addEventListener('input', filter);
   // Enter with a single match opens it.
   find.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const shown = tiles.filter((t) => !t.hidden); if (shown.length === 1) shown[0].click(); } });
+  // Staff have two tiles: nothing to search.
   screen(h('div', { class: 'page settings-home' },
-    h('div', { class: 'searchbox manage-find' }, icon('search', 22), find),
+    isManager() && h('div', { class: 'searchbox manage-find' }, icon('search', 22), find),
     dailyHead, daily, setHead, setTiles, none));
   return Promise.resolve();
 }
@@ -4908,7 +4971,7 @@ function courseCard() {
     settingSwitch('starter_choice', 'When a starter is tapped on a dine-in order, ask "Starter or Main course?"',
       'Starters ask Starter or Main', 'Starters are added as starters'),
     h('div', { class: 'muted' }, 'Main course: the dish waits and goes with the mains. A dish not yet sent can also be changed later: tap ✎ on it, then Starter or Main course.'),
-    h('div', { class: 'muted small' }, 'When teams are ticked under Settings → Kitchen teams → "Which team makes this?", that question is asked instead of this one.'));
+    h('div', { class: 'muted small' }, 'When teams are ticked under Manage → Kitchen teams → "Which team makes this?", that question is asked instead of this one.'));
 }
 
 /// Reloads the "Which team makes this?" card on screen (after the teams are saved).

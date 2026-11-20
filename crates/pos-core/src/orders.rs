@@ -28,6 +28,13 @@ pub(crate) const EMPTY_ORDER: &str = "NOT EXISTS (SELECT 1 FROM order_items WHER
     AND COALESCE(customer_name, '') = '' AND COALESCE(customer_phone, '') = ''
     AND COALESCE(delivery_address, '') = '' AND COALESCE(notes, '') = ''
     AND COALESCE(external_ref, '') = '' AND customer_id IS NULL";
+/// Open orders with nothing on them (see [`EMPTY_ORDER`]) opened longer ago
+/// than this are forgotten ones (a table tapped, a till reloaded) and get
+/// cancelled; a till that opened one just now is never caught out.
+pub const EMPTY_ORDER_AGE: i64 = 30 * 60;
+/// [`Pos::sweep_empty_orders_if_due`] looks at most this often.
+const EMPTY_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderType {
@@ -1583,6 +1590,40 @@ impl Pos {
         Ok(n > 0)
     }
 
+    /// Cancel every open order with nothing on it (no dishes, payments or
+    /// customer details) opened over [`EMPTY_ORDER_AGE`] ago, as "empty"
+    /// (kept out of history and reports, like [`Pos::cancel_if_empty`]).
+    /// Checked and cancelled in one statement, so a dish added meanwhile
+    /// keeps its order. Returns how many were cancelled.
+    pub fn sweep_empty_orders(&mut self) -> Result<usize> {
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            &format!(
+                "UPDATE orders SET status = 'cancelled', closed_by = NULL, closed_at = unixepoch(), close_reason = 'empty'
+                 WHERE status = 'open' AND opened_at < unixepoch() - ?1 AND {EMPTY_ORDER}"
+            ),
+            [EMPTY_ORDER_AGE],
+        )?;
+        if n > 0 {
+            tx.execute(
+                "INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, 'order.cancel', ?1)",
+                [format!("{n} empty order(s) left open over {} minutes", EMPTY_ORDER_AGE / 60)],
+            )?;
+        }
+        tx.commit()?;
+        self.last_empty_sweep = Some(std::time::Instant::now());
+        Ok(n)
+    }
+
+    /// [`Pos::sweep_empty_orders`], at most every ten minutes (it is called
+    /// with the header's business day, which every till asks for often).
+    pub fn sweep_empty_orders_if_due(&mut self) -> Result<usize> {
+        if self.last_empty_sweep.is_some_and(|t| t.elapsed() < EMPTY_SWEEP_EVERY) {
+            return Ok(0);
+        }
+        self.sweep_empty_orders()
+    }
+
     /// Reverse a paid order (refund) and put its stock back.
     pub fn void_order(&mut self, s: &Session, order_id: i64, reason: &str) -> Result<Order> {
         s.require(Permission::VoidOrder)?;
@@ -1686,7 +1727,65 @@ impl Pos {
 
 #[cfg(test)]
 mod tests {
-    use super::tax_of;
+    use super::{tax_of, EMPTY_SWEEP_EVERY};
+    use crate::*;
+
+    #[test]
+    fn forgotten_empty_orders_are_cancelled_but_not_new_or_real_ones() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let s = pos.setup_first_admin("Owner", "1111").unwrap();
+        let cat = pos.create_category(&s, "Food", None, 1).unwrap().id;
+        let dish = pos
+            .create_product(&s, NewProduct {
+                category_id: Some(cat), sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap()
+            .id;
+        let floor = pos.create_floor(&s, "Ground").unwrap();
+        let t = pos
+            .save_floor_layout(&s, floor.id, &[TableLayout { is_table: Some(true), id: None, name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+            .unwrap()[0]
+            .id;
+        let takeaway = |pos: &Pos, details: OrderDetails| {
+            pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details }).unwrap().id
+        };
+        let old_empty = takeaway(&pos, Default::default());
+        let old_table = pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t), channel_id: None, details: Default::default() }).unwrap().id;
+        let old_dish = takeaway(&pos, Default::default());
+        pos.add_item(&s, old_dish, dish, 1, None, None, &[]).unwrap();
+        let old_named = takeaway(&pos, OrderDetails { customer_name: Some("Ann".into()), ..Default::default() });
+        let just_now = takeaway(&pos, Default::default());
+        let age = |pos: &Pos, id: i64, secs: i64| {
+            pos.conn.execute("UPDATE orders SET opened_at = unixepoch() - ?2 WHERE id = ?1", [id, secs]).unwrap();
+        };
+        for id in [old_empty, old_table, old_dish, old_named] {
+            age(&pos, id, EMPTY_ORDER_AGE + 60);
+        }
+        age(&pos, just_now, EMPTY_ORDER_AGE - 60);
+        assert_eq!(pos.sweep_empty_orders_if_due().unwrap(), 2);
+        let status = |pos: &Pos, id: i64| -> (String, Option<String>, Option<i64>) {
+            pos.conn.query_row("SELECT status, close_reason, closed_by FROM orders WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+        };
+        for id in [old_empty, old_table] {
+            assert_eq!(status(&pos, id), ("cancelled".into(), Some("empty".into()), None));
+        }
+        for id in [old_dish, old_named, just_now] {
+            assert_eq!(status(&pos, id).0, "open");
+        }
+        // The table is free again; the cancelled ones stay out of history.
+        assert!(pos.floor_status(&s, floor.id).unwrap()[0].order_id.is_none());
+        assert!(pos.list_orders(&s, 0, i64::MAX, 100, 0).unwrap().is_empty());
+        // At most every ten minutes...
+        age(&pos, just_now, EMPTY_ORDER_AGE + 60);
+        assert_eq!(pos.sweep_empty_orders_if_due().unwrap(), 0);
+        assert_eq!(status(&pos, just_now).0, "open");
+        // ...then again.
+        pos.last_empty_sweep = Some(std::time::Instant::now() - EMPTY_SWEEP_EVERY);
+        assert_eq!(pos.sweep_empty_orders_if_due().unwrap(), 1);
+        assert_eq!(status(&pos, just_now).0, "cancelled");
+        assert_eq!(pos.sweep_empty_orders().unwrap(), 0);
+    }
 
     #[test]
     fn tax_rounding() {

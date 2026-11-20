@@ -211,28 +211,24 @@ impl Pos {
     }
 
     /// Live floor view: every table with its open order's running total.
-    /// One query; per-table totals use the order_items index.
+    /// Each till asks every few seconds: the totals are worked out per open
+    /// order from the order_items index, never over every dish ever sold.
     pub fn floor_status(&self, s: &Session, floor_id: i64) -> Result<Vec<TableStatus>> {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT t.id, t.floor_id, t.name, t.shape, t.x, t.y, t.w, t.h, o.id, o.opened_at,
-                    COALESCE(i.total, 0) + (COALESCE(i.net, 0) * COALESCE(o.service_bp, 0) + 5000) / 10000,
-                    COALESCE(i.items, 0), COALESCE(i.unsent, 0), COALESCE(i.held, 0), t.is_table AS is_table
+                    COALESCE((
+                        SELECT SUM(i.unit_price_cents * i.qty - i.discount_cents
+                                   + CASE WHEN o.tax_incl = 1 THEN 0
+                                          ELSE ((i.unit_price_cents * i.qty - i.discount_cents) * i.tax_rate_bp + 5000) / 10000 END)
+                               + (SUM(i.unit_price_cents * i.qty - i.discount_cents) * COALESCE(o.service_bp, 0) + 5000) / 10000
+                        FROM order_items i WHERE i.order_id = o.id), 0),
+                    COALESCE((SELECT SUM(i.qty) FROM order_items i WHERE i.order_id = o.id), 0),
+                    (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 0 AND i.is_set = 0),
+                    (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id AND i.sent_at IS NULL AND i.held = 1),
+                    t.is_table AS is_table
              FROM dining_tables t
              LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'
-             LEFT JOIN (
-                 SELECT oi.order_id,
-                        SUM(oi.unit_price_cents * oi.qty - oi.discount_cents
-                            + CASE WHEN oo.tax_incl = 1 THEN 0
-                                   ELSE ((oi.unit_price_cents * oi.qty - oi.discount_cents) * oi.tax_rate_bp + 5000) / 10000 END) AS total,
-                        SUM(oi.unit_price_cents * oi.qty - oi.discount_cents) AS net,
-                        SUM(oi.qty) AS items,
-                        SUM(oi.sent_at IS NULL AND oi.held = 0 AND oi.is_set = 0) AS unsent,
-                        SUM(oi.sent_at IS NULL AND oi.held = 1) AS held
-                 FROM order_items oi JOIN orders oo ON oo.id = oi.order_id
-                 WHERE oo.status = 'open'
-                 GROUP BY oi.order_id
-             ) i ON i.order_id = o.id
              WHERE t.floor_id = ?1 AND t.active = 1
              ORDER BY t.id",
         )?;
@@ -329,5 +325,129 @@ impl Pos {
         )?;
         tx.commit()?;
         self.list_tables(s, floor_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+
+    /// The floor view's query before 0.13.1 (totals of every open order
+    /// worked out over all of order_items), to check the faster one matches.
+    fn old_status(pos: &Pos, floor_id: i64) -> Vec<TableStatus> {
+        let mut stmt = pos
+            .conn
+            .prepare(
+                "SELECT t.id, t.floor_id, t.name, t.shape, t.x, t.y, t.w, t.h, o.id, o.opened_at,
+                    COALESCE(i.total, 0) + (COALESCE(i.net, 0) * COALESCE(o.service_bp, 0) + 5000) / 10000,
+                    COALESCE(i.items, 0), COALESCE(i.unsent, 0), COALESCE(i.held, 0), t.is_table AS is_table
+             FROM dining_tables t
+             LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'
+             LEFT JOIN (
+                 SELECT oi.order_id,
+                        SUM(oi.unit_price_cents * oi.qty - oi.discount_cents
+                            + CASE WHEN oo.tax_incl = 1 THEN 0
+                                   ELSE ((oi.unit_price_cents * oi.qty - oi.discount_cents) * oi.tax_rate_bp + 5000) / 10000 END) AS total,
+                        SUM(oi.unit_price_cents * oi.qty - oi.discount_cents) AS net,
+                        SUM(oi.qty) AS items,
+                        SUM(oi.sent_at IS NULL AND oi.held = 0 AND oi.is_set = 0) AS unsent,
+                        SUM(oi.sent_at IS NULL AND oi.held = 1) AS held
+                 FROM order_items oi JOIN orders oo ON oo.id = oi.order_id
+                 WHERE oo.status = 'open'
+                 GROUP BY oi.order_id
+             ) i ON i.order_id = o.id
+             WHERE t.floor_id = ?1 AND t.active = 1
+             ORDER BY t.id",
+            )
+            .unwrap();
+        stmt.query_map([floor_id], |r| {
+            Ok(TableStatus {
+                table: super::table_from_row(r)?,
+                order_id: r.get(8)?,
+                opened_at: r.get(9)?,
+                total_cents: r.get(10)?,
+                item_count: r.get(11)?,
+                unsent_count: r.get(12)?,
+                held_count: r.get(13)?,
+            })
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
+    #[test]
+    fn the_faster_floor_view_shows_exactly_what_it_did_before() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let s = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.set_setting(&s, "prices_include_tax", "0").unwrap();
+        let cat = pos.create_category(&s, "Food", None, 1).unwrap().id;
+        let dishes: Vec<i64> = [(333, 1500, true), (1250, 700, false), (999, 0, false), (45, 1000, true)]
+            .iter()
+            .enumerate()
+            .map(|(n, (price, tax, starter))| {
+                pos.create_product(&s, NewProduct {
+                    category_id: Some(cat), sku: None, barcode: None, name: format!("Dish {n}"), price_cents: *price, cost_cents: 0,
+                    tax_rate_bp: *tax, stock_qty: 0, track_stock: false, starter: *starter, name_alt: None, prep: false, team_id: None,
+                })
+                .unwrap()
+                .id
+            })
+            .collect();
+        let mut floors = Vec::new();
+        for f in 0..2 {
+            let floor = pos.create_floor(&s, &format!("Floor {f}")).unwrap();
+            let layout: Vec<TableLayout> = (0..8)
+                .map(|i| TableLayout {
+                    is_table: Some(i != 7), id: None, name: format!("{f}-{i}"), shape: if i % 2 == 0 { TableShape::Round } else { TableShape::Rect },
+                    x: i * 100, y: f * 100, w: 80, h: 80,
+                })
+                .collect();
+            let tables = pos.save_floor_layout(&s, floor.id, &layout).unwrap();
+            floors.push((floor.id, tables));
+        }
+        let mut n = 0;
+        for (_, tables) in &floors {
+            for t in tables.iter().filter(|t| t.is_table).take(6) {
+                n += 1;
+                let o = pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t.id), channel_id: None, details: Default::default() }).unwrap().id;
+                // Every fifth order stays empty; the rest get a mix of dishes.
+                for k in 0..(n % 5) {
+                    let ord = pos.add_item(&s, o, dishes[(n + k) % dishes.len()], 1 + (k as i64 % 3), None, None, &[]).unwrap();
+                    if k == 1 {
+                        let line = ord.items.last().unwrap().id;
+                        pos.update_item(&s, line, &ItemUpdate { qty: 2, discount_cents: 77, note: None }).unwrap();
+                    }
+                }
+                if n % 3 == 0 {
+                    pos.send_to_kitchen(&s, o).unwrap();
+                    pos.add_item(&s, o, dishes[1], 1, None, None, &[]).unwrap();
+                }
+                pos.conn
+                    .execute("UPDATE orders SET service_bp = ?2, tax_incl = ?3 WHERE id = ?1", rusqlite::params![o, [0, 1000, 1250][n % 3], n % 2])
+                    .unwrap();
+                if n == 4 {
+                    // Mains waiting for "Call mains".
+                    pos.conn.execute("UPDATE order_items SET held = 1 WHERE order_id = ?1 AND sent_at IS NULL", [o]).unwrap();
+                }
+                if n == 7 {
+                    // Paid: the table is free again.
+                    pos.pay_order(&s, o, PaymentMethod::Card, 0).unwrap();
+                }
+            }
+        }
+        // A table removed from the plan is left out.
+        pos.conn.execute("UPDATE dining_tables SET active = 0 WHERE id = ?1", [floors[1].1[6].id]).unwrap();
+        let mut busy = 0;
+        for (floor, _) in &floors {
+            let new = pos.floor_status(&s, *floor).unwrap();
+            assert_eq!(format!("{new:?}"), format!("{:?}", old_status(&pos, *floor)));
+            busy += new.iter().filter(|t| t.order_id.is_some()).count();
+            assert!(new.iter().any(|t| t.order_id.is_some() && t.total_cents == 0), "an empty open order");
+        }
+        assert_eq!(busy, 11);
+        let all: Vec<TableStatus> = floors.iter().flat_map(|(f, _)| pos.floor_status(&s, *f).unwrap()).collect();
+        assert!(all.iter().any(|t| t.held_count > 0) && all.iter().any(|t| t.unsent_count > 0 && t.item_count > t.unsent_count));
+        assert!(pos.floor_status(&s, 999).unwrap().is_empty());
     }
 }

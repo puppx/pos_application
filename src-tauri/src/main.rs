@@ -4,7 +4,6 @@
 mod commands;
 mod server;
 
-use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -14,9 +13,12 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_updater::UpdaterExt;
 
-use commands::{backup_path, dispatch, newest_regular_backup, prune_backups, require_updates, unique_backup_path, App, LOCAL};
+use commands::{auto_backup, dispatch, require_updates, unique_backup_path, App, LOCAL};
 
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// The daily backup starts this long after the window opens, so the first
+/// screens load without competing for the disk.
+const AUTO_BACKUP_DELAY: Duration = Duration::from_secs(5);
 /// On closing or restarting, tickets still going out to a printer get this
 /// long to finish (a picture cut off half way prints the next job as junk).
 const PRINTS_FINISH: Duration = Duration::from_secs(15);
@@ -189,21 +191,12 @@ async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
         .await
         .map_err(update_error)?
         .ok_or_else(|| PosError::Validation("already up to date".into()))?;
+    // An automatic backup still copying finishes first, and none starts
+    // while the update replaces the app (it would be cut off half way).
+    app.stop_auto_backups();
     update.download_and_install(|_, _| {}, || {}).await.map_err(update_error)?;
     pos_core::wait_for_prints(PRINTS_FINISH);
     handle.restart()
-}
-
-/// Daily safety copy, taken at startup when the newest one is over a day old.
-fn auto_backup(pos: &Pos, dir: &Path) {
-    // Only daily and manual backups count: a restore or a loaded file is not one.
-    let fresh = newest_regular_backup(dir).and_then(|t| t.elapsed().ok()).is_some_and(|age| age < AUTO_BACKUP_EVERY);
-    if !fresh && !pos.needs_setup().unwrap_or(true) {
-        if let Err(e) = pos.backup_unchecked(backup_path(dir)) {
-            eprintln!("auto backup failed: {e}");
-        }
-        prune_backups(dir, pos.backups_kept().unwrap_or(pos_core::BACKUPS_KEPT_DEFAULT));
-    }
 }
 
 fn main() {
@@ -215,8 +208,13 @@ fn main() {
             std::fs::create_dir_all(&backup_dir)?;
             // Prints that fail after the till was told they were sent.
             pos_core::set_print_error_log(Some(data_dir.join("print-errors.log")));
-            let pos = Pos::open(data_dir.join("pos.db"))?;
-            auto_backup(&pos, &backup_dir);
+            let db = data_dir.join("pos.db");
+            let mut pos = Pos::open(&db)?;
+            // Orders left open with nothing on them (a table tapped, a till
+            // reloaded) clutter the Orders board: cancel the old ones.
+            if let Err(e) = pos.sweep_empty_orders() {
+                eprintln!("empty orders: {e}");
+            }
             let server = pos.server_settings()?;
             let fullscreen = pos.setting(START_FULLSCREEN)?.as_deref() == Some("1");
             app.manage(App::new(pos, backup_dir));
@@ -226,6 +224,13 @@ fn main() {
                 }
             }
             app.manage(ServerState::default());
+            // The daily backup, in the background: a big database must not
+            // keep the window from opening (see `commands::auto_backup`).
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(AUTO_BACKUP_DELAY);
+                auto_backup(&handle.state::<App>(), &db, AUTO_BACKUP_EVERY);
+            });
             if server.auto_start {
                 let handle = app.handle().clone();
                 if let Err(e) = start(&handle, &handle.state::<ServerState>(), server.port) {

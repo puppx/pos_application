@@ -1,7 +1,7 @@
 name: Windows build
 
-# Every push / PR: run tests and build the installers (downloadable from the
-# run's "Artifacts").
+# Every push / PR: run tests and build the installers (a check only: the
+# installers are not kept, so no Actions artifact storage is used).
 #
 # To publish a release: Actions > Windows build > Run workflow, tick
 # "Publish a release". The release is tagged v<version from tauri.conf.json>.
@@ -131,14 +131,6 @@ jobs:
             '{"bundle":{"createUpdaterArtifacts":false,"windows":{"webviewInstallMode":{"type":"offlineInstaller","silent":true}}}}'
           cp target/release/bundle/nsis/*-setup.exe "dist/POS_${VERSION}_x64-offline-setup.exe"
           ls -la dist
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pos-windows-installers
-          path: |
-            dist/*.exe
-            dist/*.msi
-          if-no-files-found: error
 
       - name: Publish release
         if: steps.ver.outputs.release == 'true'

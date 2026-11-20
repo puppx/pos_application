@@ -25,6 +25,8 @@
   --brand-ink: #1849b0; --solid: #101828; --on-solid: #ffffff; --hover-line: #98a2b3; --amber-ink: #8a4b02; --dot: #dfe3ea;
   color-scheme: light;
   --tap: 46px;
+  /* Manage: off switch track (3.3:1 on surface), green / red text on their soft fills, the dim behind sheets. */
+  --switch-off: #858fa1; --go-ink: #08703d; --danger-ink: #b42318; --scrim: rgba(16, 24, 40, .45);
 }
 /* Dark theme: the same tokens, night values. <html data-theme="dark"> (set by app.js from the
    top-bar toggle, or from the device's own setting when the toggle is on Auto). */
@@ -44,6 +46,7 @@
   --shadow-md: 0 2px 8px -1px rgba(0, 0, 0, .45);
   --shadow-lg: 0 24px 48px -12px rgba(0, 0, 0, .7);
   --focus: 0 0 0 3px rgba(79, 141, 255, .35);
+  --switch-off: #66738d; --go-ink: #4cc98a; --danger-ink: #f07a6c; --scrim: rgba(0, 0, 0, .6);
   color-scheme: dark;
 }
 :root[data-theme="dark"] .chip.type-dine_in { color: var(--brand-ink); }
@@ -1497,3 +1500,340 @@ body.kb-open #toast { top: 12px; bottom: auto; }
 .dialog.pay-wide { height: min(720px, 100%); }
 .dialog.pay-wide > .pay-one { align-content: start; }
 @media (max-width: 760px) { .dialog.pay-wide { height: 100%; } }
+
+/* ==========================================================================
+   Manage: one shell (side list + detail pane), settings rows, sheets.
+   From the UI/UX spec (design1/components.css Part B). Renamed where the order
+   screen already uses the name: .sstep (stepper), .itip ((i) button), .lgrip.
+   ========================================================================== */
+
+/* ---------- 1. Shell ---------- */
+main:has(> .manage) { padding: 0; overflow: hidden; }
+.manage { position: relative; display: grid; grid-template-columns: 248px minmax(0, 1fr); height: 100%; min-height: 0; }
+.mside { grid-column: 1; grid-row: 1; min-height: 0; overflow-y: auto; background: var(--surface); border-right: 1px solid var(--line); padding: 0 10px 16px; overscroll-behavior: contain; }
+.mdetail { grid-column: 2; grid-row: 1; min-height: 0; overflow-y: auto; padding: 14px 24px 104px; scroll-padding-block: 80px 104px; overscroll-behavior: contain; }
+.manage.rail .mdetail { padding-bottom: 24px; }
+.mside-search { position: sticky; top: 0; z-index: 2; background: var(--surface); padding: 12px 2px 6px; }
+.mside-search .searchbox { min-height: 44px; }
+.mside-search input { min-height: 42px; }
+.mnav-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 14px 10px 6px; }
+button.mnav-title { width: 100%; min-height: 44px; padding: 8px 10px 4px; border: 0; background: transparent; box-shadow: none; justify-content: flex-start; border-radius: var(--radius-sm); }
+button.mnav-title .chev { transform: rotate(90deg); transition: transform .15s; }
+button.mnav-title[aria-expanded="false"] .chev { transform: none; }
+.mnav-item { width: 100%; min-height: 44px; justify-content: flex-start; gap: 12px; padding: 0 10px; border: 0; box-shadow: none; background: transparent;
+  color: var(--ink-2); font-size: 15px; font-weight: 600; border-radius: var(--radius-sm); text-align: left; }
+.mnav-item .icon { color: var(--muted); flex: none; }
+.mnav-item:hover { background: var(--surface-2); border-color: transparent; }
+.mnav-item.on { background: var(--brand-soft); color: var(--brand-ink); }
+.mnav-item.on .icon { color: var(--brand); }
+.mnav-hit { min-height: 52px; }
+.mnav-hit > span:last-child { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.mnav-hit small { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.mnav-hits { padding-top: 4px; }
+.mnav-hits .sempty { padding: 24px 8px; }
+.rail-only, .mscrim { display: none; }
+hr.rail-only { border: 0; border-top: 1px solid var(--line); margin: 6px 8px; }
+.mnav-phone { display: none; }
+.sbody-wrap { max-width: 760px; }
+.sbody { min-height: 120px; }
+
+/* Detail header: [‹ Manage on phones] [icon] Title … [action] */
+.dhead { display: flex; align-items: center; gap: 12px; min-height: 52px; margin-bottom: 4px; }
+.dhead h2 { margin: 0; font-size: 22px; font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dhead .dicon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--brand-soft); color: var(--brand); flex: none; }
+.dhead .back { min-width: 44px; padding: 0 10px 0 4px; gap: 2px; color: var(--ink-2); font-size: 15px; }
+@media (min-width: 1000px) { .dhead .back:not(.show) { display: none; } }
+
+/* Rail: a page is open on a 1000-1365 px screen; the list folds to icons. */
+@media (min-width: 1000px) and (max-width: 1365px) {
+  .manage.rail { grid-template-columns: 72px minmax(0, 1fr); }
+  .manage.rail:not(.peek) .mside { padding: 8px 10px 16px; }
+  .manage.rail:not(.peek) .mside-search, .manage.rail:not(.peek) .mnav-title, .manage.rail:not(.peek) .grp,
+  .manage.rail:not(.peek) .mnav-item > span:not(.icon) { display: none; }
+  .manage.rail:not(.peek) .mnav-daily[hidden] { display: block !important; }
+  .manage.rail:not(.peek) .mnav-hits { display: none; }
+  .manage.rail:not(.peek) .mnav-lists[hidden] { display: block !important; }
+  .manage.rail:not(.peek) .rail-only { display: flex; }
+  .manage.rail:not(.peek) hr.rail-only { display: block; }
+  .manage.rail:not(.peek) .mnav-item { justify-content: center; padding: 0; }
+  .manage.rail.peek .mside { position: absolute; z-index: 30; top: 0; bottom: 0; left: 0; width: 264px; box-shadow: var(--shadow-lg); }
+  .manage.rail.peek .mscrim { display: block; position: absolute; inset: 0; z-index: 29; background: var(--scrim); }
+}
+@media (min-width: 1366px) {
+  .manage { grid-template-columns: 264px minmax(0, 1fr); }
+  .mdetail { padding: 18px 32px 104px; }
+}
+
+/* ---------- 2. Sections and setting rows ---------- */
+.ssec { margin-top: 18px; }
+.sbody > .ssec:first-child, .sbody > .legacy:first-child { margin-top: 6px; }
+.ssec-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 0 4px 8px; }
+.ssec-foot { font-size: 13px; color: var(--muted); padding: 8px 4px 0; }
+.sgroup { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.snote { margin: 6px 4px 12px; font-size: 14px; color: var(--muted); }
+
+.srow { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 20px auto; align-items: center; column-gap: 12px;
+  min-height: 56px; padding: 8px 16px; color: var(--ink); background: var(--surface); font-weight: 400; }
+.srow + .srow::before, .sgroup > * + .srow::before, .adv-body > .srow:first-child::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: 1px solid var(--line); }
+.srow-text { min-width: 0; display: flex; flex-direction: column; }
+.srow-label { font-size: 16px; font-weight: 600; line-height: 1.3; display: flex; align-items: center; gap: 2px; }
+.srow-hint { font-size: 13px; color: var(--muted); line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow-ctl { display: flex; align-items: center; gap: 8px; justify-self: end; min-width: 0; }
+.srow-value { font-size: 15px; color: var(--muted); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.srow.nav { cursor: pointer; }
+.srow.nav:hover { background: var(--surface-2); }
+.srow.nav:active { background: var(--fill); }
+.srow.nav:focus-visible, .lgrip:focus-visible, .chipx .t:focus-visible, .sstep .val:focus-visible { outline: none; box-shadow: var(--focus); }
+.chev { display: inline-flex; color: var(--muted); }
+.srow.stacked { grid-template-columns: minmax(0, 1fr) 20px; row-gap: 10px; padding-block: 12px; }
+.srow.stacked .srow-ctl { grid-column: 1 / -1; justify-self: stretch; }
+.srow input:not([type]), .srow input[type=text], .srow input[type=search] { width: 240px; min-width: 0; }
+.srow input.short-in { width: 96px; }
+.srow textarea { width: 100%; resize: vertical; }
+.srow.image-row select { flex: 1; min-width: 0; }
+.srow.limit-row .srow-ctl { flex-wrap: wrap; gap: 10px; }
+.srow.limit-row .sseg { flex: 1 1 220px; display: flex; }
+.srow.limit-row .sseg button { flex: 1 1 0; }
+.srow.danger .srow-label { color: var(--danger); }
+/* Native selects in rows and sheets: one chevron, the same height as the other controls. */
+.srow select { appearance: none; -webkit-appearance: none; min-height: var(--tap); padding-right: 36px; max-width: 100%;
+  background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235d6679' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 12px center; }
+:root[data-theme="dark"] .srow select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238f98a9' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); }
+
+/* Save state cell: always 20 px wide so nothing jumps. */
+.sstate { width: 20px; height: 20px; display: grid; place-items: center; }
+.sstate.saving::after { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--brand); animation: spin .7s linear infinite; }
+.sstate.saved { color: var(--go-ink); animation: fadeout 1.6s ease-in forwards; }
+.sstate.saved::after { content: "✓"; font-weight: 800; font-size: 16px; }
+.sstate.error { border-radius: 50%; background: var(--danger-fill); color: #fff; }
+.sstate.error::after { content: "!"; font-weight: 800; font-size: 13px; }
+.srow.err { box-shadow: inset 3px 0 0 var(--danger); }
+.srow.err .srow-hint { color: var(--danger-ink); white-space: normal; }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin .7s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeout { 0%, 70% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes nudge { 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+.nudge { animation: nudge .18s 2; }
+.srow.found, .legacy > .found { animation: found 2s ease-out; }
+@keyframes found { 0%, 40% { background: var(--brand-soft); } 100% { background: var(--surface); } }
+
+/* ---------- 3. Switch (the whole row is the <label>) ---------- */
+.sw { position: relative; display: inline-flex; flex: none; }
+.sw input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.sw span { width: 48px; height: 28px; border-radius: 14px; background: var(--switch-off); position: relative; transition: background .15s; }
+.sw span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); transition: transform .15s; }
+.sw input:checked + span { background: var(--brand); }
+.sw input:checked + span::after { transform: translateX(20px); }
+.sw input:focus-visible + span { box-shadow: var(--focus); }
+.sw input:disabled + span { opacity: .45; }
+label.srow { cursor: pointer; }
+
+/* ---------- 4. Stepper ---------- */
+.sstep { display: inline-flex; align-items: center; height: var(--tap); border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface-2); flex: none; }
+.sstep button { min-width: var(--tap); min-height: calc(var(--tap) - 2px); padding: 0; border: 0; border-radius: 999px; background: transparent; box-shadow: none; font-size: 22px; font-weight: 500; color: var(--ink-2); touch-action: manipulation; }
+.sstep button:hover:not(:disabled) { background: var(--fill); }
+.sstep button:disabled { opacity: .35; background: transparent !important; border: 0 !important; }
+.sstep .val { min-width: 64px; text-align: center; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ink); cursor: text; border-radius: 8px; }
+.sstep .val small { font-size: 13px; font-weight: 600; color: var(--muted); margin-left: 3px; }
+.sstep .val.is-empty { color: var(--muted); font-weight: 600; font-size: 15px; }
+.sstep input.val { width: 64px; min-height: 36px; border: 0; padding: 0; background: transparent; box-shadow: none; }
+
+/* ---------- 5. Segmented control ---------- */
+.sseg { display: inline-flex; flex-wrap: nowrap; gap: 3px; padding: 3px; border-radius: var(--radius); background: var(--fill); }
+.sseg button { flex: none; min-height: 44px; padding: 0 14px; border: 0; box-shadow: none; background: transparent; color: var(--ink-2); border-radius: var(--radius-sm); font-size: 15px; white-space: nowrap; }
+@media (hover: hover) { .sseg button:hover { background: color-mix(in srgb, var(--surface) 50%, transparent); } }
+.sseg button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-md); }
+:root[data-theme="dark"] .sseg button.on { background: #3a4760; color: #fff; }
+.srow.stacked .sseg { display: flex; flex: 1; }
+.srow.stacked .sseg button { flex: 1 1 0; padding: 0 8px; }
+
+/* ---------- 6. Chips ---------- */
+.chiplist { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chipx { display: inline-flex; align-items: center; min-height: 44px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--surface-2); color: var(--ink); font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.chipx .t { padding: 0 4px 0 16px; cursor: text; min-height: 42px; display: inline-flex; align-items: center; border-radius: 999px; }
+.chipx .x { min-width: 40px; min-height: 42px; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--muted); font-size: 18px; border-radius: 999px; }
+.chipx.fixed .t { padding: 0 14px 0 16px; min-width: 64px; justify-content: center; gap: 6px; }
+/* Fixed chips (tips) have no ×: a small pencil says they can be changed. */
+.chipx.fixed .t::after { content: "✎"; font-size: 13px; font-weight: 400; color: var(--muted); }
+.chipx.bad { border-color: var(--danger); background: var(--danger-soft); color: var(--danger-ink); }
+.chipx.editing { border-color: var(--brand); box-shadow: var(--focus); }
+.chipx input { width: 84px; min-height: 40px; border: 0; background: transparent; padding: 0 0 0 16px; box-shadow: none !important; font-weight: 700; }
+.chip-add { min-height: 44px; border-radius: 999px; border: 1px dashed var(--line-2); background: transparent; box-shadow: none; color: var(--brand-ink); padding: 0 16px; }
+.tchip { min-height: 44px; border-radius: 999px; padding: 0 16px; box-shadow: none; }
+.tchip.on { background: var(--brand-soft); border-color: var(--brand); color: var(--brand-ink); }
+.tchip.on::before { content: "✓"; font-weight: 800; }
+
+/* ---------- 7. (i) hint ---------- */
+.itip { width: 44px; height: 44px; min-height: 44px; min-width: 44px; margin: -12px -10px -12px -6px; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--muted); flex: none; }
+.itip::before { content: "i"; width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid currentColor; display: grid; place-items: center; font: italic 700 12px/1 "Sarabun", sans-serif; }
+.itip:hover { border-color: transparent; color: var(--brand); }
+.itip[aria-expanded="true"] { color: var(--brand); }
+.pop { position: fixed; z-index: 40; width: max-content; max-width: min(320px, calc(100vw - 32px)); padding: 12px 14px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-lg); font-size: 14px; line-height: 1.45; color: var(--ink-2); font-weight: 400; user-select: text; }
+
+/* ---------- 8. Advanced ---------- */
+.adv { width: 100%; min-height: 52px; justify-content: flex-start; gap: 10px; border: 0; border-top: 1px solid var(--line); border-radius: 0; box-shadow: none; background: var(--surface); color: var(--ink-2); padding: 0 16px; font-size: 15px; }
+.adv:hover { background: var(--surface-2); border-color: var(--line); }
+.adv .chev { transition: transform .15s; }
+.adv[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.adv .n { font-size: 12.5px; font-weight: 700; background: var(--fill); color: var(--muted); border-radius: 999px; padding: 1px 8px; }
+.adv-body, .adv-body .srow { background: var(--surface-2); }
+
+/* ---------- 9. Status row (printers, service charge): .sstat (.status and .stat are taken) ---------- */
+.srow.sstat { grid-template-columns: 40px minmax(0, 1fr) 20px auto auto; min-height: 68px; }
+.srow.sstat .lead { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--brand-soft); color: var(--brand); }
+.srow.sstat .srow-hint { font-variant-numeric: tabular-nums; }
+.srow.sstat .test { min-width: 76px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; white-space: nowrap; background: var(--fill); color: var(--muted); }
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.pill.ok { background: var(--go-soft); color: var(--go-ink); }
+.pill.bad { background: var(--danger-soft); color: var(--danger-ink); }
+.pill.busy::before { animation: pillpulse 1s ease-in-out infinite; }
+.pill.plain::before { display: none; }
+@keyframes pillpulse { 50% { opacity: .25; } }
+.ladd { width: 100%; min-height: 52px; border: 1px dashed var(--line-2); border-width: 1px 0 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--brand-ink); justify-content: flex-start; padding: 0 16px; }
+.ladd:hover { background: var(--surface-2); border-color: var(--line-2); }
+
+/* ---------- 10. Sheet (on the #modal host) ---------- */
+#modal.sheet-host { z-index: 25; padding: 16px; background: var(--scrim); }
+.sheet { width: min(560px, 100%); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); color: var(--ink); border-radius: 18px; box-shadow: var(--shadow-lg); overflow: hidden; animation: pop .14s ease-out; }
+.sheet.wide { width: min(760px, 100%); }
+.sheet-head { flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 22px; min-height: 64px; border-bottom: 1px solid var(--line); }
+.sheet-head h3 { margin: 0; flex: 1; font-size: 20px; font-weight: 700; }
+.sheet-head .icon-btn { min-width: 44px; min-height: 44px; }
+.sheet-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 22px 18px; overscroll-behavior: contain; background: var(--bg); }
+.sheet-body > .ssec:first-child { margin-top: 10px; }
+.sheet-foot { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 22px; border-top: 1px solid var(--line); background: var(--surface); }
+.sheet-foot .grow { flex: 1; min-width: 0; }
+.sheet-foot .primary { min-width: 120px; }
+.sheet-msg { flex: none; padding: 10px 22px; font-size: 14px; font-weight: 600; border-top: 1px solid var(--line); }
+.sheet-msg.ok { background: var(--go-soft); color: var(--go-ink); }
+.sheet-msg.bad { background: var(--danger-soft); color: var(--danger-ink); }
+.sheet .grab { display: none; }
+.sheet .sgroup { box-shadow: none; }
+button.ghost.danger { color: var(--danger); }
+button.danger.solid { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
+
+/* ---------- 11. Sticky save bar ---------- */
+.savebar { position: sticky; bottom: 16px; z-index: 5; margin-top: 20px; display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 10px 10px 10px 18px;
+  border-radius: var(--radius); background: var(--solid); color: var(--on-solid); box-shadow: var(--shadow-lg); animation: pop .14s ease-out; max-width: 760px; }
+.savebar strong { flex: 1; font-size: 15px; min-width: 0; }
+.savebar .ghost { color: var(--on-solid); border: 1px solid color-mix(in srgb, var(--on-solid) 35%, transparent); }
+.savebar .primary { min-width: 110px; }
+
+/* ---------- 12. List editor (drag handle) ---------- */
+.lrow { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; gap: 8px; min-height: 60px; padding: 8px 8px 8px 4px; background: var(--surface); }
+.lrow.apps { grid-template-columns: 44px 44px minmax(0, 1fr) 44px; }
+.lrow + .lrow::before { content: ""; position: absolute; top: 0; left: 52px; right: 0; border-top: 1px solid var(--line); }
+.lgrip { width: 44px; height: 44px; display: grid; place-items: center; color: var(--muted); cursor: grab; touch-action: none; border-radius: var(--radius-sm); }
+.lrow input { width: 100%; min-width: 0; }
+.lrow .del { min-width: 44px; padding: 0; border: 0; box-shadow: none; background: transparent; color: var(--muted); font-size: 20px; }
+.lrow .del:hover { color: var(--danger); background: var(--danger-soft); }
+.lrow .swatch { width: 44px; height: 44px; padding: 4px; border-radius: 50%; border: 1px solid var(--line-2); cursor: pointer; }
+.lrow.dragging { z-index: 3; box-shadow: var(--shadow-md); transform: scale(1.01); border-radius: var(--radius-sm); }
+.leditor .ladd { border-top-style: dashed; }
+.lempty .sempty { padding: 22px 16px 10px; }
+
+/* ---------- 13. Empty state ---------- */
+.sempty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 28px 20px; }
+.sempty .eic { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; background: var(--fill); color: var(--muted); margin-bottom: 6px; }
+.sempty strong { font-size: 17px; }
+.sempty p { margin: 0 0 8px; font-size: 14px; color: var(--muted); max-width: 320px; }
+
+/* Cards not yet in the new look, inside the detail pane. */
+.legacy { display: flex; flex-direction: column; gap: 14px; margin-top: 18px; }
+.legacy .switch { min-height: 44px; }
+
+/* Phones: Daily work as tiles; staff get two big cards. */
+.dgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.dtile { min-height: 56px; justify-content: flex-start; gap: 10px; padding: 0 12px; border-color: var(--line); border-radius: var(--radius); color: var(--ink); font-size: 15px; text-align: left; }
+.dtile .icon { color: var(--brand); flex: none; }
+@media (hover: none) { .dtile:hover { border-color: var(--line); } }
+.dtile.dtile-big { min-height: 76px; font-size: 18px; padding: 0 20px; gap: 14px; }
+.staff-manage { max-width: 480px; margin: 12px auto 0; display: flex; flex-direction: column; gap: 12px; }
+.staff-manage .legacy { margin-top: 4px; }
+.staff-head { margin-bottom: 10px; }
+.grp-row .srow-label { gap: 12px; }
+.grp-ic { display: inline-flex; color: var(--brand); }
+
+/* ---------- breakpoints ---------- */
+@media (max-height: 660px) and (min-width: 901px) {
+  .srow { min-height: 52px; padding-block: 6px; }
+  .srow.stacked { padding-block: 10px; }
+  .srow.sstat { min-height: 60px; }
+  .ssec { margin-top: 14px; }
+  .mdetail { padding-top: 8px; }
+}
+/* Phones and portrait tablets: the list, then one page at a time. */
+@media (max-width: 999px) {
+  .manage { display: block; height: auto; }
+  main:has(> .manage) { overflow: auto; padding: 0 0 calc(80px + env(safe-area-inset-bottom)); }
+  .manage.at-list .mdetail, .manage.at-detail .mside, .mscrim { display: none; }
+  .mside { border-right: 0; background: transparent; padding: 0 16px 16px; overflow: visible; }
+  .mside-search { background: var(--bg); padding-top: 12px; }
+  .mnav-wide { display: none; }
+  .mnav-phone { display: block; }
+  .mnav-phone .mnav-title { padding: 14px 6px 8px; }
+  .mdetail { padding: 0 16px 24px; overflow: visible; }
+  .dhead { position: sticky; top: 0; z-index: 4; background: var(--bg); margin: 0 -16px 4px; padding: 6px 16px 6px 8px; }
+  .dhead .dicon { display: none; }
+  .sbody-wrap { max-width: none; }
+  .savebar { bottom: calc(88px + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 700px) {
+  .srow { padding: 8px 14px; }
+  .srow input:not([type]), .srow input[type=text] { width: 100%; }
+  .srow.text-row { grid-template-columns: minmax(0, 1fr) 20px; row-gap: 8px; }
+  .srow.text-row .srow-ctl { grid-column: 1 / -1; justify-self: stretch; }
+  .srow.text-row select { width: 100%; }
+  .srow-value { max-width: 140px; }
+  .srow.sstat { grid-template-columns: 40px minmax(0, 1fr) 20px auto; row-gap: 6px; }
+  .srow.sstat > .pill { grid-column: 2; grid-row: 2; justify-self: start; }
+  .srow.sstat > .srow-ctl { grid-column: 4; grid-row: 1 / span 2; }
+  .srow.sstat > span:empty:not(.sstate) { display: none; }
+  .srow input.short-in, .srow.text-row input.short-in { width: 96px; }
+  #modal.sheet-host { align-items: flex-end; padding: 0; }
+  .sheet, .sheet.wide { width: 100%; max-height: 92%; border-radius: 18px 18px 0 0; animation: up .2s ease-out; }
+  .sheet .grab { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-2); margin: 8px auto 0; flex: none; }
+  .sheet-head { min-height: 56px; padding: 4px 6px 4px 16px; }
+  .sheet-body { padding: 4px 16px 16px; }
+  .sheet-msg { padding: 10px 16px; }
+  .sheet-foot { padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); flex-wrap: wrap; }
+  .sheet-foot .primary { flex: 1 1 100%; order: -1; min-height: 52px; }
+  .sheet-foot > button:not(.primary) { flex: 1; }
+  .sheet-foot > .grow:empty { display: none; }
+}
+@keyframes up { from { transform: translateY(100%); } }
+body.kb-open #modal.sheet-host .sheet { max-height: 100%; }
+
+/* ---------- QA fixes (0.13.1) ---------- */
+/* Order screen, 1024 x 600 with mains waiting: "All courses together" sits beside
+   the total instead of on its own row, so the bill keeps five dish lines. */
+@media (min-width: 901px) and (max-height: 660px) {
+  .order .ticket-foot:has(.mains:not([hidden])):has(> .switch:not([hidden])) { grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; }
+  .order .ticket-foot:has(.mains:not([hidden])):has(> .switch:not([hidden])) > .switch { grid-column: 1; grid-row: 1; font-size: 14px; line-height: 1.2; gap: 8px; }
+  .order .ticket-foot:has(.mains:not([hidden])):has(> .switch:not([hidden])) > .totals { grid-column: 2; grid-row: 1; width: auto; }
+  .order .ticket-foot:has(.mains:not([hidden])):has(> .switch:not([hidden])) > .totals td.num { padding-left: 14px; }
+}
+/* "waits for mains", "starter"…: a gap after the dish name (a smaller badge on a
+   short till, so it stays on the name's line and the bill keeps its five lines). */
+.lines .badge { margin: 3px 4px 0 6px; }
+@media (min-width: 901px) and (max-height: 660px) { .order .lines .badge { margin-left: 5px; padding: 0 6px; font-size: 11.5px; } }
+/* Top bar and Kitchen filters: 44 px to tap on a 600 px tall till too. */
+@media (max-height: 820px) and (min-width: 901px) {
+  #nav button { min-height: 44px; }
+  #logout.logout-btn { min-height: 44px; }
+}
+.bar-tools .icon-btn { min-height: 44px; min-width: 44px; }
+.kds-bar button { min-height: 44px; }
+.lrow .swatch::-webkit-color-swatch-wrapper { padding: 0; }
+.lrow .swatch::-webkit-color-swatch { border: 0; border-radius: 50%; }
+.lrow .swatch::-moz-color-swatch { border: 0; border-radius: 50%; }
+/* Manage controls keep 44 px on short tills, where the app's own controls shrink. */
+.srow input:not([type=checkbox]):not([type=color]), .srow select, .srow .test, .lrow input:not([type=color]), .lrow .del, .sheet-foot button { min-height: 44px; }
+.sstep { height: 46px; }
+.sstep button { min-width: 46px; min-height: 44px; }
+.chipx .t { min-width: 44px; justify-content: center; }
+.chipx .x { min-width: 44px; }
+/* A printer whose test failed: its reason may take two lines. Phones: the meta line too. */
+.srow.sstat:has(.pill.bad) .srow-hint { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+@media (max-width: 700px) { .srow.sstat .srow-hint { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; } }

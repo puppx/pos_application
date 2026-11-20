@@ -1,9 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/pos-core", "src-tauri"]
+# A vendored dependency, not part of this workspace (see [patch.crates-io]).
+exclude = ["vendor/tiny_http"]
 
 [workspace.package]
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "UNLICENSED"
 
@@ -12,6 +14,11 @@ rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
+
+# tiny_http 0.12.0 with one fix to its connection thread pool (a burst of
+# new connections could leave one never answered): see vendor/tiny_http.
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }
 
 # Small, fast release binaries: important on low-end POS hardware.
 [profile.release]

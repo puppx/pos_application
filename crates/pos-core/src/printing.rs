@@ -2411,7 +2411,7 @@ mod tests {
 
     #[test]
     fn unreachable_printer_is_an_error_not_a_hang() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_held, port) = no_printer();
         let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, vec![1]);
         assert!(job.send().is_err());
     }
@@ -2454,43 +2454,56 @@ mod tests {
     /// One connection's bytes, and whether another came in while it was open.
     type Received = (Vec<u8>, bool);
 
-    /// A network printer on 127.0.0.1, one connection at a time. Returns its port and
-    /// a thread giving, per connection, the bytes and whether another
-    /// connection came in while this one was open.
+    /// A port on 127.0.0.1 where no printer answers: held (bound, never
+    /// listening) for as long as the socket is kept, so no other test's
+    /// printer can be given the same port and take the connection.
+    fn no_printer() -> (socket2::Socket, u16) {
+        let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        s.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into()).unwrap();
+        let port = s.local_addr().unwrap().as_socket().unwrap().port();
+        (s, port)
+    }
+
+    /// How much later than the true moment the fake printer may notice a
+    /// connection's close (its reading thread woken under load). A job still
+    /// sending when the next one connects stays open far longer: the jobs in
+    /// these tests are sent in paced pieces for over twice this.
+    const CLOSE_SEEN_LATE: Duration = Duration::from_millis(100);
+
+    /// A network printer on 127.0.0.1. Returns its port and a thread giving,
+    /// per connection (in the order they came in), the bytes and whether a
+    /// later connection came in while this one was open.
+    ///
+    /// Each connection gets its own reading thread, which notes when the
+    /// till closed it; the next connection's arrival is noted as it is
+    /// accepted. The till closes a connection before the next job opens
+    /// one, so the next may only arrive before this one's close was seen
+    /// by at most [`CLOSE_SEEN_LATE`].
     fn slow_printer(connections: usize) -> (u16, std::thread::JoinHandle<Vec<Received>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let reader = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let mut waiting: Option<TcpStream> = None;
-            for _ in 0..connections {
-                let mut s = match waiting.take() {
-                    Some(s) => s,
-                    None => listener.accept().unwrap().0,
-                };
-                listener.set_nonblocking(true).unwrap();
-                s.set_nonblocking(false).unwrap();
-                s.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
-                let (mut buf, mut overlap) = (Vec::new(), false);
-                let mut piece = [0u8; 256];
-                loop {
-                    match std::io::Read::read(&mut s, &mut piece) {
-                        Ok(0) => break,
-                        Ok(n) => buf.extend_from_slice(&piece[..n]),
-                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-                        Err(e) => panic!("{e}"),
-                    }
-                    if waiting.is_none() {
-                        if let Ok((next, _)) = listener.accept() {
-                            overlap = true;
-                            waiting = Some(next);
-                        }
-                    }
-                }
-                listener.set_nonblocking(false).unwrap();
-                out.push((buf, overlap));
-            }
-            out
+            let readers: Vec<_> = (0..connections)
+                .map(|_| {
+                    let (mut s, _) = listener.accept().unwrap();
+                    let came = std::time::Instant::now();
+                    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+                    let read = std::thread::spawn(move || {
+                        let mut buf = Vec::new();
+                        std::io::Read::read_to_end(&mut s, &mut buf).unwrap();
+                        (buf, std::time::Instant::now())
+                    });
+                    (came, read)
+                })
+                .collect();
+            let got: Vec<_> = readers.into_iter().map(|(came, read)| (came, read.join().unwrap())).collect();
+            got.iter()
+                .enumerate()
+                .map(|(i, (_, (buf, closed)))| {
+                    let overlap = got[i + 1..].iter().any(|(came, _)| *came + CLOSE_SEEN_LATE < *closed);
+                    (buf.clone(), overlap)
+                })
+                .collect()
         });
         (port, reader)
     }
@@ -2519,7 +2532,15 @@ mod tests {
     fn jobs_keep_their_place_in_line_and_the_drawer_goes_first() {
         let (port, reader) = slow_printer(4);
         let target = PrinterTarget::Network { host: "127.0.0.1".into(), port };
-        let job = |b: &[u8]| PrintJob::new(target.clone(), b.to_vec()).paced(true);
+        // Each job is six paced pieces (five pauses, 250 ms), so one that
+        // started before the last had finished would show (see slow_printer).
+        let bytes = |b: &[u8]| {
+            let mut v = b.to_vec();
+            v.resize(5 * SLOW_CHUNK + 1, b'.');
+            v
+        };
+        assert!(paced_duration(bytes(b"x").len()) > 2 * CLOSE_SEEN_LATE);
+        let job = |b: &[u8]| PrintJob::new(target.clone(), bytes(b)).paced(true);
         // Busy: a job is sending (its turn held here).
         let busy = Turn::try_take(&target).unwrap();
         for b in [&b"kitchen A"[..], b"kitchen B"] {
@@ -2535,7 +2556,7 @@ mod tests {
             assert!(!overlap);
             b
         }).collect();
-        assert_eq!(got, [&b"drawer"[..], b"kitchen A", b"kitchen B", b"receipt"]);
+        assert_eq!(got, [bytes(b"drawer"), bytes(b"kitchen A"), bytes(b"kitchen B"), bytes(b"receipt")]);
         assert!(wait_for_prints(Duration::from_secs(5)));
     }
 
@@ -2604,7 +2625,7 @@ mod tests {
 
     #[test]
     fn slow_printer_that_cannot_be_reached_is_still_reported_at_once() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_held, port) = no_printer();
         let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, vec![1; 5000]).paced(true);
         assert!(job.clone().send_in_background().is_err());
         assert!(job.send().is_err());

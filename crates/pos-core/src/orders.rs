@@ -28,10 +28,57 @@ pub(crate) const EMPTY_ORDER: &str = "NOT EXISTS (SELECT 1 FROM order_items WHER
     AND COALESCE(customer_name, '') = '' AND COALESCE(customer_phone, '') = ''
     AND COALESCE(delivery_address, '') = '' AND COALESCE(notes, '') = ''
     AND COALESCE(external_ref, '') = '' AND customer_id IS NULL";
-/// Open orders with nothing on them (see [`EMPTY_ORDER`]) opened longer ago
-/// than this are forgotten ones (a table tapped, a till reloaded) and get
-/// cancelled; a till that opened one just now is never caught out.
+/// Open orders with nothing on them (see [`EMPTY_ORDER`]) untouched for
+/// longer than this (opened, or last changed: see [`ACTIVITY_TRIGGERS`])
+/// are forgotten ones (a table tapped, a till reloaded) and get cancelled;
+/// a till that opened one, or took its last dish off, just now is never
+/// caught out.
 pub const EMPTY_ORDER_AGE: i64 = 30 * 60;
+/// The answer for anything done to an order the sweep cancelled for having
+/// nothing on it ([`Pos::sweep_empty_orders`]), in place of "this order is
+/// already closed", so the till can say so plainly. One a till cancelled as
+/// empty (`cancel_if_empty`, day close) still answers "already closed".
+pub const EMPTY_ORDER_SWEPT: &str = "this empty order was closed automatically";
+/// `orders.touched_at`: when an open order last changed. Any change to its
+/// dishes (added, changed, moved in or out, removed), its payments, or its
+/// own details sets it, however it was made (a save that changes none of
+/// its details does not count). TEMP triggers, created on every
+/// connection like `receipt::BILL_STALE_TRIGGERS`, so they can change
+/// without a migration. The orders trigger lists the columns it watches,
+/// so its own update of `touched_at` never sets it off again.
+pub(crate) const ACTIVITY_TRIGGERS: &str = "
+    CREATE TEMP TRIGGER IF NOT EXISTS order_touched_item_added AFTER INSERT ON main.order_items
+    BEGIN
+        UPDATE orders SET touched_at = unixepoch() WHERE id = NEW.order_id AND status = 'open';
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS order_touched_item_removed AFTER DELETE ON main.order_items
+    BEGIN
+        UPDATE orders SET touched_at = unixepoch() WHERE id = OLD.order_id AND status = 'open';
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS order_touched_item_changed AFTER UPDATE ON main.order_items
+    BEGIN
+        UPDATE orders SET touched_at = unixepoch() WHERE id IN (OLD.order_id, NEW.order_id) AND status = 'open';
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS order_touched_payment_added AFTER INSERT ON main.payments
+    BEGIN
+        UPDATE orders SET touched_at = unixepoch() WHERE id = NEW.order_id AND status = 'open';
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS order_touched_payment_removed AFTER DELETE ON main.payments
+    BEGIN
+        UPDATE orders SET touched_at = unixepoch() WHERE id = OLD.order_id AND status = 'open';
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS order_touched_details
+    AFTER UPDATE OF order_type, table_id, customer_name, customer_phone, delivery_address, notes, channel_id,
+        external_ref, customer_id, service_bp, tax_bp, tax_incl ON main.orders
+    WHEN NEW.status = 'open' AND (OLD.order_type IS NOT NEW.order_type OR OLD.table_id IS NOT NEW.table_id
+        OR OLD.customer_name IS NOT NEW.customer_name OR OLD.customer_phone IS NOT NEW.customer_phone
+        OR OLD.delivery_address IS NOT NEW.delivery_address OR OLD.notes IS NOT NEW.notes
+        OR OLD.channel_id IS NOT NEW.channel_id OR OLD.external_ref IS NOT NEW.external_ref
+        OR OLD.customer_id IS NOT NEW.customer_id OR OLD.service_bp IS NOT NEW.service_bp
+        OR OLD.tax_bp IS NOT NEW.tax_bp OR OLD.tax_incl IS NOT NEW.tax_incl)
+    BEGIN
+        UPDATE orders SET touched_at = unixepoch() WHERE id = NEW.id;
+    END;";
 /// [`Pos::sweep_empty_orders_if_due`] looks at most this often.
 const EMPTY_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -346,10 +393,17 @@ fn status_of(conn: &Connection, id: i64) -> Result<String> {
 }
 
 pub(crate) fn require_open(conn: &Connection, id: i64) -> Result<()> {
-    if status_of(conn, id)? != "open" {
-        return invalid("this order is already closed");
+    // Swept: cancelled as empty by no one (see `sweep_empty_orders`).
+    let (status, swept): (String, bool) = conn
+        .prepare_cached("SELECT status, close_reason IS 'empty' AND closed_by IS NULL FROM orders WHERE id = ?1")?
+        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?
+        .ok_or(PosError::NotFound)?;
+    match status.as_str() {
+        "open" => Ok(()),
+        "cancelled" if swept => invalid(EMPTY_ORDER_SWEPT),
+        _ => invalid("this order is already closed"),
     }
-    Ok(())
 }
 
 fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
@@ -1591,7 +1645,8 @@ impl Pos {
     }
 
     /// Cancel every open order with nothing on it (no dishes, payments or
-    /// customer details) opened over [`EMPTY_ORDER_AGE`] ago, as "empty"
+    /// customer details) untouched for over [`EMPTY_ORDER_AGE`] (opened, or
+    /// last changed, e.g. its last dish taken off, that long ago), as "empty"
     /// (kept out of history and reports, like [`Pos::cancel_if_empty`]).
     /// Checked and cancelled in one statement, so a dish added meanwhile
     /// keeps its order. Returns how many were cancelled.
@@ -1600,14 +1655,14 @@ impl Pos {
         let n = tx.execute(
             &format!(
                 "UPDATE orders SET status = 'cancelled', closed_by = NULL, closed_at = unixepoch(), close_reason = 'empty'
-                 WHERE status = 'open' AND opened_at < unixepoch() - ?1 AND {EMPTY_ORDER}"
+                 WHERE status = 'open' AND MAX(opened_at, COALESCE(touched_at, opened_at)) < unixepoch() - ?1 AND {EMPTY_ORDER}"
             ),
             [EMPTY_ORDER_AGE],
         )?;
         if n > 0 {
             tx.execute(
                 "INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, 'order.cancel', ?1)",
-                [format!("{n} empty order(s) left open over {} minutes", EMPTY_ORDER_AGE / 60)],
+                [format!("{n} empty order(s) untouched for over {} minutes", EMPTY_ORDER_AGE / 60)],
             )?;
         }
         tx.commit()?;
@@ -1785,6 +1840,74 @@ mod tests {
         assert_eq!(pos.sweep_empty_orders_if_due().unwrap(), 1);
         assert_eq!(status(&pos, just_now).0, "cancelled");
         assert_eq!(pos.sweep_empty_orders().unwrap(), 0);
+    }
+
+    #[test]
+    fn an_empty_order_counts_from_its_last_change_and_says_it_was_closed_automatically() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let s = pos.setup_first_admin("Owner", "1111").unwrap();
+        let dish = pos
+            .create_product(&s, NewProduct {
+                category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: 0,
+                stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+            })
+            .unwrap()
+            .id;
+        let takeaway = |pos: &Pos| pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap().id;
+        let opened_long_ago = |pos: &Pos, id: i64| {
+            pos.conn.execute("UPDATE orders SET opened_at = unixepoch() - ?2, touched_at = NULL WHERE id = ?1", [id, EMPTY_ORDER_AGE + 600]).unwrap();
+        };
+        let touched = |pos: &Pos, id: i64| -> Option<i64> { pos.conn.query_row("SELECT touched_at FROM orders WHERE id = ?1", [id], |r| r.get(0)).unwrap() };
+        let status = |pos: &Pos, id: i64| -> String { pos.conn.query_row("SELECT status FROM orders WHERE id = ?1", [id], |r| r.get(0)).unwrap() };
+        // Opened long ago; its last dish was taken off just now (a waiter is on it).
+        let emptied = takeaway(&pos);
+        let line = pos.add_item(&s, emptied, dish, 1, None, None, &[]).unwrap().items[0].id;
+        opened_long_ago(&pos, emptied);
+        pos.update_item(&s, line, &ItemUpdate { qty: 0, discount_cents: 0, note: None }).unwrap();
+        assert!(touched(&pos, emptied).is_some());
+        // Opened long ago; a note typed and cleared again just now.
+        let edited = takeaway(&pos);
+        opened_long_ago(&pos, edited);
+        pos.update_order_details(&s, edited, &OrderDetails { notes: Some("window seat".into()), ..Default::default() }).unwrap();
+        pos.update_order_details(&s, edited, &OrderDetails::default()).unwrap();
+        // Opened long ago, never changed: swept as before.
+        let forgotten = takeaway(&pos);
+        opened_long_ago(&pos, forgotten);
+        // Opened long ago, saved since without any change (and an update of
+        // every order that changes none, like the customers reset): swept too.
+        let saved_unchanged = takeaway(&pos);
+        opened_long_ago(&pos, saved_unchanged);
+        pos.update_order_details(&s, saved_unchanged, &OrderDetails::default()).unwrap();
+        pos.set_service_charge(&s, saved_unchanged, 0).unwrap();
+        pos.conn.execute_batch("UPDATE orders SET customer_id = NULL, notes = notes, table_id = table_id").unwrap();
+        for id in [forgotten, saved_unchanged] {
+            assert_eq!(touched(&pos, id), None);
+        }
+        assert_eq!(pos.sweep_empty_orders().unwrap(), 2);
+        assert_eq!(status(&pos, forgotten), "cancelled");
+        assert_eq!(status(&pos, saved_unchanged), "cancelled");
+        for id in [emptied, edited] {
+            assert_eq!(status(&pos, id), "open");
+        }
+        // Their last change long ago too: swept.
+        pos.conn.execute("UPDATE orders SET touched_at = unixepoch() - ?1 WHERE status = 'open'", [EMPTY_ORDER_AGE + 60]).unwrap();
+        assert_eq!(pos.sweep_empty_orders().unwrap(), 2);
+        // A till still showing a swept order is told what happened...
+        let err = pos.add_item(&s, emptied, dish, 1, None, None, &[]).unwrap_err();
+        assert_eq!(err.to_string(), EMPTY_ORDER_SWEPT);
+        assert_eq!(err.to_string(), "this empty order was closed automatically");
+        assert_eq!(pos.update_order_details(&s, forgotten, &OrderDetails::default()).unwrap_err().to_string(), EMPTY_ORDER_SWEPT);
+        // ...while one a till cancelled itself is just closed.
+        let left = takeaway(&pos);
+        assert!(pos.cancel_if_empty(&s, left).unwrap());
+        assert_eq!(pos.add_item(&s, left, dish, 1, None, None, &[]).unwrap_err().to_string(), "this order is already closed");
+        // Closed orders are never touched again (the record keeps its last change).
+        let paid = takeaway(&pos);
+        pos.add_item(&s, paid, dish, 1, None, None, &[]).unwrap();
+        pos.pay_order(&s, paid, PaymentMethod::Cash, 500).unwrap();
+        pos.conn.execute("UPDATE orders SET touched_at = 1 WHERE id = ?1", [paid]).unwrap();
+        pos.conn.execute("UPDATE order_items SET kitchen_done_at = 2 WHERE order_id = ?1", [paid]).unwrap();
+        assert_eq!(touched(&pos, paid), Some(1));
     }
 
     #[test]

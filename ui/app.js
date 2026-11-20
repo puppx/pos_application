@@ -105,6 +105,11 @@ const ICONS = {
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.9.8c0 1.7-2.4 2.2-2.4 3.7M12 17h.01"/>',
+  chev: '<path d="M9 18l6-6-6-6"/>',
+  grip: '<circle cx="9" cy="6" r="1.2"/><circle cx="15" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/><circle cx="15" cy="18" r="1.2"/>',
+  more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
+  minus: '<path d="M5 12h14"/>',
+  alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5h.01"/>',
 };
 
 // ---------- light / dark theme (per device) ----------
@@ -290,7 +295,7 @@ const ORDER_CLOSED = 'this order is already closed';
 /// screen is gone: paid, cancelled, or merged into another bill on another till.
 function isDeadOrder(msg, args = {}, cmd = null) {
   if (!state.orderOpen || state.orderId == null) return false;
-  if (msg === ORDER_CLOSED) return true;
+  if (msg === ORDER_CLOSED || SWEPT.test(msg)) return true;
   // Joined onto another bill or emptied by a move: the order no longer exists.
   return msg === 'not found' && (args.orderId === state.orderId || (cmd === 'get_order' && args.id === state.orderId));
 }
@@ -302,15 +307,23 @@ async function deniedForDeadOrder(msg, args, cmd) {
   if (args.orderId !== state.orderId && !(cmd === 'get_order' && args.id === state.orderId)) return false;
   try { return (await invoke('get_order', { id: state.orderId })).status !== 'open'; } catch { return true; }
 }
-/// Leave a dead order instead of failing on every tap.
-function leaveDeadOrder() {
-  toast('This order was closed on another till', true);
+/// The server's answer for an order its automatic sweep closed for having nothing on
+/// it (pos_core::EMPTY_ORDER_SWEPT). An empty order another till cancelled still
+/// answers ORDER_CLOSED.
+const EMPTY_ORDER_SWEPT = 'this empty order was closed automatically';
+const SWEPT = { test: (msg) => msg === EMPTY_ORDER_SWEPT };
+const SWEPT_TEXT = 'This empty order was closed automatically';
+/// Leave a dead order instead of failing on every tap. Says why: closed on
+/// another till, or (empty for a long time) closed automatically.
+function leaveDeadOrder(msg = '') {
   state.onModalClose = null;
   closeModal();
   state.orderEmpty = null;
   closeOrder();
+  toast(SWEPT.test(msg) ? SWEPT_TEXT : 'This order was closed on another till', true);
 }
-async function call(cmd, args = {}) {
+/// `quiet`: no toast for an error (the caller shows it, e.g. in a settings row).
+async function call(cmd, args = {}, { quiet = false } = {}) {
   try {
     const r = await invoke(cmd, args);
     if (SETTINGS_WRITES.has(cmd)) { state.menu = null; loadUiSettings(); }
@@ -320,8 +333,8 @@ async function call(cmd, args = {}) {
     // Logged out on the server (idle, or a backup was restored on any till):
     // forget everything from the old session before showing the login.
     if (msg === 'please log in') { forgetSession(); start(); }
-    else if (isDeadOrder(msg, args, cmd) || await deniedForDeadOrder(msg, args, cmd)) leaveDeadOrder();
-    else toast(msg, true);
+    else if (isDeadOrder(msg, args, cmd) || await deniedForDeadOrder(msg, args, cmd)) leaveDeadOrder(msg);
+    else if (!quiet) toast(msg, true);
     const err = new Error(msg);
     err.handled = true;
     throw err;
@@ -335,14 +348,15 @@ const act = (fn) => async (ev) => {
 let refreshTimer;
 function screen(...kids) {
   clearInterval(refreshTimer);
-  // Pages opened from Manage get a way back to it, then their name (as the settings
-  // pages have) and what the page is for.
-  const name = VIEWS.find(([id]) => id === state.view)?.[1];
-  const back = state.session && !state.orderId && inManage(state.view) && h('div', { class: 'manage-back settings-head' },
-    h('button', { class: 'back-btn', onclick: () => go('settings') }, icon('back', 22), 'Manage'),
-    name && h('h2', {}, icon(state.view, 26), name),
-    MANAGE_SUB[state.view] && h('span', { class: 'page-sub' }, MANAGE_SUB[state.view]));
-  setKids(app, back, ...kids);
+  closeInfoPop();
+  // Pages opened from Manage open inside it (managers and admins); staff get
+  // their one page (Kitchen screen) with a way back to Manage.
+  if (state.session && !state.orderId && inManage(state.view)) {
+    const id = state.view, name = VIEWS.find(([v]) => v === id)?.[1];
+    if (useShell()) return manageScreen([dhead(id, name), ...kids]);
+    return setKids(app, h('div', { class: 'dhead staff-head' }, h('button', { class: 'ghost back show', onclick: () => go('settings') }, icon('back', 22), h('span', {}, 'Manage')), h('h2', {}, name)), ...kids);
+  }
+  setKids(app, ...kids);
 }
 // Poll a live view (floor, open orders). Each refresh is well under 1 ms.
 function live(fn, ms = 10000) {
@@ -362,6 +376,7 @@ function forgetSession() {
     quickNotes: null, starterChoice: null, menuTab: null, menuShown: null, newSubOf: null, openEditor: null, settingsTab: null,
     planDirty: false, day: null,
   });
+  resetManage();
 }
 
 /// The data on the main till was replaced (a backup was restored): reload
@@ -453,6 +468,7 @@ function renderLogin() {
     show();
     try {
       state.session = await call('login', { pin: p, userId: user?.id ?? null });
+      resetManage();
     } catch (e) {
       show(true);
       throw e;
@@ -597,30 +613,12 @@ const VIEWS = [
   ['plan', 'Floor plan', 'manager'],
   ['users', 'Staff', 'admin'],
 ];
-/// What each Manage tile under "Daily work" says.
-const MANAGE_SUB = {
-  history: 'Paid orders, reprint, void', shift: 'Float, money in/out, count the drawer', kitchen: 'Dishes to cook on a tablet, tap when done', customers: 'Saved customers and addresses', reports: 'Sales, close the day',
-  menuAdmin: 'Items, categories, sets, prices', plan: 'Floors and tables', users: 'Staff, PINs, roles',
-};
-/// Settings areas on the Manage page (admin only); the cards are in renderSettings.
-const SETTINGS_GROUPS = [
-  ['shop', 'store', 'Restaurant', 'Name, service charge, tax'],
-  ['bills', 'receipt', 'Bills & receipts', 'Receipt printer, cash drawer, words on bills, tips'],
-  ['kitchen', 'printer', 'Kitchen printer', 'Printer, copies, font, kitchen screen'],
-  ['tickets', 'cup', 'Drinks & desserts', 'Own tickets on or off'],
-  ['orders', 'orders', 'Orders', 'Order types, discounts, cancelling, quick notes'],
-  ['teams', 'chef', 'Kitchen teams', 'Starter, Main, Curry, Rice…'],
-  ['login', 'lock', 'Login & staff', 'Start screen, auto logout, PIN'],
-  ['delivery', 'bike', 'Delivery apps', 'Uber Eats, Just Eat, Deliveroo…'],
-  ['screen', 'monitor', 'Screen & devices', 'Button size, full screen, phones and tablets'],
-  ['data', 'database', 'Backup & data', 'Backups, menu copy, reset'],
-  ['about', 'info', 'About & updates', ''],
-];
 const inManage = (view) => !VIEWS.find(([id]) => id === view)?.[3];
 
 function go(view) {
-  if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
-  if (view === 'settings') state.settingsTab = null; // the settings menu first
+  if (!leaveOk()) return;
+  // The Manage tab: the last page or group opened (the list on a phone).
+  if (view === 'settings') { state.settingsTab = null; clearBack(); }
   state.view = view;
   const left = state.orderId;
   state.orderId = null;
@@ -740,8 +738,9 @@ const HELP = {
     "See the day's sales, tax, payment methods and best sellers.",
     'At closing time tap Close day & print summary. All orders must be paid or cancelled first.']],
   settings: ['Manage', [
-    'Type what you are looking for in the search box, like "printer", "tax" or "PIN".',
-    'Daily work has the screens you use often; Settings sets up how the POS works.']],
+    'Pick a page or a settings group in the list. Search finds a setting by name, like "printer", "tax" or "PIN".',
+    'Switches and choices save at once: a ✓ shows next to them. Printers, the service charge and other settings with several parts open a panel with Save.',
+    'Tap (i) next to a setting for a short explanation.']],
   menuAdmin: ['Menu', [
     'Tap + Menu item to add a dish: a name, a category and a price is enough.',
     'Tap any item to change it. More options holds tax, choices, extras and stock.',
@@ -811,7 +810,8 @@ async function logOut(message = null) {
   hideIdleWarn();
   await dropEmptyOrder(state.orderId);
   try { await invoke('logout'); } catch { /* already logged out on the server */ }
-  Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null });
+  Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null, planDirty: false });
+  resetManage();
   document.getElementById('bar').hidden = true;
   renderLogin();
   if (message) toast(message);
@@ -819,6 +819,9 @@ async function logOut(message = null) {
 
 document.getElementById('logout').onclick = act(async () => {
   if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
+  // A list with a save bar (e.g. Delivery apps): log out only once its changes are let go.
+  if (state.dirty && !await confirmDialog({ title: 'Discard your changes?', hint: 'They are not saved yet.', okLabel: 'Discard and log out',
+    okClass: 'danger solid', keepLabel: 'Keep editing', submit: () => {} })) return;
   await logOut();
 });
 
@@ -1038,6 +1041,20 @@ async function renderOrder() {
   state.orderOpen = false;
   let order = await call('get_order', { id: state.orderId });
   state.orderOpen = order.status === 'open';
+  // An empty order the server closed by itself (the table was tapped from an old
+  // floor view): a table gets a new order, anything else goes back with a note.
+  if (order.status === 'cancelled' && order.close_reason === 'empty' && !order.items.length) {
+    const left = state.orderId;
+    if (order.order_type === 'dine_in' && order.table_id != null) {
+      let o = null;
+      try { o = await invoke('open_order', { order: { order_type: 'dine_in', table_id: order.table_id } }); }
+      catch { o = await invoke('table_order', { tableId: order.table_id }).catch(() => null); } // someone else just opened it
+      if (o && state.orderId === left) { state.orderId = o.id; return renderOrder(); }
+    }
+    // Swept or cancelled empty on another till: the order data cannot tell which.
+    if (state.orderId === left) { toast('This empty order was closed', true); closeOrder(); }
+    return;
+  }
   if (order.status !== 'open') {
     app.classList.remove('fill');
     return screen(h('div', { class: 'page narrow' },
@@ -1380,7 +1397,7 @@ async function renderOrder() {
       // Over the staff discount limit (Settings → Orders → Discounts): a manager approves with their PIN.
       if (!/needs a manager/i.test(msg)) {
         if (msg === 'please log in') { forgetSession(); start(); }
-        else if (isDeadOrder(msg)) leaveDeadOrder();
+        else if (isDeadOrder(msg)) leaveDeadOrder(msg);
         // The dish is gone (removed or moved on another till): show the order as it is now.
         else if (msg === 'not found') { order = await call('get_order', { id: orderId }); draw(); toast(`${it.name} was changed on another till`, true); }
         else toast(msg, true);
@@ -1398,7 +1415,7 @@ async function renderOrder() {
           try { order = await invoke('update_item', { ...args, pin }); } catch (e2) {
             const m = String(e2?.message ?? e2);
             if (m === 'please log in') { setTimeout(() => { forgetSession(); start(); }); return 'Logged out: log in again'; }
-            if (isDeadOrder(m)) { setTimeout(leaveDeadOrder); return 'This order was closed on another till'; }
+            if (isDeadOrder(m)) { setTimeout(() => leaveDeadOrder(m)); return 'This order is closed'; }
             return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
           }
         },
@@ -1548,7 +1565,7 @@ async function renderOrder() {
       // went (removed or moved on another till) while the order stays open.
       const gone = (msg) => {
         if (msg === 'please log in') { forgetSession(); start(); return true; }
-        if (msg === ORDER_CLOSED && isDeadOrder(msg, { orderId })) { leaveDeadOrder(); return true; }
+        if ((msg === ORDER_CLOSED || SWEPT.test(msg)) && isDeadOrder(msg, { orderId })) { leaveDeadOrder(msg); return true; }
         return false;
       };
       // After "not found": leave only if the order itself is no longer open; else show it as it is now.
@@ -1578,7 +1595,7 @@ async function renderOrder() {
               submit: async (typed) => {
                 try { order = await invoke('set_item_price', { ...args, pin: typed }); pin = typed; } catch (e2) {
                   const m = String(e2?.message ?? e2);
-                  if (m === 'please log in' || m === ORDER_CLOSED) { setTimeout(() => gone(m)); return m === 'please log in' ? 'Logged out: log in again' : 'This order was closed on another till'; }
+                  if (m === 'please log in' || m === ORDER_CLOSED || SWEPT.test(m)) { setTimeout(() => gone(m)); return m === 'please log in' ? 'Logged out: log in again' : 'This order is closed'; }
                   // The dish (or the order) went while the PIN was typed: close this and look.
                   if (m === 'not found') { vanished = true; setTimeout(closeModal); return 'Changed on another till'; }
                   return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
@@ -1858,7 +1875,7 @@ async function renderOrder() {
     const submit = async (pin) => {
       try { r = await invoke('cancel_order', { orderId, reason: '', pin }); } catch (e) {
         const msg = String(e?.message ?? e);
-        if (isDeadOrder(msg, { orderId })) { setTimeout(leaveDeadOrder); return 'This order was closed on another till'; }
+        if (isDeadOrder(msg, { orderId })) { setTimeout(() => leaveDeadOrder(msg)); return 'This order is closed'; }
         if (/permission/i.test(msg)) return noPin ? 'You can no longer cancel without a PIN: log in again' : sent ? 'This order is already in the kitchen: a manager or admin PIN is needed' : 'A PIN is needed';
         return /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
       }
@@ -1942,6 +1959,10 @@ function closeModal() {
   const m = document.getElementById('modal');
   m.hidden = true;
   setKids(m);
+  // A settings sheet (see sheet()) dresses the same host.
+  m.removeAttribute('class');
+  m.onclick = null;
+  state.sheetBack = null;
   document.removeEventListener('keydown', state.modalKeys);
   // Run once, however the dialog was closed (see payDialog).
   const closed = state.onModalClose;
@@ -2089,6 +2110,7 @@ async function payDialog(order, refresh, pay) {
   let even = { n: 2, done: 0 };
   let tipMode = 0; // 0 | basis points | 'other'
   let method = cfg.method;
+  let rightMin = 0;
   const typed = { cash: '', amount: '', tip: '' };
   let focus = 'cash';
   const pick = new Map();
@@ -2248,6 +2270,13 @@ async function payDialog(order, refresh, pay) {
         h('button', { class: 'primary paybig pay-ok', disabled: d <= 0 || !enough, onclick: take }, okLabel)));
     document.querySelector('#modal .dialog')?.classList.add('pay-wide');
     const body = document.querySelector('#modal .pay-one');
+    // Phones: the method side keeps the height Cash needed, so switching to the
+    // shorter Card does not pull the scrolled page (and the buttons) down.
+    const right = document.querySelector('#modal .pay-right');
+    if (right && matchMedia('(max-width: 760px)').matches) {
+      rightMin = Math.max(rightMin, right.offsetHeight);
+      right.style.minHeight = `${rightMin}px`;
+    }
     if (body) body.scrollTop = scrolled;
     // Many part payments in a short list: the latest one shows.
     const parts = document.querySelector('#modal .pay-part-list');
@@ -4043,135 +4072,9 @@ async function renderCustomers() {
   q.focus();
 }
 
-/// Settings card for the delivery platform buttons (Uber Eats...).
-function platformsCard() {
-  const card = h('div', { class: 'card stack' });
-  let rows = [];
-  const list = h('div', { class: 'stack' });
-  const draw = () => setKids(list, ...rows.map((r, i) => h('div', { class: 'row' },
-    h('input', { value: r.name, placeholder: 'Platform name', oninput: (e) => (r.name = e.target.value) }),
-    h('input', { type: 'color', value: r.color || '#374151', oninput: (e) => (r.color = e.target.value) }),
-    h('button', { disabled: i === 0, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '↑'),
-    h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); draw(); } }, '×'))));
-  const load = async () => {
-    rows = (await call('list_channels')).map((c) => ({ id: c.id, name: c.name, color: c.color }));
-    draw();
-  };
-  card.append(
-    h('h3', {}, 'Delivery platforms'),
-    h('div', { class: 'muted' }, 'Each platform gets a quick button on the Orders screen, its own heading on kitchen tickets and a line in reports.'),
-    list,
-    h('div', { class: 'row' },
-      h('button', { onclick: () => { rows.push({ id: null, name: '', color: '#374151' }); draw(); list.lastChild.querySelector('input').focus(); } }, '+ Platform'),
-      h('button', { class: 'primary', onclick: act(async () => {
-        await call('save_channels', { channels: rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, color: r.color })) });
-        toast('Platforms saved');
-        await load();
-      }) }, 'Save platforms')));
-  load().catch(() => {});
-  return card;
-}
-
 /// Printer "Image mode" choices (saved value, label), numbered as on the
 /// Thai test page so "the one marked 2" is the one to pick. Standard is the default.
 const IMAGE_MODES = [['column', '1. Compatible (older printers)'], ['raster_small', '2. Small pieces'], ['raster', '3. Standard (default)']];
-
-/// "Test Thai printing" for a printer form: one page with the Thai sample in every image mode.
-const thaiTestButton = (form) => h('button', { onclick: act(async () => {
-  if (form.none()) return toast('Choose a printer first', true);
-  printResult(await call('test_thai_printer', { config: form.config() }), 'Thai test page sent: choose the mode whose Thai prints clearly');
-}) }, 'Test Thai printing');
-
-/// Connection, paper and copies for one printer (kitchen or receipt).
-/// `names`: [[value, label]...] for "Names on tickets"; the first is the default.
-/// `courses`: also offer copies for starters and mains tickets (kitchen).
-function printerForm(cfg, systemPrinters, noneLabel, names, courses = false, simple = false) {
-  const kind = h('select', {},
-    h('option', { value: 'none' }, noneLabel),
-    h('option', { value: 'network' }, 'Network printer (IP address)'),
-    h('option', { value: 'windows' }, 'Printer installed in Windows (USB)'),
-    h('option', { value: 'file' }, 'Serial port or shared printer path'));
-  kind.value = cfg.kind;
-  const host = h('input', { value: cfg.host ?? '', placeholder: '192.168.1.50' });
-  const port = h('input', { value: cfg.port ?? 9100, inputmode: 'numeric', style: 'width:90px' });
-  const winName = systemPrinters.length
-    ? h('select', {}, systemPrinters.map((n) => h('option', { value: n }, n)))
-    : h('input', { placeholder: 'Printer name as shown in Windows' });
-  if (cfg.name) {
-    if (systemPrinters.length && !systemPrinters.includes(cfg.name)) winName.append(h('option', { value: cfg.name }, cfg.name));
-    winName.value = cfg.name;
-  }
-  const path = h('input', { value: cfg.path ?? '', placeholder: 'COM3 or \\\\PC-NAME\\Kitchen', style: 'width:260px' });
-  const width = h('select', {}, h('option', { value: 42 }, '80 mm paper'), h('option', { value: 32 }, '58 mm paper'), h('option', { value: 48 }, '80 mm, small font (48)'));
-  width.value = String(cfg.width ?? 42);
-  const copies = h('input', { type: 'number', min: 1, max: 9, value: cfg.copies ?? 1, style: 'width:70px' });
-  const delay = h('input', { type: 'number', min: 0, max: 30, value: cfg.copy_delay_secs ?? 2, style: 'width:70px', title: 'Seconds to wait between copies' });
-  const bold = h('input', { type: 'checkbox', checked: cfg.bold ?? true });
-  const large = h('input', { type: 'checkbox', checked: cfg.large_text ?? true });
-  const tableOnly = h('input', { type: 'checkbox', checked: cfg.call_table_only ?? true });
-  const appFont = h('input', { type: 'checkbox', checked: cfg.app_font ?? true });
-  // On unless switched off (older saved settings too): cheap printers lose data sent all at once.
-  const slow = h('input', { type: 'checkbox', checked: cfg.slow_send ?? true });
-  const slowRow = h('div', { class: 'stack', style: 'gap:2px' },
-    h('label', { class: 'check' }, slow, ' Send slowly (for printers that print junk or skip lines)'),
-    h('div', { class: 'muted small' }, 'Sends each ticket in small pieces so the printer keeps up. The till does not wait; a long ticket finishes a second or two later. Network and serial printers only.'));
-  const courseCopies = (v) => h('input', { type: 'number', min: 1, max: 9, value: v ?? '', placeholder: 'same', style: 'width:80px' });
-  const starterCopies = courseCopies(cfg.starter_copies), mainsCopies = courseCopies(cfg.mains_copies), prepCopies = courseCopies(cfg.prep_copies);
-  const additionalCopies = h('input', { type: 'number', min: 1, max: 9, value: cfg.additional_copies ?? '', placeholder: '1', style: 'width:80px' });
-  const copiesOf = (el) => (el.value.trim() ? Math.min(9, Math.max(1, parseInt(el.value, 10) || 1)) : null);
-  const lang = h('select', {}, names.map(([v, label]) => h('option', { value: v }, label)));
-  lang.value = names.some(([v]) => v === cfg.names) ? cfg.names : names[0][0];
-  // How Thai text (drawn as an image) is sent; "Test Thai printing" prints every mode.
-  const imageMode = h('select', { 'aria-label': 'Image mode (for Thai text)' }, IMAGE_MODES.map(([v, label]) => h('option', { value: v }, label)));
-  imageMode.value = IMAGE_MODES.some(([v]) => v === cfg.image_mode) ? cfg.image_mode : 'raster';
-  const fields = h('div', { class: 'row' });
-  const drawFields = () => {
-    setKids(fields, ...{
-      none: [],
-      network: [h('label', { class: 'field' }, 'IP address', host), h('label', { class: 'field' }, 'Port', port)],
-      windows: [h('label', { class: 'field' }, 'Printer', winName)],
-      file: [h('label', { class: 'field' }, 'Port or path', path)],
-    }[kind.value]);
-    // Windows printers are paced by the spooler and USB already.
-    slowRow.hidden = !['network', 'file'].includes(kind.value);
-  };
-  kind.onchange = drawFields;
-  drawFields();
-  return {
-    el: h('div', { class: 'stack' }, h('div', { class: 'row' }, kind, width, h('label', { class: 'field' }, 'Copies', copies),
-        !simple && h('label', { class: 'field' }, 'Delay between copies', delay, 'sec')), fields,
-      courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Starters ticket copies', starterCopies),
-        h('label', { class: 'field' }, 'Mains ticket copies', mainsCopies),
-        h('label', { class: 'field' }, 'Prepare ticket copies', prepCopies),
-        h('span', { class: 'muted small' }, 'Dine-in. Starters: when starters are sent first, or the table orders only starters for now. ' +
-          'Mains: "Call mains", and the first mains sent after the starters (also when the mains were ordered later). Empty = same as Copies.')),
-      courses && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Additional ticket copies', additionalCopies),
-        h('span', { class: 'muted small' }, 'More dishes ordered after the mains went (ADDITIONAL); empty = 1.')),
-      !simple && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Item names', lang),
-        h('span', { class: 'muted small' }, 'Thai names are set on each menu item; items without one print in English.')),
-      !simple && h('label', { class: 'check' }, bold, ' Bold text (easier to read; matches the Thai)'),
-      // Label above the select: stays readable on a phone.
-      h('label', { class: 'field-col', style: 'gap:4px;align-self:flex-start;max-width:100%;color:var(--ink-2)' }, 'Image mode (for Thai text)', imageMode),
-      h('div', { class: 'muted small' }, 'Thai text (and all kitchen text in the app\'s font) prints as pictures. If it doesn\'t print, tap Test Thai printing and choose the number that prints clearly.'),
-      slowRow,
-      courses && h('label', { class: 'check' }, appFont, ' Print tickets in the app\'s font (the same as the team names); off = the printer\'s own font'),
-      courses && h('label', { class: 'check' }, tableOnly, ' "Call mains again" prints only the table, in huge letters (no dishes)'),
-      courses && h('label', { class: 'check' }, large, ' Large text for dishes, options and notes (fewer letters per line)')),
-    none: () => kind.value === 'none',
-    config: () => ({
-      kind: kind.value, width: Number(width.value), copies: Math.min(9, Math.max(1, parseInt(copies.value, 10) || 1)),
-      copy_delay_secs: Math.min(30, Math.max(0, parseInt(delay.value, 10) || 0)),
-      names: lang.value,
-      bold: bold.checked,
-      image_mode: imageMode.value,
-      slow_send: slow.checked,
-      ...(courses && { starter_copies: copiesOf(starterCopies), mains_copies: copiesOf(mainsCopies), prep_copies: copiesOf(prepCopies), additional_copies: copiesOf(additionalCopies), large_text: large.checked, call_table_only: tableOnly.checked, app_font: appFont.checked }),
-      ...(kind.value === 'network' && { host: host.value.trim(), port: Number(port.value) || 9100 }),
-      ...(kind.value === 'windows' && { name: winName.value }),
-      ...(kind.value === 'file' && { path: path.value.trim() }),
-    }),
-  };
-}
 
 /// Settings card: defaults for new menu items.
 function menuDefaultsCard() {
@@ -4271,99 +4174,6 @@ function teamsCard() {
   return card;
 }
 
-/// Settings card: what tickets and bills call each kind of order.
-function ticketLabelsCard() {
-  const defs = [['label_dine_in', 'Dine-in', 'DINE-IN', 'Printed before the table, e.g. DINE-IN T3. Leave empty to print the table alone.'],
-    ['label_takeaway', 'Takeaway', 'TAKEAWAY'], ['label_collection', 'Collection', 'COLLECTION'], ['label_delivery', 'Delivery', 'DELIVERY'],
-    ['label_table', 'Table (main course call)', 'TABLE', 'Before the number on the "Call mains again" ticket. Leave empty for the number alone.']];
-  const inputs = defs.map(([key, , def]) => {
-    const el = h('input', { placeholder: def, style: 'width:200px' });
-    invoke('get_setting', { key }).then((v) => { if (v != null) el.value = v; }).catch(() => {});
-    return el;
-  });
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Words on tickets and bills'),
-    h('div', { class: 'muted' }, 'What kitchen tickets, bills and receipts call each kind of order. Empty = the standard word.'),
-    defs.map(([, label, , hint], i) => h('div', { class: 'row' }, h('label', { class: 'field' }, label, inputs[i]), hint && h('span', { class: 'muted small' }, hint))),
-    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => {
-      for (const [i, [key]] of defs.entries()) await call('set_setting', { key, value: inputs[i].value.trim() });
-      toast('Saved');
-    }) }, 'Save')));
-}
-
-/// Settings card: the quick notes staff tap onto an order line.
-function quickNotesCard() {
-  const text = h('textarea', { rows: 6, style: 'width:100%', placeholder: 'One note per line, e.g.\nNo onions\nExtra spicy\nNo ice' });
-  invoke('get_setting', { key: QUICK_NOTES_KEY }).then((v) => (text.value = quickNotes(v).join('\n'))).catch(() => {});
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Quick notes'),
-    h('div', { class: 'muted' }, 'Buttons shown when staff tap ✎ on an order line, so common requests are one tap (they print on the kitchen ticket). One per line.'),
-    text,
-    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => {
-      const list = text.value.split('\n').map((n) => n.trim()).filter(Boolean);
-      if (list.some((n) => n.length > 40)) return toast('Keep each quick note to 40 characters', true);
-      if (list.length > 30) return toast('Up to 30 quick notes', true);
-      await call('set_setting', { key: QUICK_NOTES_KEY, value: list.join('\n') });
-      state.menu = null;
-      text.value = list.join('\n');
-      toast(list.length ? `${list.length} quick notes saved` : 'Quick notes removed');
-    }) }, 'Save')));
-}
-
-/// Settings card: the screen staff see right after logging in.
-function startScreenCard() {
-  const seg = h('div', { class: 'seg' });
-  const draw = (cur) => setKids(seg, START_SCREENS.map(([v, label]) => h('button', {
-    class: v === cur ? 'on' : '',
-    onclick: act(async () => {
-      await call('set_setting', { key: 'start_screen', value: v });
-      draw(v);
-      toast(`After login: ${label}`);
-    }),
-  }, label)));
-  draw(state.ui?.startScreen ?? 'tables');
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Start screen after login'),
-    seg,
-    h('div', { class: 'muted small' }, 'New takeaway opens a new takeaway order at once; leaving it empty drops it.'));
-}
-
-/// Settings card: hide the new-order buttons for kinds of order a restaurant never takes.
-function orderTypesCard() {
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Order types'),
-    h('div', { class: 'muted small' }, 'Buttons for new orders on the Orders screen. Dine-in (from Tables) always shows; open orders of a hidden type still work.'),
-    settingSwitch('show_takeaway', 'Takeaway', 'Takeaway button shown', 'Takeaway button hidden'),
-    settingSwitch('show_collection', 'Collection', 'Collection button shown', 'Collection button hidden'),
-    settingSwitch('show_delivery', 'Delivery (your own drivers)', 'Delivery button shown', 'Delivery button hidden'));
-}
-
-/// Settings card: quick discount buttons and how much staff may give without a manager.
-function discountCard() {
-  const card = h('div', { class: 'card stack' });
-  invoke('get_settings', { keys: ['discount_presets', 'discount_staff_max_pct'] }).then((raw) => {
-    const c = uiSettings(raw);
-    const presets = h('input', { value: c.discountPresets.join(', '), placeholder: 'e.g. 5, 10, 15, 20', style: 'width:200px' });
-    const limit = numBox(c.discountLimit == null ? '' : String(c.discountLimit), { inputmode: 'numeric', placeholder: 'none' });
-    setKids(card,
-      h('h3', {}, 'Discounts'),
-      h('div', { class: 'muted small' }, 'Tap ✎ on an order line for these buttons. Staff can also type an amount or a percentage, e.g. 10%.'),
-      h('label', { class: 'field' }, 'Buttons', presets, '%'),
-      h('label', { class: 'field' }, 'Staff can give up to', limit, '% without a manager PIN'),
-      h('div', { class: 'muted small' }, 'Empty = no limit. Managers and admins can always give more.'),
-      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
-        const list = presets.value.split(/[,;\s]+/).filter(Boolean).map((x) => Number(x.replace('%', '')));
-        if (list.length > 8 || list.some((n) => !Number.isInteger(n) || n < 1 || n > 100)) return toast('Buttons: up to 8 whole percentages from 1 to 100, e.g. 5, 10, 15', true);
-        const max = limit.value.trim();
-        if (max !== '' && !(Number.isInteger(Number(max)) && Number(max) >= 0 && Number(max) <= 100)) return toast('Limit: a whole percentage from 0 to 100, or empty', true);
-        await call('set_setting', { key: 'discount_presets', value: list.join(',') });
-        await call('set_setting', { key: 'discount_staff_max_pct', value: max });
-        toast((list.length ? `Discount buttons ${list.join(' / ')} %` : 'No discount buttons') + (max !== '' ? ` · over ${max}% needs a manager` : ''));
-      }) }, 'Save discounts')));
-  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
-  return card;
-}
-
 /// Settings card: bigger menu tiles and order buttons, on every device.
 function buttonSizeCard() {
   const seg = h('div', { class: 'seg' });
@@ -4381,79 +4191,6 @@ function buttonSizeCard() {
     h('h3', {}, 'Menu button size'),
     seg,
     h('div', { class: 'muted small' }, 'Large: bigger menu tiles, categories and order buttons, easier to hit. Fewer tiles fit on the screen. Applies to every device.'));
-}
-
-/// Settings card: log out after a few minutes without activity.
-function autoLogoutCard() {
-  const sel = h('select', {},
-    [[0, 'Never'], [1, '1 minute'], [2, '2 minutes'], [5, '5 minutes'], [10, '10 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']]
-      .map(([v, label]) => h('option', { value: v }, label)));
-  const current = state.autoLogout ?? AUTO_LOGOUT_DEFAULT;
-  if (![...sel.options].some((o) => Number(o.value) === current)) sel.append(h('option', { value: current }, `${current} minutes`));
-  sel.value = String(current);
-  sel.onchange = act(async () => {
-    await call('set_setting', { key: AUTO_LOGOUT_KEY, value: sel.value });
-    state.autoLogout = Number(sel.value);
-    toast(state.autoLogout ? `Auto logout after ${sel.selectedOptions[0].textContent} without activity` : 'Auto logout switched off');
-  });
-  const warn = h('select', {}, [[0, 'No warning'], [10, '10 seconds'], [20, '20 seconds'], [30, '30 seconds'], [60, '1 minute']]
-    .map(([v, label]) => h('option', { value: v }, label)));
-  const warnNow = state.ui?.warnSecs ?? AUTO_LOGOUT_WARN_DEFAULT;
-  if (![...warn.options].some((o) => Number(o.value) === warnNow)) warn.append(h('option', { value: warnNow }, `${warnNow} seconds`));
-  warn.value = String(warnNow);
-  warn.onchange = act(async () => {
-    await call('set_setting', { key: 'auto_logout_warn_secs', value: warn.value });
-    toast(Number(warn.value) ? `"Logging out in ${warn.value} s" shows before auto logout` : 'Auto logout without a warning');
-  });
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Login and auto logout'),
-    h('div', { class: 'muted' }, 'Log out by itself when nobody touches the screen or presses a key for this long, so the next person must enter their own PIN. ' +
-      'Open orders are kept. Applies to this till and every device using the local server.'),
-    h('label', { class: 'field' }, 'Log out after', sel),
-    h('label', { class: 'field' }, 'Warn before', warn),
-    h('div', { class: 'muted small' }, 'A big "Logging out in … s" covers the screen; any tap or key keeps you logged in.'),
-    pinAutoLogin());
-}
-
-/// Log in without OK once the PIN is complete (setting pin_auto_login).
-function pinAutoLogin() {
-  const box = h('input', { type: 'checkbox', checked: true });
-  invoke('get_setting', { key: 'pin_auto_login' }).then((v) => (box.checked = v !== '0')).catch(() => {});
-  box.onchange = act(async () => {
-    await call('set_setting', { key: 'pin_auto_login', value: box.checked ? '1' : '0' });
-    toast(box.checked ? 'Login as soon as the PIN is typed' : 'Press OK to log in');
-  });
-  return h('div', { class: 'stack' },
-    h('label', { class: 'switch' }, box, h('span', {}, ''), 'Log in as soon as the PIN is typed (no OK)'),
-    h('div', { class: 'muted small' }, 'Works once every staff member has logged in once after this update (the till learns how long each PIN is, never the PIN). ' +
-      'If PINs have different lengths, the shorter ones still press OK.'));
-}
-
-/// Settings card for the service charge.
-function serviceCard() {
-  const card = h('div', { class: 'card stack' });
-  call('get_service_settings').then((cfg) => {
-    const rate = h('input', { inputmode: 'decimal', value: cfg.rate_bp ? pct(cfg.rate_bp) : '', placeholder: '0', style: 'width:90px' });
-    const label = h('input', { value: cfg.label, style: 'width:200px' });
-    const types = Object.entries(TYPE).map(([k, name]) => ({ k, box: h('input', { type: 'checkbox', checked: cfg.order_types.includes(k) }), name }));
-    setKids(card,
-      h('h3', {}, 'Service charge'),
-      h('div', { class: 'muted' }, 'Added to the bill as a percentage of the food (after discounts, no tax on it). Leave the rate empty or 0 for no service charge. ' +
-        'Staff can change or remove it on any order by tapping it under the totals.'),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Rate', rate, '%'), h('label', { class: 'field' }, 'Name on the bill', label)),
-      h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Add it to new:'),
-        types.map((t) => h('label', { class: 'check' }, t.box, ` ${t.name}`))),
-      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
-        const v = Number((rate.value || '0').replace(',', '.'));
-        if (!Number.isFinite(v) || v < 0 || v > 30) return toast('Enter a rate from 0 to 30 %', true);
-        await call('set_service_settings', { settings: {
-          rate_bp: Math.round(v * 100), label: label.value, order_types: types.filter((t) => t.box.checked).map((t) => t.k),
-        } });
-        state.menu = null; // reload on the next order screen
-        toast(v ? `Service charge ${v}% saved (applies to new orders)` : 'Service charge switched off');
-      }) }, 'Save service charge')));
-  }).catch(() => {});
-  return card;
 }
 
 /// Settings card for full screen (desktop window only).
@@ -4519,406 +4256,1471 @@ function serverCard() {
 
 const printResult = (r, ok) => toast(r.error ? `Did not print: ${r.error}` : ok, !!r.error);
 
-async function renderSettings() {
-  const tab = settingsGroups().find(([id]) => id === state.settingsTab);
-  if (!tab) return renderManageHome();
-  const store = h('input', { value: state.storeName ?? '', placeholder: 'Restaurant name' });
-  // Printers are admin settings (managers only see the kitchen cards).
-  const [kitchenCfg, receiptCfg, systemPrinters] = isAdmin() ? await Promise.all([
-    call('get_kitchen_printer'), call('get_receipt_settings'), call('list_system_printers'),
-  ]) : [{}, {}, []];
+// ---------- Manage: one shell (side list + detail pane) ----------
+// Wide screens (≥ 1000 px): the side list and the open page or settings group side
+// by side. Phones: the list, then the page on its own with ‹ Manage to go back.
 
-  const kitchen = isAdmin() && printerForm(kitchenCfg, systemPrinters, 'No kitchen printer',
-    [['both', 'English with Thai under it'], ['english', 'English only'], ['thai', 'Thai only']], true);
+/// Daily work pages, in the order they are used.
+const MANAGE_DAILY = ['history', 'reports', 'shift', 'menuAdmin', 'customers', 'kitchen', 'plan', 'users'];
+/// Settings groups. `need`: who sees the group (its loosest row): 'all',
+/// 'kitchen' (managers and admins: the server's kitchen settings) or 'admin'.
+const MANAGE_GROUPS = [
+  { id: 'printers', icon: 'printer', title: 'Printers', need: 'admin', build: printersGroup },
+  { id: 'payments', icon: 'receipt', title: 'Payments & receipts', need: 'admin', build: paymentsGroup },
+  { id: 'orders', icon: 'orders', title: 'Orders', need: 'kitchen', build: ordersGroup },
+  { id: 'kitchen', icon: 'chef', title: 'Kitchen', need: 'kitchen', build: kitchenGroup },
+  { id: 'login', icon: 'lock', title: 'Login & staff', need: 'admin', build: loginGroup },
+  { id: 'restaurant', icon: 'store', title: 'Restaurant', need: 'admin', build: restaurantGroup },
+  { id: 'delivery', icon: 'bike', title: 'Delivery apps', need: 'admin', build: deliveryGroup },
+  // Full screen and the local server are this PC's own (not on a phone or tablet).
+  { id: 'devices', icon: 'monitor', title: 'Devices & display', need: 'admin', build: () => legacy(tagRow(themeCard(), 'theme'), tagRow(buttonSizeCard(), 'buttons'), !state.remote && tagRow(displayCard(), 'fullscreen'), !state.remote && tagRow(serverCard(), 'server')) },
+  { id: 'data', icon: 'database', title: 'Backup & data', need: 'admin', build: () => legacy(backupCard(), tagRow(menuBackupCard(), 'menu'), tagRow(resetCard(), 'reset')) },
+  // Checking for and installing updates is for admins only.
+  { id: 'about', icon: 'info', title: 'About', need: 'all', build: () => legacy(creditsCard(), isAdmin() && aboutCard()) },
+];
+const needOk = (need) => !need || need === 'all' || (need === 'kitchen' || need === 'manager' ? isManager() : isAdmin());
+const visibleGroups = () => MANAGE_GROUPS.filter((g) => needOk(g.need));
+const visiblePages = () => MANAGE_DAILY.filter((id) => canSee(VIEWS.find(([v]) => v === id)?.[2]));
+/// Staff have two things in Manage (Kitchen screen, About): two cards, no side list.
+const useShell = () => isManager();
+const wideQ = matchMedia('(min-width: 1000px)');
 
-  const receipt = isAdmin() && printerForm(receiptCfg, systemPrinters, 'No receipt printer',
-    [['english', 'English only'], ['both', 'English with Thai under it']]);
-  const autoPrint = h('input', { type: 'checkbox', checked: receiptCfg.auto_print });
-  const drawer = h('input', { type: 'checkbox', checked: receiptCfg.drawer_on_cash });
-  const shopName = h('input', { value: receiptCfg.shop_name ?? '', placeholder: `${state.storeName || 'Restaurant name'} (the restaurant name above)`, style: 'flex:1' });
-  const staffCopy = h('input', { type: 'checkbox', checked: receiptCfg.staff_copy !== false });
-  const taxBreakdown = h('input', { type: 'checkbox', checked: receiptCfg.tax_breakdown === true });
-  const showStaff = h('input', { type: 'checkbox', checked: receiptCfg.show_staff !== false });
-  const header = h('textarea', { rows: 3, style: 'width:100%', placeholder: 'Address, phone, VAT number… (one per line)' });
-  header.value = receiptCfg.header ?? '';
-  const footer = h('input', { value: receiptCfg.footer ?? '', placeholder: 'e.g. Thank you for your visit!', style: 'flex:1' });
-  const currency = h('input', { value: receiptCfg.currency ?? '£', style: 'width:60px' });
-  const receiptSettings = () => ({
-    ...receipt.config(), auto_print: autoPrint.checked, drawer_on_cash: drawer.checked, staff_copy: staffCopy.checked,
-    tax_breakdown: taxBreakdown.checked, show_staff: showStaff.checked,
-    shop_name: shopName.value.trim() || null,
-    header: header.value.trim() || null, footer: footer.value.trim() || null, currency: currency.value,
-  });
+/// What this device opened last in Manage ("g:printers", "p:history").
+const MANAGE_LAST = 'pos.manage.last';
+const lastManage = () => { try { return localStorage.getItem(MANAGE_LAST); } catch { return null; } };
+const rememberManage = (item) => { try { localStorage.setItem(MANAGE_LAST, item); } catch {} };
+const pref = (k, def = null) => { try { return localStorage.getItem(k) ?? def; } catch { return def; } };
+const setPref = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+const manageItem = () => (state.view === 'settings' ? (state.settingsTab ? `g:${state.settingsTab}` : null) : `p:${state.view}`);
 
-  const restaurantCard = () => h('div', { class: 'card stack' },
-    h('h3', {}, 'Restaurant'),
-    h('div', { class: 'row' }, store, h('button', { class: 'primary', onclick: act(async () => {
-      await call('set_setting', { key: 'store_name', value: store.value });
-      toast('Saved');
-      await start();
-    }) }, 'Save')));
-  const kitchenPrinterCard = () => h('div', { class: 'card stack' },
-    h('h3', {}, 'Kitchen printer'),
-    h('div', { class: 'muted' }, 'Tickets print on "Send to kitchen" on any ESC/POS thermal printer (Epson, Star, Xprinter…). ' +
-      'For USB printers choose "installed in Windows"; for network printers use the IP address from its self-test page.'),
-    kitchen.el,
-    h('div', { class: 'row' },
-      h('button', { onclick: act(async () => {
-        if (kitchen.none()) return toast('Choose a printer first', true);
-        printResult(await call('test_kitchen_printer', { config: kitchen.config() }), 'Test ticket sent');
-      }) }, 'Print test ticket'),
-      thaiTestButton(kitchen),
-      h('button', { class: 'primary', onclick: act(async () => {
-        await call('set_kitchen_printer', { config: kitchen.config() });
-        toast('Kitchen printer saved');
-      }) }, 'Save kitchen printer')));
-  const receiptCard = () => h('div', { class: 'card stack' },
-    h('h3', {}, 'Receipt printer & cash drawer'),
-    h('div', { class: 'muted' }, 'Customer receipts and bills. The cash drawer plugs into this printer. ' +
-      'It can be the same printer as the kitchen one.'),
-    receipt.el,
-    h('label', { class: 'check' }, autoPrint, ' Print a receipt automatically after payment'),
-    h('label', { class: 'check' }, drawer, ' Open the cash drawer for cash payments'),
-    h('label', { class: 'check' }, staffCopy, ' Also print a staff copy after payment, with the tax by class (net, VAT, gross)'),
-    h('label', { class: 'check' }, taxBreakdown, ' Show the VAT / tax breakdown on customer bills and receipts'),
-    h('label', { class: 'check' }, showStaff, ' Show "Served by" and the staff name on customer bills and receipts'),
-    h('div', { class: 'row' }, 'Currency symbol', currency),
-    h('label', { class: 'field' }, 'Name at the top of the bill', h('div', { class: 'row' }, shopName)),
-    h('label', { class: 'field' }, 'Address, phone, VAT number (under the name, one per line)', header),
-    h('label', { class: 'field' }, 'Message at the bottom', h('div', { class: 'row' }, footer)),
-    h('div', { class: 'row' },
-      h('button', { onclick: act(async () => {
-        if (receipt.none()) return toast('Choose a printer first', true);
-        printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: false }), 'Test receipt sent');
-      }) }, 'Print test receipt'),
-      thaiTestButton(receipt),
-      h('button', { onclick: act(async () => {
-        if (receipt.none()) return toast('Choose a printer first', true);
-        printResult(await call('test_receipt_printer', { settings: receiptSettings(), drawerOnly: true }), 'Drawer opened');
-      }) }, 'Test cash drawer'),
-      h('button', { class: 'primary', onclick: act(async () => {
-        await call('set_receipt_settings', { settings: receiptSettings() });
-        toast('Receipt settings saved');
-      }) }, 'Save receipt settings')));
-  // Product name, version and credits: shown at the top of About & updates.
-  const creditsCard = () => h('div', { class: 'card about-credits' },
-    h('div', { class: 'about-head' },
-      h('h3', { class: 'about-name' }, 'Limehouse POS'),
-      state.version && h('span', { class: 'chip info' }, `Version ${state.version}`)),
-    h('div', { class: 'about-by' }, 'Developed by ', h('strong', {}, 'Pheeraphat Bunliang')),
-    h('div', { class: 'muted small' }, 'Designed and developed with AI-assisted programming.'),
-    h('div', { class: 'about-copy muted small' }, '\u00a9 2026 Pheeraphat Bunliang. All rights reserved.'));
-  const aboutCard = () => h('div', { class: 'card stack' },
-    h('h3', {}, 'Updates'),
-    state.remote
-      ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
-      : [h('div', { class: 'muted' }, 'The app checks for updates every few hours while an admin is logged in on this till. Installing one takes about a minute: ' +
-        'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
-      h('div', { class: 'row' }, h('button', { onclick: act(async () => {
-        const info = await checkForUpdate(false);
-        if (info && !info.available) toast(`You have the latest version (${info.current})`);
-      }) }, 'Check for updates'))]);
-  const backupCard = () => {
-    const list = h('div', { class: 'backup-list' });
-    const admin = isAdmin();
-    let files = [];
-    const load = async () => {
-      files = await call('list_full_backups').catch(() => []);
-      setKids(list, files.length ? files.map((f) => h('div', { class: 'backup-row' },
-        h('div', { class: 'grow' }, h('div', {}, fmtTime(f.modified)),
-          h('div', { class: 'muted small' }, `${backupKind(f.name)} · ${f.name} · ${fileSize(f.size)}`)),
-        admin && h('div', { class: 'row backup-acts' },
-          h('button', { onclick: act(async () => restoreDialog(f, await call('inspect_backup', { name: f.name }))) }, 'Restore'),
-          state.remote && h('button', { onclick: act(() => downloadBackup(f.name)) }, 'Download'),
-          confirmBtn('Delete', 'Tap again to delete', async () => {
-            await call('delete_backups', { names: [f.name] }); toast('Backup deleted'); await load();
-          }, 'danger-outline'))))
-        : h('div', { class: 'muted' }, 'No backups yet.'));
-    };
-    load();
-    // How many full backups to keep (setting backups_kept; not set = 14).
-    const [KEEP_MIN, KEEP_MAX, KEEP_DEF] = [3, 90, 14];
-    const keep = numBox('', { inputmode: 'numeric', placeholder: String(KEEP_DEF), 'aria-label': 'Backups kept' });
-    const keepText = h('span', {}, `the last ${KEEP_DEF} are kept`);
-    invoke('get_setting', { key: 'backups_kept' }).then((v) => {
-      const n = Number(v);
-      if (v != null && Number.isInteger(n) && n >= KEEP_MIN && n <= KEEP_MAX) { keep.value = String(n); keepText.textContent = `the last ${n} are kept`; }
-    }).catch(() => {});
-    // Where the files are, to copy one to a USB stick (moving to a new PC).
-    const folder = h('div', { class: 'muted small backup-folder' });
-    if (admin) invoke('backup_folder').then((dir) => setKids(folder, state.remote ? 'Backup folder on the main till: ' : 'Backup folder: ', h('code', {}, dir))).catch(() => {});
-    const status = h('div', { class: 'muted', hidden: true });
-    const fileInput = h('input', { type: 'file', accept: '.db', hidden: true });
-    const fromFile = h('button', { onclick: () => fileInput.click() }, 'Restore everything from a file…');
-    fileInput.onchange = act(async () => {
-      const f = fileInput.files[0];
-      fileInput.value = '';
-      if (!f) return;
-      fromFile.disabled = true;
-      status.hidden = false;
-      try {
-        const r = await uploadBackup(f, (pct) => { status.textContent = `Loading ${f.name}… ${pct}%`; });
-        status.textContent = '';
-        await load();
-        restoreDialog(r.file, r.summary);
-      } finally {
-        fromFile.disabled = false;
-        status.hidden = true;
-      }
-    });
-    return h('div', { class: 'card stack' },
-      h('h3', {}, 'Backup'),
-      h('p', { class: 'muted' }, 'Everything (orders, menu, customers, staff and PINs, settings) is backed up automatically once a day at startup; ', keepText,
-        '. The copies made before an update, a reset or a restore, and files loaded from elsewhere, are kept apart (the last 3 of each, and any from the last 7 days).'),
-      admin && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Keep the last', keep, 'backups'),
-        h('button', { onclick: act(async () => {
-          const raw = keep.value.trim(), n = Number(raw);
-          if (raw && (!Number.isInteger(n) || n < KEEP_MIN || n > KEEP_MAX)) return toast(`Backups kept: a whole number from ${KEEP_MIN} to ${KEEP_MAX}`, true);
-          await call('set_setting', { key: 'backups_kept', value: raw });
-          keepText.textContent = `the last ${raw || KEEP_DEF} are kept`;
-          toast(`Keeping the last ${raw || KEEP_DEF} backups. Older ones are deleted at the next backup.`);
-        }) }, 'Save')),
-      admin && h('div', { class: 'muted small' }, `${KEEP_MIN} to ${KEEP_MAX} (empty = ${KEEP_DEF}). Daily backups only: safety copies and files loaded from elsewhere are kept apart. Each backup is a full copy of the database.`),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => { toast('Backup saved: ' + (await call('backup_now'))); await load(); }) }, 'Back up everything now'),
-        admin && fromFile, fileInput,
-        admin && !state.remote && h('button', { onclick: act(() => invoke('open_backup_folder')) }, 'Open backup folder'),
-        h('span', { class: 'grow' }),
-        admin && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete backups', files.map((f) => ({ id: f.name, label: fmtTime(f.modified), sub: `${f.name} · ${fileSize(f.size)}` })),
-          async (names) => `${await call('delete_backups', { names })} backup(s) deleted`, load) }, 'Delete several…')),
-      status,
-      admin && h('div', { class: 'muted small' }, h('strong', {}, 'Moving to a new PC? '),
-        state.remote ? 'Download a backup here, ' : 'Back up, open the backup folder and copy the newest backup to a USB stick, ',
-        'then on the new PC open Backup & data and use Restore everything from a file…'),
-      admin && folder,
-      list);
-  };
-
-  const cards = {
-    shop: () => [restaurantCard(), serviceCard(), menuDefaultsCard()],
-    bills: () => [receiptCard(), paymentsCard(), ticketLabelsCard()],
-    kitchen: () => [isAdmin() && kitchenPrinterCard(), isAdmin() && routesCard(systemPrinters), kdsCard()],
-    tickets: () => [splitCard()],
-    orders: () => [isAdmin() && orderTypesCard(), isAdmin() && discountCard(), courseCard(), cancelTicketCard(), isAdmin() && fixSentCard(), quickNotesCard()],
-    teams: () => [teamsCard(), teamChoiceCard()],
-    login: () => [startScreenCard(), autoLogoutCard()],
-    delivery: () => [platformsCard()],
-    // Full screen and the local server are this PC's own (not on a phone or tablet).
-    screen: () => [themeCard(), buttonSizeCard(), !state.remote && displayCard(), !state.remote && serverCard()],
-    data: () => [backupCard(), menuBackupCard(), resetCard()],
-    // Checking for and installing updates is for admins only.
-    about: () => [creditsCard(), isAdmin() && aboutCard()],
-  };
-  const group = { id: tab[0], icon: tab[1], title: tab[2], cards: cards[tab[0]] };
-  drawTitle(group.title, 'Manage');
-  const back = () => { state.settingsTab = null; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
-  screen(h('div', { class: 'page settings' },
-    h('div', { class: 'settings-head' },
-      h('button', { class: 'back-btn', onclick: back }, icon('back', 22), 'Manage'),
-      h('h2', {}, icon(group.icon, 26), group.title)),
-    group.cards()));
+/// Unsaved changes in a list with a save bar (or the floor plan) keep you on the page.
+function leaveOk() {
+  if (state.planDirty) { toast('Save or discard your floor plan changes first', true); return false; }
+  if (state.dirty) {
+    toast('Save or discard first', true);
+    const bar = document.querySelector('.savebar:not([hidden])');
+    if (bar) nudge(bar);
+    return false;
+  }
+  return true;
 }
 
-/// The settings areas this user may open: all for admins, the kitchen ones
-/// and About for managers, only About (credits and version) for staff.
-function settingsGroups() {
-  const kitchen = ['kitchen', 'tickets', 'orders', 'teams'];
-  return SETTINGS_GROUPS.filter(([id]) => isAdmin() || id === 'about' || (isManager() && kitchen.includes(id)))
-    .map((g) => (!isAdmin() && MANAGER_GROUPS[g[0]] ? [g[0], g[1], ...MANAGER_GROUPS[g[0]].slice(0, 2)] : g));
+// Phones: list → group → sheet are history steps, so the phone's back button works.
+const backStack = [];
+let ignorePops = 0;
+const phoneQ = matchMedia('(max-width: 999px)');
+function pushBack(kind) {
+  if (!phoneQ.matches) return;
+  backStack.push(kind);
+  history.pushState({ posBack: backStack.length }, '');
 }
-/// What a manager's tile says where they see less than an admin: Kitchen printer
-/// opens only the Kitchen screen card, Orders has no order types or discounts.
-/// [title, line, search words]
-const MANAGER_GROUPS = {
-  kitchen: ['Kitchen screen settings', 'When cards turn amber or red, refresh', 'kitchen screen tablet kds slow late colour color amber red refresh paid'],
-  orders: ['Orders', 'Starter or main, cancelling, quick notes', 'cancel cancelling quick notes courses starter main mains'],
-};
-/// Words that suggest what to type in the Manage search; only those that find a tile this person can open are shown.
-const FIND_EXAMPLES = ['printer', 'tax', 'PIN', 'backup', 'menu', 'reports', 'history', 'quick notes', 'staff'];
-
-/// Manage: big tiles for the other screens (History, Menu, Staff…) and,
-/// for admins, every settings area.
-function renderManageHome() {
+/// The step was closed on screen: drop its history entry without acting on it.
+function popBack(kind) {
+  if (backStack.at(-1) !== kind) return;
+  backStack.pop();
+  ignorePops++;
+  history.back();
+}
+function clearBack() {
+  const n = backStack.length;
+  if (!n) return;
+  backStack.length = 0;
+  ignorePops++;
+  history.go(-n);
+}
+window.addEventListener('popstate', () => {
+  if (ignorePops) { ignorePops--; return; }
+  const kind = backStack.pop();
+  if (kind === 'sheet') return state.sheetBack?.();
+  if (kind === 'detail' && state.session && !state.orderId && manageItem()) {
+    if (!leaveOk()) { pushBack('detail'); return; }
+    manageBack();
+  }
+});
+/// ‹ Manage on a phone: back to the list.
+function manageBack() {
+  state.view = 'settings';
   state.settingsTab = null;
-  drawTitle('Manage');
-  const tiles = [];
-  const words = (g) => (!isAdmin() && MANAGER_GROUPS[g]?.[2]) || SETTING_WORDS[g];
-  const tile = (id, ic, title, sub, words, onclick) => {
-    const el = h('button', { class: 'settings-tile', 'data-group': id, onclick }, icon(ic, 32), h('strong', {}, title), sub && h('small', {}, sub));
-    el.dataset.find = `${title} ${sub ?? ''} ${words ?? ''}`.toLowerCase();
-    tiles.push(el);
-    return el;
-  };
-  const pages = VIEWS.filter(([id, , need]) => !['floor', 'orders', 'settings'].includes(id) && canSee(need));
-  const groups = settingsGroups();
-  const open = (id) => () => { state.settingsTab = id; renderSettings().catch((e) => toast(String(e?.message ?? e), true)); };
-  const daily = h('div', { class: 'settings-tiles' }, pages.map(([id, label]) => tile(id, id, label, MANAGE_SUB[id], PAGE_WORDS[id], () => go(id))));
-  const setTiles = groups.length > 0 && h('div', { class: 'settings-tiles' }, groups.map(([id, ic, title, sub]) =>
-    tile(id, ic, title, id === 'about' ? `Version ${state.version}` : sub, words(id), open(id))));
-  const dailyHead = h('h3', { class: 'manage-title' }, 'Daily work');
-  const setHead = groups.length > 0 && h('h3', { class: 'manage-title' }, 'Settings');
-  // Every word typed must appear in the tile's name, its line or its search words.
-  const hits = (text, ws) => ws.every((w) => text.includes(w));
-  // The examples are words in the name or line of a tile this person can open.
-  const examples = FIND_EXAMPLES.filter((x) => tiles.some((t) => hits(t.textContent.toLowerCase(), x.toLowerCase().split(' '))));
-  const quoted = examples.slice(0, 3).map((x) => `"${x}"`);
-  const tryWords = quoted.length > 1 ? `${quoted.slice(0, -1).join(', ')} or ${quoted.at(-1)}` : quoted[0] ?? '';
-  // Pages and settings only an admin opens: a word that finds one of them says so.
-  const adminOnly = [
-    ...SETTINGS_GROUPS.filter(([id]) => !groups.some(([g]) => g === id)).map(([id, , title, sub]) => `${title} ${sub} ${SETTING_WORDS[id]}`),
-    ...VIEWS.filter(([id, , need]) => need && !canSee(need)).map(([id, label]) => `${label} ${MANAGE_SUB[id] ?? ''} ${PAGE_WORDS[id] ?? ''}`),
-    // What a manager's Kitchen printer and Orders tiles leave out.
-    ...(!isAdmin() ? ['kitchen printer printers receipt tickets copies font size large bold language routes bar test page raster',
-      'order types takeaway delivery collection discount discounts limit fix sent'] : []),
-  ].map((x) => x.toLowerCase());
-  const noneText = h('p');
-  const none = h('div', { class: 'empty small', hidden: true }, icon('search', 36), noneText);
-  const phone = matchMedia('(max-width: 600px)').matches;
-  const find = h('input', { type: 'search', 'aria-label': 'Find a page or setting',
-    placeholder: phone ? `Search${examples[0] ? `, e.g. ${examples[0]}` : ''}` : `What are you looking for?${examples.length ? ` e.g. ${examples.slice(0, 4).join(', ')}` : ''}` });
-  const filter = () => {
-    const typed = find.value.trim();
-    const ws = typed.toLowerCase().split(/\s+/).filter(Boolean);
-    for (const t of tiles) t.hidden = !hits(t.dataset.find, ws);
-    dailyHead.hidden = [...daily.children].every((t) => t.hidden);
-    if (setTiles) setHead.hidden = [...setTiles.children].every((t) => t.hidden);
-    none.hidden = tiles.some((t) => !t.hidden);
-    if (none.hidden) return;
-    const locked = adminOnly.some((x) => hits(x, ws));
-    noneText.textContent = locked ? `${typed.charAt(0).toUpperCase()}${typed.slice(1)} is changed by an admin. Ask an admin to log in on this till.`
-      : `Nothing matches. ${tryWords ? `Try another word, like ${tryWords}.` : 'Try another word.'}`;
-  };
-  find.addEventListener('input', filter);
-  // Enter with a single match opens it.
-  find.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const shown = tiles.filter((t) => !t.hidden); if (shown.length === 1) shown[0].click(); } });
-  // Staff have two tiles: nothing to search.
-  screen(h('div', { class: 'page settings-home' },
-    isManager() && h('div', { class: 'searchbox manage-find' }, icon('search', 22), find),
-    dailyHead, daily, setHead, setTiles, none));
-  return Promise.resolve();
+  renderShell();
 }
-/// Extra words each Manage tile is found by (what people call things).
-const PAGE_WORDS = {
-  history: 'paid orders reprint receipt void refund past old bills delete',
-  customers: 'customer phone address postcode delivery saved',
-  reports: 'sales money totals end of day close day summary takings',
-  shift: 'shift float cash count drawer money in out till',
-  kitchen: 'kitchen screen tablet kds cook chef done display',
-  menuAdmin: 'menu items dishes food drinks categories prices sets options sizes extras sold out thai names paste',
-  plan: 'floor plan tables layout rooms terrace seats',
-  users: 'staff users people pin password roles manager admin waiter',
-};
-const SETTING_WORDS = {
-  shop: 'restaurant name service charge tax vat rate prices included',
-  bills: 'receipt printer bill cash drawer footer header address tips payments split card cash names currency symbol money pound baht euro dollar language thai english slow send speed cheap image graphics picture raster mode test page',
-  kitchen: 'kitchen printer tickets copies font size large bold thai english language kitchen screen starters mains slow send speed cheap image graphics picture raster mode test page routes bar',
-  tickets: 'drinks desserts bar tickets own printer',
-  orders: 'order types takeaway delivery collection discounts cancel cancelling quick notes courses starter',
-  teams: 'kitchen teams station curry rice grill',
-  login: 'login pin auto logout lock start screen staff timeout',
-  delivery: 'uber eats just eat deliveroo platform delivery apps',
-  screen: 'button size big full screen display phones tablets wifi local server network theme dark light mode',
-  data: 'backup restore reset delete data menu copy export move new pc',
-  about: 'version update updates credits licence',
-};
+const tapBack = () => { if (!leaveOk()) return; if (backStack.at(-1) === 'detail') history.back(); else manageBack(); };
 
-/// Settings card: more kitchen printers (bar, desserts...) and what each prints.
-function routesCard(systemPrinters) {
-  const card = h('div', { class: 'card stack' });
-  Promise.all([call('get_kitchen_routes'), call('list_teams').catch(() => [])]).then(([routes, teams]) => {
-    let rows = routes.map((r) => ({ ...r }));
-    const list = h('div', { class: 'stack' });
-    const forms = [];
-    const draw = () => {
-      forms.length = 0;
-      setKids(list, rows.map((r, i) => {
-        const label = h('input', { value: r.label ?? '', placeholder: 'Name, e.g. Bar', style: 'width:160px' });
-        const pf = printerForm({ ...r, kind: r.kind ?? 'network' }, systemPrinters, 'Choose…', [['both', 'English with Thai under it']], false, true);
-        const drinks = h('input', { type: 'checkbox', checked: !!r.drinks });
-        const desserts = h('input', { type: 'checkbox', checked: !!r.desserts });
-        const teamBoxes = teams.map((t) => ({ t, box: h('input', { type: 'checkbox', checked: (r.team_ids ?? []).includes(t.id) }) }));
-        const value = () => {
-          const c = pf.config();
-          return { label: label.value.trim(), kind: c.kind, host: c.host, port: c.port, name: c.name, path: c.path, width: c.width, copies: c.copies, image_mode: c.image_mode, slow_send: c.slow_send,
-            drinks: drinks.checked, desserts: desserts.checked, team_ids: teamBoxes.filter((x) => x.box.checked).map((x) => x.t.id) };
-        };
-        forms.push(value);
-        return h('div', { class: 'card stack route-card' },
-          h('div', { class: 'row' }, label, h('span', { style: 'flex:1' }),
-            h('button', { onclick: act(async () => printResult(await call('test_route_printer', { route: value() }), 'Test ticket sent')) }, 'Print test'),
-            thaiTestButton(pf),
-            h('button', { class: 'danger', onclick: () => { rows = forms.map((f) => f()); rows.splice(i, 1); draw(); } }, 'Remove')),
-          pf.el,
-          h('div', { class: 'row' }, h('strong', {}, 'Prints:'),
-            h('label', { class: 'check' }, drinks, ' Drinks'), h('label', { class: 'check' }, desserts, ' Desserts'),
-            teamBoxes.map((x) => h('label', { class: 'check' }, x.box, ` ${x.t.name}`))));
-      }), !rows.length && h('div', { class: 'muted' }, 'No other printers: every kitchen ticket prints on the kitchen printer above.'));
+/// Open a page ("p:history") or a settings group ("g:printers"), optionally
+/// showing one of its rows (a search result).
+function openManage(item, row = null) {
+  if (!leaveOk()) return;
+  const fromList = !wideQ.matches && !manageItem();
+  const id = item.slice(2);
+  if (item.startsWith('p:')) { state.view = id; state.settingsTab = null; } else { state.view = 'settings'; state.settingsTab = id; }
+  state.findRow = row;
+  if (fromList) pushBack('detail');
+  // A page folds the list to the rail (below 1366 px): its search results have no room.
+  if (mshell && (mshell.el.classList.contains('peek') || item.startsWith('p:')) && mshell.find.value) {
+    mshell.find.value = '';
+    mshell.find.dispatchEvent(new Event('input'));
+  }
+  mshell?.el.classList.remove('peek');
+  renderShell();
+}
+
+let mshell = null;
+/// Nothing of Manage outlives a login: unsaved list changes (the save bar's
+/// state.dirty), the open group, a search result to show, the side list, the
+/// phone's back steps. Called on every logout and login.
+function resetManage() {
+  Object.assign(state, { dirty: false, settingsTab: null, findRow: null, sheetBack: null, groupGen: (state.groupGen ?? 0) + 1 });
+  mshell = null;
+  if (backStack.length) clearBack();
+}
+/// The shell is built once per login: the side list keeps its scroll and search text.
+function manageScreen(kids) {
+  if (!mshell || mshell.user !== state.session.user_id || mshell.role !== state.session.role) mshell = buildShell();
+  if (mshell.el.parentNode !== app || app.childElementCount !== 1) setKids(app, mshell.el);
+  const item = manageItem();
+  if (item) rememberManage(item);
+  if (item?.startsWith('g:')) setPref('pos.manage.lastGroup', item);
+  for (const el of mshell.el.querySelectorAll('[data-item]')) {
+    const on = el.dataset.item === item || (el.dataset.item === 'rail-settings' && item?.startsWith('g:'));
+    el.classList.toggle('on', on);
+    if (on && el.dataset.item !== 'rail-settings') el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+  }
+  mshell.el.classList.toggle('rail', state.view !== 'settings');
+  mshell.el.classList.toggle('at-list', !item);
+  mshell.el.classList.toggle('at-detail', !!item);
+  if (mshell.item !== item) { mshell.detail.scrollTop = 0; if (!wideQ.matches) app.scrollTop = 0; mshell.item = item; }
+  setKids(mshell.detail, kids);
+  // The selected item in the middle of the side list when it is near an edge (a short
+  // till shows a few rows either side of it). Only the list scrolls, never the page.
+  const sel = item && wideQ.matches && mshell.el.querySelector(`.mnav-wide [data-item="${item}"]`);
+  const side = mshell.el.querySelector('.mside');
+  if (sel && sel.offsetParent) {
+    const top = sel.getBoundingClientRect().top - side.getBoundingClientRect().top;
+    const head = side.querySelector('.mside-search')?.offsetHeight ?? 0;
+    if (top < head + 88 || top + sel.offsetHeight > side.clientHeight - 88) side.scrollTop += top - (side.clientHeight + head - sel.offsetHeight) / 2;
+  }
+}
+
+/// Detail header: [‹ Manage on phones] [icon] Title … [action].
+function dhead(ic, title, action = null) {
+  return h('div', { class: 'dhead' },
+    h('button', { class: 'ghost back', onclick: tapBack, 'aria-label': 'Back to Manage' }, icon('back', 22), h('span', {}, 'Manage')),
+    ic && h('span', { class: 'dicon' }, icon(ic, 20)), h('h2', {}, title), action);
+}
+
+function buildShell() {
+  const el = h('div', { class: 'manage' });
+  const detail = h('div', { class: 'mdetail' });
+  const find = h('input', { type: 'search', placeholder: 'e.g. printer, tax, PIN', 'aria-label': 'Search Manage', enterkeyhint: 'search' });
+  const hits = h('div', { class: 'mnav-hits', hidden: true, role: 'list' });
+  const pages = visiblePages();
+  const groups = visibleGroups();
+  const name = (id) => VIEWS.find(([v]) => v === id)?.[1];
+  const item = (data, ic, label, cls = '') => h('button', { class: `mnav-item ${cls}`, 'data-item': data, onclick: () => openManage(data), title: label }, icon(ic, 20), h('span', {}, label));
+  let folded = pref('pos.manage.fold') === '1';
+  const dailyItems = h('div', { class: 'mnav-daily', hidden: folded }, pages.map((id) => item(`p:${id}`, id, name(id))));
+  const foldBtn = h('button', { class: 'mnav-title fold', 'aria-expanded': String(!folded), onclick: () => {
+    folded = !folded;
+    dailyItems.hidden = folded;
+    foldBtn.setAttribute('aria-expanded', String(!folded));
+    setPref('pos.manage.fold', folded ? '1' : '0');
+  } }, h('span', {}, 'Daily work'), h('span', { class: 'chev' }, icon('chev', 16)));
+  // The rail (a page open below 1366 px): search, the page icons and one Settings icon.
+  const railSettings = h('button', { class: 'mnav-item rail-only', 'data-item': 'rail-settings', title: 'Settings', 'aria-label': 'Settings', onclick: () => {
+    const last = pref('pos.manage.lastGroup');
+    const g = groups.find((x) => `g:${x.id}` === last) ?? groups[0];
+    openManage(`g:${g.id}`);
+  } }, icon('settings', 20));
+  const railFind = h('button', { class: 'mnav-item rail-only', title: 'Search', 'aria-label': 'Search', onclick: () => { el.classList.add('peek'); tapFocus(find); } }, icon('search', 20));
+  const wide = h('nav', { class: 'mnav-wide', 'aria-label': 'Manage' },
+    railFind,
+    pages.length > 0 && [foldBtn, dailyItems],
+    h('div', { class: 'mnav-title' }, 'Settings'),
+    groups.map((g) => item(`g:${g.id}`, g.icon, g.title, 'grp')),
+    h('hr', { class: 'rail-only' }), railSettings);
+  // Phones: the pages as tiles, the settings groups as a list.
+  const phone = h('div', { class: 'mnav-phone' },
+    pages.length > 0 && [h('div', { class: 'mnav-title' }, 'Daily work'),
+      h('div', { class: 'dgrid' }, pages.map((id) => h('button', { class: 'dtile', 'data-item': `p:${id}`, onclick: () => openManage(`p:${id}`) }, icon(id, 20), h('span', {}, name(id)))))],
+    h('div', { class: 'mnav-title' }, 'Settings'),
+    h('div', { class: 'sgroup' }, groups.map((g) => {
+      const r = h('div', { class: 'srow nav grp-row', role: 'button', tabindex: 0, 'data-item': `g:${g.id}`, onclick: () => openManage(`g:${g.id}`),
+        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openManage(`g:${g.id}`); } } },
+      h('span', { class: 'srow-text' }, h('span', { class: 'srow-label' }, h('span', { class: 'grp-ic' }, icon(g.icon, 20)), g.title)),
+      h('span', { class: 'sstate' }), h('span', { class: 'srow-ctl' }, h('span', { class: 'chev' }, icon('chev', 20))));
+      return r;
+    })));
+  const lists = h('div', { class: 'mnav-lists' }, wide, phone);
+  const search = () => {
+    const typed = find.value.trim();
+    lists.hidden = !!typed;
+    hits.hidden = !typed;
+    if (!typed) return;
+    const { shown, locked } = searchManage(typed);
+    setKids(hits, shown.length ? shown.map((e) => h('button', { class: 'mnav-item mnav-hit', role: 'listitem', onclick: () => openManage(e.item, e.row) },
+      icon(e.icon, 20), h('span', {}, e.label, h('small', {}, e.where))))
+      : h('div', { class: 'sempty' }, h('span', { class: 'eic' }, icon(locked ? 'lock' : 'search', 26)),
+        h('strong', {}, locked ? 'Admin only' : 'Nothing found'),
+        h('p', {}, locked ? `${typed.charAt(0).toUpperCase()}${typed.slice(1)} is changed by an admin. Ask an admin to log in on this till.` : 'Try printer, tax or PIN.')));
+  };
+  find.addEventListener('input', search);
+  find.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { const one = hits.querySelectorAll('.mnav-hit'); if (one.length === 1) one[0].click(); }
+    if (e.key === 'Escape' && find.value) { e.stopPropagation(); find.value = ''; search(); }
+  });
+  const side = h('aside', { class: 'mside' }, h('div', { class: 'mside-search' }, h('label', { class: 'searchbox' }, icon('search', 20), find)), lists, hits);
+  const scrim = h('div', { class: 'mscrim', onclick: () => el.classList.remove('peek') });
+  setKids(el, side, scrim, detail);
+  setKids(app, el);
+  return { el, detail, find, user: state.session.user_id, role: state.session.role, item: undefined };
+}
+// Across 1000 px (a tablet turned): the list on its own needs a page next to it.
+wideQ.addEventListener?.('change', () => {
+  if (wideQ.matches && state.session && !state.orderId && state.view === 'settings' && !state.settingsTab && useShell() && !document.body.classList.contains('locked')) renderShell();
+});
+
+/// The Manage tab: the last group or page this device opened (wide screens), the list (phones).
+async function renderSettings() {
+  if (!useShell()) return renderStaffManage();
+  if (!state.settingsTab) {
+    if (!wideQ.matches) { drawTitle('Manage'); return manageScreen([]); }
+    const last = lastManage();
+    const page = last?.startsWith('p:') && visiblePages().includes(last.slice(2)) && last.slice(2);
+    if (page) { state.view = page; return renderShell(); }
+    const groups = visibleGroups();
+    state.settingsTab = (groups.find((g) => `g:${g.id}` === last) ?? groups[0]).id;
+  }
+  const g = visibleGroups().find((x) => x.id === state.settingsTab);
+  if (!g) { state.settingsTab = null; return renderSettings(); }
+  drawTitle('Manage');
+  const gen = (state.groupGen = (state.groupGen ?? 0) + 1);
+  const body = h('div', { class: 'sbody', 'data-group': g.id });
+  manageScreen([h('div', { class: 'sbody-wrap' }, dhead(g.icon, g.title), body)]);
+  const kids = await g.build(g);
+  if (gen !== state.groupGen) return;
+  setKids(body, kids);
+  const row = state.findRow;
+  state.findRow = null;
+  if (row) showRow(body, row);
+}
+/// Draw the open settings group again (after a sheet saved), keeping the scroll.
+async function redrawGroup(savedRow = null) {
+  const body = document.querySelector('.mdetail .sbody');
+  const g = MANAGE_GROUPS.find((x) => x.id === body?.dataset.group);
+  if (!g) return;
+  const kids = await g.build(g);
+  setKids(body, kids);
+  if (savedRow) rowState(body.querySelector(`[data-row="${savedRow}"]`), 'saved');
+}
+/// A search result: open Advanced if the row is in it, bring it into view and flash it.
+function showRow(body, id) {
+  const row = body.querySelector(`[data-row="${id}"]`);
+  if (!row) return;
+  const adv = row.closest('.adv-body');
+  if (adv?.hidden) adv.previousElementSibling?.click();
+  row.scrollIntoView({ block: 'center' });
+  row.classList.remove('found');
+  void row.offsetWidth;
+  row.classList.add('found');
+  setTimeout(() => row.classList.remove('found'), 2100);
+}
+
+/// Staff: Kitchen screen and About as two cards.
+function renderStaffManage() {
+  if (state.settingsTab === 'about') {
+    drawTitle('About', 'Manage');
+    const back = () => { state.settingsTab = null; renderShell(); };
+    return setKids(app, h('div', { class: 'staff-manage' },
+      h('div', { class: 'dhead' }, h('button', { class: 'ghost back show', onclick: back }, icon('back', 22), h('span', {}, 'Manage')), h('h2', {}, 'About')),
+      legacy(creditsCard())));
+  }
+  drawTitle('Manage');
+  setKids(app, h('div', { class: 'staff-manage' },
+    h('button', { class: 'dtile dtile-big', onclick: () => go('kitchen') }, icon('kitchen', 26), h('span', {}, 'Kitchen screen')),
+    h('button', { class: 'dtile dtile-big', onclick: () => { state.settingsTab = 'about'; renderShell(); } }, icon('info', 26), h('span', {}, 'About'))));
+}
+
+// ---------- Manage search ----------
+
+/// Every page, group and setting row, with the words people use for them.
+/// `need` as for the groups ('manager' for pages managers open); `local`:
+/// not on a browser terminal; `row`: the row to show in its group.
+const MANAGE_INDEX = [
+  ['p:history', 'History', 'paid orders reprint receipt void refund past old bills delete', 'manager'],
+  ['p:reports', 'Reports', 'sales money totals end of day close day summary takings', 'manager'],
+  ['p:shift', 'Shift & cash', 'shift float cash count drawer money in out till', 'manager'],
+  ['p:menuAdmin', 'Menu', 'menu items dishes food drinks categories prices sets options sizes extras sold out thai names paste starter dessert', 'manager'],
+  ['p:customers', 'Customers', 'customer phone address postcode delivery saved', 'manager'],
+  ['p:kitchen', 'Kitchen screen', 'kitchen screen tablet kds cook chef done display', false],
+  ['p:plan', 'Floor plan', 'floor plan tables layout rooms terrace seats', 'manager'],
+  ['p:users', 'Staff', 'staff users people pin password roles manager admin waiter', 'admin'],
+  ['g:printers', 'Printers', 'printer printers receipt kitchen bar ticket copies paper thai image test cash drawer windows usb network', 'admin'],
+  ['g:printers#receipt', 'Receipt printer', 'receipt bill printer copies paper 58 80 mm item names thai english bold image mode raster slow send test', 'admin'],
+  ['g:printers#kitchen', 'Kitchen printer', 'kitchen printer tickets copies starters mains prepare added later additional large text font call mains table image mode raster slow send test', 'admin'],
+  ['g:printers#addroute', 'Add kitchen printer', 'bar dessert drinks extra other second printer route team', 'admin'],
+  ['g:printers#drawer', 'Cash drawer', 'cash drawer open test', 'admin'],
+  ['g:payments', 'Payments & receipts', 'pay payment payments cash card tips split exact receipt bill service charge', 'admin'],
+  ['g:payments#pay_default_method', 'Opens on', 'finish pay default payment method cash card', 'admin'],
+  ['g:payments#exact_cash_pays', '“Exact” pays at once', 'exact cash amount', 'admin'],
+  ['g:payments#split_max', 'Split evenly up to', 'split evenly people bill', 'admin'],
+  ['g:payments#cash_quick', 'Cash buttons', 'cash quick amounts notes money', 'admin'],
+  ['g:payments#tips_on', 'Ask for tips', 'tip tips gratuity', 'admin'],
+  ['g:payments#tip_presets', 'Tip buttons', 'tip tips percent', 'admin'],
+  ['g:payments#pay_name_cash', 'Cash is called', 'payment names rename cash thai', 'admin'],
+  ['g:payments#pay_name_card', 'Card is called', 'payment names rename card qr', 'admin'],
+  ['g:payments#auto_print', 'Print after payment', 'receipt automatic print', 'admin'],
+  ['g:payments#drawer_on_cash', 'Open drawer for cash', 'cash drawer open', 'admin'],
+  ['g:payments#staff_copy', 'Staff copy after payment', 'staff copy tax class receipt', 'admin'],
+  ['g:payments#tax_breakdown', 'VAT breakdown on bills', 'vat tax breakdown receipt bill', 'admin'],
+  ['g:payments#show_staff', 'Show “Served by”', 'served by staff name receipt bill', 'admin'],
+  ['g:payments#footer', 'Bottom message', 'footer thank you message receipt bill', 'admin'],
+  ['g:payments#service', 'Service charge', 'service charge percent rate', 'admin'],
+  ['g:orders', 'Orders', 'order types discounts starter main course quick notes cancel cancelled fix sent', 'kitchen'],
+  ['g:orders#show_takeaway', 'Takeaway', 'order types takeaway button', 'admin'],
+  ['g:orders#show_collection', 'Collection', 'order types collection button', 'admin'],
+  ['g:orders#show_delivery', 'Delivery', 'order types delivery own drivers button', 'admin'],
+  ['g:orders#labels', 'Names on tickets', 'words labels dine-in takeaway collection delivery table call mains tickets bills', 'admin'],
+  ['g:orders#discount_presets', 'Discount buttons', 'discount discounts percent', 'admin'],
+  ['g:orders#discount_staff_max_pct', 'Staff limit', 'discount limit manager pin', 'admin'],
+  ['g:orders#starter_choice', 'Ask “Starter or main?”', 'starter main course courses', 'kitchen'],
+  ['g:orders#quick_notes', 'Quick notes', 'quick notes no onions extra spicy', 'kitchen'],
+  ['g:orders#print_cancelled_order', 'Print CANCELLED ticket', 'cancel cancelled cancelling kitchen ticket', 'kitchen'],
+  ['g:orders#staff_cancel_sent', 'Staff can fix sent dishes', 'fix sent remove reduce dish', 'admin'],
+  ['g:kitchen', 'Kitchen', 'kitchen screen kds teams team drinks desserts tickets orange red refresh beep sound curry rice station sample', 'kitchen'],
+  ['g:kitchen#kds', 'Kitchen screen colours', 'kitchen screen kds orange red late slow refresh paid beep sound', 'kitchen'],
+  ['g:kitchen#split', 'Drinks & desserts tickets', 'drinks desserts own ticket bar', 'kitchen'],
+  ['g:kitchen#teams', 'Kitchen teams', 'teams team station curry rice grill sample tickets', 'kitchen'],
+  ['g:kitchen#team_choice', 'Which team?', 'which team choose', 'kitchen'],
+  ['g:login', 'Login & staff', 'login log in logout auto lock pin start screen staff timeout', 'admin'],
+  ['g:login#start_screen', 'Start screen', 'after login start screen tables orders takeaway', 'admin'],
+  ['g:login#auto_logout_minutes', 'Log out after', 'auto logout idle timeout lock', 'admin'],
+  ['g:login#auto_logout_warn_secs', 'Warn before', 'warning logout seconds', 'admin'],
+  ['g:login#pin_auto_login', 'Log in without OK', 'pin auto login ok', 'admin'],
+  ['g:login#staff', 'Staff & PINs', 'staff users people roles pin', 'admin'],
+  ['g:restaurant', 'Restaurant', 'restaurant name address phone vat tax rate prices included currency', 'admin'],
+  ['g:restaurant#store_name', 'Restaurant name', 'restaurant shop name', 'admin'],
+  ['g:restaurant#shop_name', 'Name on bills', 'shop name bill receipt top', 'admin'],
+  ['g:restaurant#header', 'Address & phone', 'address phone vat number header bill receipt', 'admin'],
+  ['g:restaurant#currency', 'Currency symbol', 'currency pound baht euro dollar money symbol', 'admin'],
+  ['g:restaurant#tax', 'Tax', 'tax vat rate prices include included default', 'admin'],
+  ['g:delivery', 'Delivery apps', 'delivery apps uber eats just eat deliveroo grab platform', 'admin'],
+  ['g:devices', 'Devices & display', 'theme dark light button size large full screen display local server network tablet phone wifi', 'admin'],
+  ['g:devices#theme', 'Light or dark', 'theme dark light mode night', 'admin'],
+  ['g:devices#buttons', 'Menu button size', 'button size large big tiles', 'admin'],
+  ['g:devices#fullscreen', 'Full screen', 'full screen display window f11', 'admin', true],
+  ['g:devices#server', 'Local server', 'local server network tablet phone browser wifi port', 'admin', true],
+  ['g:data', 'Backup & data', 'backup restore reset delete data menu copy export import move new pc usb', 'admin'],
+  ['g:data#backup', 'Back up now', 'backup restore copy usb new pc folder', 'admin'],
+  ['g:data#menu', 'Menu backup', 'menu backup copy load file', 'admin'],
+  ['g:data#reset', 'Reset data', 'reset delete clear data', 'admin'],
+  ['g:about', 'About', 'about version credits', 'all'],
+  ['g:about#updates', 'Updates', 'update updates install version', 'admin', true],
+].map(([id, label, words, need, local]) => {
+  const [item, row] = id.split('#');
+  return { item, row: row ?? null, label, words: `${label} ${words}`.toLowerCase(), need, local: !!local };
+});
+function searchManage(typed) {
+  const ws = typed.toLowerCase().split(/\s+/).filter(Boolean);
+  const found = MANAGE_INDEX.filter((e) => ws.every((w) => e.words.includes(w)));
+  const groups = visibleGroups().map((g) => g.id), pages = visiblePages();
+  const can = (e) => needOk(e.need) && !(e.local && state.remote)
+    && (e.item.startsWith('p:') ? pages.includes(e.item.slice(2)) : groups.includes(e.item.slice(2)));
+  const shown = found.filter(can).map((e) => {
+    const g = MANAGE_GROUPS.find((x) => `g:${x.id}` === e.item);
+    return { ...e, icon: g ? g.icon : e.item.slice(2), where: e.row ? g.title : g ? 'Settings' : 'Daily work' };
+  });
+  // Names that start with what was typed first, then the groups and pages themselves.
+  const rank = (e) => (e.label.toLowerCase().startsWith(ws[0]) ? 0 : 2) + (e.row ? 1 : 0);
+  shown.sort((a, b) => rank(a) - rank(b));
+  return { shown: shown.slice(0, 30), locked: !shown.length && found.some((e) => !can(e)) };
+}
+
+// ---------- Manage building blocks ----------
+
+/// Focus a field the user's tap has just made (a chip turned into a box, + Add, a
+/// stepper's number) and open the on-screen keyboard for it, which on its own opens
+/// only for a tap on a field.
+function tapFocus(el) {
+  if (!el) return;
+  el.focus();
+  window.OSK?.open?.(el);
+}
+/// Shake a control that was put back (a save that did not go through).
+function nudge(el) {
+  if (!el) return;
+  el.classList.remove('nudge');
+  void el.offsetWidth;
+  el.classList.add('nudge');
+  el.addEventListener('animationend', () => el.classList.remove('nudge'), { once: true });
+}
+/// A setting row: label, one-line hint (longer text behind (i)), save state, control.
+function srow({ id, label, hint = '', tip, ctl, cls = '', tag = 'div', stacked = false } = {}) {
+  const row = h(tag, { class: `srow ${cls}${stacked ? ' stacked' : ''}`, 'data-row': id },
+    h('span', { class: 'srow-text' }, h('span', { class: 'srow-label' }, h('span', {}, label), tip && infoTip(tip, label)),
+      h('span', { class: 'srow-hint', hidden: !hint }, hint)),
+    h('span', { class: 'sstate', role: 'status' }),
+    h('span', { class: 'srow-ctl' }, ctl));
+  row.hintText = hint;
+  return row;
+}
+function setHint(row, text) {
+  row.hintText = text;
+  if (row.classList.contains('err')) return;
+  const el = row.querySelector('.srow-hint');
+  el.textContent = text;
+  el.hidden = !text;
+}
+/// The 20 px cell between a row's text and its control: saving (after 150 ms), ✓, or "!".
+/// `plain`: show `msg` as it is (not "Not saved: …"), e.g. for an action's result.
+function rowState(row, st, msg = '', plain = false) {
+  if (!row) return;
+  const cell = row.querySelector('.sstate');
+  if (!cell) return;
+  clearTimeout(row.stateTimer);
+  cell.removeAttribute('aria-label');
+  if (st === 'saving') { row.stateTimer = setTimeout(() => { cell.className = 'sstate saving'; }, 150); return; }
+  const hint = row.querySelector('.srow-hint');
+  row.classList.remove('err');
+  if (hint) { hint.textContent = row.hintText ?? ''; hint.hidden = !row.hintText; }
+  if (st === 'error') {
+    cell.className = 'sstate error';
+    cell.setAttribute('aria-label', 'Not saved');
+    row.classList.add('err');
+    if (hint) { hint.hidden = false; hint.textContent = plain ? msg : `Not saved: ${msg}`; }
+    nudge(row.querySelector('.srow-ctl'));
+  } else if (st === 'saved') {
+    cell.className = 'sstate';
+    void cell.offsetWidth;
+    cell.className = 'sstate saved';
+    cell.setAttribute('aria-label', 'Saved');
+    row.stateTimer = setTimeout(() => { cell.className = 'sstate'; }, 1700);
+  } else cell.className = 'sstate';
+}
+/// Run a save for a row: the row shows saving / ✓ / the reason it was not saved
+/// (no toast). `revert` puts the control back. True when it was saved.
+async function saveWith(row, fn, revert = null) {
+  rowState(row, 'saving');
+  try {
+    await fn();
+    rowState(row, 'saved');
+    return true;
+  } catch (e) {
+    revert?.();
+    rowState(row, 'error', String(e?.message ?? e));
+    return false;
+  }
+}
+const saveKey = (key, value) => call('set_setting', { key, value: String(value) }, { quiet: true });
+/// Receipt fields (and the receipt printer) live in one object: read it, change
+/// only these fields, write it back. One at a time, so two quick taps both count.
+let receiptQueue = Promise.resolve();
+function saveReceipt(patch) {
+  const run = receiptQueue.then(async () => {
+    const now = await call('get_receipt_settings', {}, { quiet: true });
+    await call('set_receipt_settings', { settings: { ...now, ...patch } }, { quiet: true });
+  });
+  receiptQueue = run.catch(() => {});
+  return run;
+}
+
+/// (i): a short explanation in a pop-over, instead of a paragraph on the page.
+let openPop = null;
+function infoTip(text, label) {
+  const b = h('button', { type: 'button', class: 'itip', 'aria-label': `About ${label}`, 'aria-expanded': 'false' });
+  b.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const mine = openPop?.btn === b;
+    closeInfoPop();
+    if (mine) return;
+    const pop = h('div', { class: 'pop', role: 'dialog', 'aria-label': label }, text);
+    document.body.append(pop);
+    const place = () => {
+      const r = b.getBoundingClientRect();
+      const left = Math.max(16, Math.min(r.left - 12, innerWidth - pop.offsetWidth - 16));
+      let top = r.bottom + 2;
+      if (top + pop.offsetHeight > innerHeight - 12) top = r.top - pop.offsetHeight - 2;
+      pop.style.left = `${left}px`;
+      pop.style.top = `${Math.max(8, top)}px`;
     };
+    place();
+    b.setAttribute('aria-expanded', 'true');
+    openPop = { btn: b, pop, place, at: Date.now() };
+  });
+  return b;
+}
+function closeInfoPop() {
+  if (!openPop) return;
+  openPop.pop.remove();
+  openPop.btn.setAttribute('aria-expanded', 'false');
+  openPop = null;
+}
+document.addEventListener('pointerdown', (e) => { if (openPop && !openPop.pop.contains(e.target) && !openPop.btn.contains(e.target)) closeInfoPop(); }, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openPop) { e.stopImmediatePropagation(); closeInfoPop(); } }, true);
+// Scrolling closes it; the last scroll events of the swipe before the tap (or the
+// page bringing the row into view) only move it with its button.
+document.addEventListener('scroll', () => { if (openPop && Date.now() - openPop.at < 400) openPop.place(); else closeInfoPop(); }, true);
+
+/// On/off switch row: the whole row toggles. `save(v)` saves (row state), or
+/// `onChange(v)` just reports (in a sheet). `hint` may depend on the value.
+let switchSeq = 0;
+function switchRow({ id, label, hint = '', tip, value, save, onChange, after }) {
+  const hintFor = (v) => (typeof hint === 'function' ? hint(v) : hint);
+  // `for`: an (i) button inside the label would otherwise be the control the label works.
+  const uid = `sw${++switchSeq}`;
+  const input = h('input', { type: 'checkbox', role: 'switch', checked: !!value, id: uid });
+  const row = srow({ id, label, hint: hintFor(!!value), tip, tag: 'label', ctl: h('span', { class: 'sw' }, input, h('span', {})) });
+  row.htmlFor = uid;
+  input.addEventListener('change', async () => {
+    const v = input.checked;
+    setHint(row, hintFor(v));
+    if (!save) return onChange?.(v);
+    if (await saveWith(row, () => save(v), () => { input.checked = !v; row.hintText = hintFor(!v); })) after?.(v);
+  });
+  row.input = input;
+  return row;
+}
+/// A "1" / "0" setting as a switch (not set = `def`).
+const keySwitch = (raw, key, label, { def = true, ...o } = {}) =>
+  switchRow({ id: key, label, value: raw[key] == null ? def : raw[key] !== '0', save: (v) => saveKey(key, v ? '1' : '0'), ...o });
+
+/// − value + : tap the value to type it; hold a button to repeat.
+/// `allowEmpty`: below `min` shows `emptyLabel` and gives null.
+function stepper({ value, min, max, step = 1, unit = '', allowEmpty = false, emptyLabel = 'Same', label = '', onChange }) {
+  let v = value;
+  const minus = h('button', { type: 'button', 'aria-label': `Less ${label}`.trim() }, '−');
+  const plus = h('button', { type: 'button', 'aria-label': `More ${label}`.trim() }, '+');
+  const val = h('span', { class: 'val', role: 'spinbutton', tabindex: 0, 'aria-label': label, 'aria-valuemin': min, 'aria-valuemax': max });
+  const el = h('span', { class: 'sstep' }, minus, val, plus);
+  const round = (n) => Math.round(n * 100) / 100;
+  const draw = () => {
+    if (v == null) { val.className = 'val is-empty'; setKids(val, emptyLabel); val.removeAttribute('aria-valuenow'); val.setAttribute('aria-valuetext', emptyLabel); }
+    else { val.className = 'val'; setKids(val, String(v), unit && h('small', {}, unit)); val.setAttribute('aria-valuenow', v); val.removeAttribute('aria-valuetext'); }
+    minus.disabled = v == null || (!allowEmpty && v <= min);
+    plus.disabled = v != null && v >= max;
+  };
+  const set = (n) => {
+    if (n != null && n < min) n = allowEmpty ? null : min;
+    if (n != null) n = Math.min(max, round(n));
+    if (n === v) return;
+    v = n;
     draw();
-    setKids(card, h('h3', {}, 'Other kitchen printers'),
-      h('div', { class: 'muted' }, 'For example a printer at the bar for drinks, or one at the dessert station. Tick what each one prints; everything else prints on the kitchen printer above. ' +
-        'Names, font and large text follow the kitchen printer.'),
-      list,
-      h('div', { class: 'row' },
-        h('button', { onclick: () => { rows = forms.map((f) => f()); rows.push({ label: '', kind: 'network', port: 9100, width: 42, copies: 1, team_ids: [] }); draw(); } }, '+ Printer'),
-        h('button', { class: 'primary', onclick: act(async () => {
-          const routes = forms.map((f) => f());
-          await call('set_kitchen_routes', { routes });
-          rows = routes;
-          toast(routes.length ? `${routes.length} other kitchen printer(s) saved` : 'All tickets print on the kitchen printer');
-        }) }, 'Save printers')));
-  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
-  return card;
+    onChange?.(v);
+  };
+  const bump = (dir) => set(v == null ? (dir > 0 ? min : null) : round(v + dir * step));
+  // Hold to repeat: once at once, then every 120 ms after 400 ms.
+  for (const [b, dir] of [[minus, -1], [plus, 1]]) {
+    let t1, t2;
+    const stop = () => { clearTimeout(t1); clearInterval(t2); };
+    b.addEventListener('pointerdown', (e) => {
+      if (b.disabled || e.button > 0) return;
+      e.preventDefault();
+      bump(dir);
+      t1 = setTimeout(() => { t2 = setInterval(() => { if (b.disabled) stop(); else bump(dir); }, 120); }, 400);
+    });
+    for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, stop);
+    b.addEventListener('click', (e) => { if (e.detail === 0) bump(dir); }); // keyboard
+  }
+  val.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowRight') { e.preventDefault(); bump(1); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') { e.preventDefault(); bump(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); val.click(); }
+  });
+  // Tap the number to type it.
+  val.addEventListener('click', () => {
+    const input = h('input', { class: 'val', inputmode: step % 1 ? 'decimal' : 'numeric', value: v ?? '', 'aria-label': label });
+    val.replaceWith(input);
+    tapFocus(input);
+    input.select();
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      input.replaceWith(val);
+      if (!keep) return;
+      const raw = input.value.trim().replace(',', '.');
+      const n = raw === '' ? (allowEmpty ? null : NaN) : Number(raw);
+      if (n === null) set(null);
+      else if (Number.isFinite(n)) set(n);
+    };
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); val.focus(); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); val.focus(); }
+    });
+  });
+  draw();
+  el.set = (n) => { v = n; draw(); };
+  el.value = () => v;
+  return el;
+}
+/// A stepper row: saves 600 ms after the last tap (one write).
+function stepperRow({ id, label, hint, tip, save, validate, ...o }) {
+  let saved = o.value, timer, row;
+  const st = stepper({ ...o, label, onChange: (v) => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const bad = validate?.(v);
+      if (bad) { st.set(saved); return rowState(row, 'error', bad); }
+      if (await saveWith(row, () => save(v), () => st.set(saved))) saved = v;
+    }, 600);
+  } });
+  row = srow({ id, label, hint, tip, ctl: st });
+  row.stepper = st;
+  return row;
+}
+
+/// Segmented control: up to 4 short choices. `onPick(v, previous)`.
+function sseg(items, current, onPick, label = '') {
+  let cur = current;
+  const el = h('span', { class: 'sseg', role: 'radiogroup', 'aria-label': label });
+  const draw = () => setKids(el, items.map(([v, l]) => h('button', { type: 'button', role: 'radio', 'aria-checked': String(v === cur), class: v === cur ? 'on' : '',
+    onclick: () => { if (v === cur) return; const prev = cur; cur = v; draw(); onPick(v, prev); } }, l)));
+  draw();
+  el.set = (v) => { cur = v; draw(); };
+  el.setItems = (list) => { items = list; draw(); };
+  el.value = () => cur;
+  return el;
+}
+function segRow({ id, label, hint, tip, items, value, save, after, stacked = items.length >= 3 }) {
+  let row;
+  const seg = sseg(items, value, async (v, prev) => {
+    if (await saveWith(row, () => save(v), () => seg.set(prev))) after?.(v);
+  }, label);
+  row = srow({ id, label, hint, tip, ctl: seg, stacked });
+  row.seg = seg;
+  return row;
+}
+/// Native select (long lists): saves at once.
+function selectRow({ id, label, hint, tip, options, value, save, after }) {
+  const sel = h('select', { 'aria-label': label }, options.map(([v, l]) => h('option', { value: v }, l)));
+  sel.value = String(value);
+  let prev = sel.value, row;
+  sel.addEventListener('change', async () => {
+    const v = sel.value;
+    if (await saveWith(row, () => save(v), () => { sel.value = prev; })) { prev = v; after?.(v); }
+  });
+  row = srow({ id, label, hint, tip, ctl: sel });
+  row.select = sel;
+  return row;
+}
+/// Text row: saves on blur or Enter; Esc puts the saved text back.
+function textRow({ id, label, hint, tip, value, placeholder, max, area = false, cls = '', save, validate, after, attrs = {} }) {
+  const input = area ? h('textarea', { rows: 3, placeholder, 'aria-label': label, ...attrs }) : h('input', { placeholder, maxlength: max, 'aria-label': label, ...attrs });
+  input.value = value ?? '';
+  let saved = input.value, row;
+  const commit = async () => {
+    const v = input.value.trim();
+    if (v === saved) { input.value = saved; if (row.classList.contains('err')) rowState(row, 'idle'); return; }
+    const bad = validate?.(v);
+    if (bad) return rowState(row, 'error', bad);
+    if (await saveWith(row, () => save(v), () => { input.value = saved; })) { saved = v; input.value = v; after?.(v); }
+  };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !area) { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); input.value = saved; input.blur(); }
+  });
+  row = srow({ id, label, hint, tip, ctl: input, cls: `${area ? '' : 'text-row'} ${cls}`, stacked: area });
+  row.input = input;
+  return row;
+}
+/// A row that opens a sheet or another page: label … value ›.
+function navRow({ id, label, hint, tip, value = null, onOpen, cls = '' }) {
+  const row = srow({ id, label, hint, tip, cls: `nav ${cls}`, ctl: [value != null && h('span', { class: 'srow-value' }, value), h('span', { class: 'chev' }, icon('chev', 20))] });
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
+  row.addEventListener('click', (e) => { if (!e.target.closest('.itip')) onOpen(row); });
+  row.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); onOpen(row); } });
+  return row;
+}
+/// Status row (printers, service charge): icon tile, title, one meta line, a pill, [button] ›.
+function statusRow({ id, icon: ic, title, meta, pill, action, onOpen }) {
+  const row = h('div', { class: `srow sstat${onOpen ? ' nav' : ''}`, 'data-row': id, role: onOpen && 'button', tabindex: onOpen && 0 },
+    h('span', { class: 'lead' }, icon(ic, 20)),
+    h('span', { class: 'srow-text' }, h('span', { class: 'srow-label' }, title), meta && h('span', { class: 'srow-hint' }, meta)),
+    h('span', { class: 'sstate', role: 'status' }),
+    pill ? h('span', { class: `pill ${pill.cls ?? ''}` }, pill.text) : h('span', {}),
+    h('span', { class: 'srow-ctl' }, action, onOpen && h('span', { class: 'chev' }, icon('chev', 20))));
+  row.hintText = meta;
+  if (onOpen) {
+    row.addEventListener('click', (e) => { if (!e.target.closest('button')) onOpen(row); });
+    row.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); onOpen(row); } });
+  }
+  return row;
+}
+/// A section: title, one card of rows, an optional one-line foot. Nothing if no row shows.
+function ssec(title, rows, foot = null) {
+  rows = rows.flat().filter(Boolean);
+  if (!rows.length) return null;
+  return h('section', { class: 'ssec' }, title && h('h3', { class: 'ssec-title' }, title), h('div', { class: 'sgroup' }, rows), foot && h('div', { class: 'ssec-foot' }, foot));
+}
+/// "Advanced": the last thing in a card; open or closed is kept on this device.
+function advanced(key, rows) {
+  rows = rows.filter(Boolean);
+  const k = `pos.adv.${key}`;
+  let open = pref(k) === '1';
+  const body = h('div', { class: 'adv-body', hidden: !open }, rows);
+  const btn = h('button', { type: 'button', class: 'adv', 'aria-expanded': String(open), onclick: () => {
+    open = !open;
+    body.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+    setPref(k, open ? '1' : '0');
+  } }, h('span', { class: 'chev' }, icon('chev', 18)), 'Advanced', h('span', { class: 'n' }, rows.length));
+  return [btn, body];
+}
+/// Chips for a short list of numbers (cash amounts, discount buttons): tap one to
+/// change it, × removes it, + Add. `fixed`: always these many (tips: three).
+/// `onChange(list)`: false or { bad: i } = refused, so the list goes back to the saved one.
+function chipList({ values, min = 0, max = 8, fixed = false, unit = '', label = '', onChange }) {
+  let list = [...values];
+  const el = h('span', { class: 'chiplist', role: 'group', 'aria-label': label });
+  const fmt = (n) => (Number.isFinite(n) ? `${n}${unit ? ` ${unit}` : ''}` : String(n));
+  const commit = async (next) => {
+    const prev = list;
+    list = fixed ? next : [...new Set(next)].sort((a, b) => a - b);
+    draw();
+    // Refused (a wrong value, or the server said no): back to the last saved list, so
+    // the next change saves; the row keeps saying why.
+    const r = await onChange(list);
+    if (r === false || r?.bad != null) { list = prev; draw(); }
+  };
+  const edit = (i, chip) => {
+    const input = h('input', { inputmode: 'decimal', value: i < list.length ? String(list[i]) : '', 'aria-label': label });
+    setKids(chip, input);
+    chip.classList.add('editing');
+    tapFocus(input);
+    input.select();
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const raw = input.value.trim().replace('%', '').replace(',', '.').trim();
+      if (!keep || (raw === '' && i >= list.length)) return draw();
+      const next = [...list];
+      if (raw === '') { if (fixed || list.length <= min) return draw(); next.splice(i, 1); }
+      else if (i >= list.length) next.push(Number(raw)); else next[i] = Number(raw);
+      if (next.some((n) => !Number.isFinite(n))) { draw(); return onChange(null); }
+      if (next.join() === list.join()) return draw();
+      commit(next);
+    };
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+    });
+  };
+  const draw = (bad = -1) => setKids(el, list.map((n, i) => {
+    const chip = h('span', { class: `chipx${fixed ? ' fixed' : ''}${i === bad ? ' bad' : ''}` });
+    const t = h('span', { class: 't', role: 'button', tabindex: 0, 'aria-label': `Change ${fmt(n)}`, onclick: () => edit(i, chip),
+      onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); edit(i, chip); } } }, fmt(n));
+    setKids(chip, t, !fixed && list.length > min && h('button', { type: 'button', class: 'x', 'aria-label': `Remove ${fmt(n)}`,
+      onclick: () => commit(list.filter((_, k) => k !== i)) }, '×'));
+    return chip;
+  }), !fixed && list.length < max && h('button', { type: 'button', class: 'chip-add', onclick: (e) => {
+    const chip = h('span', { class: 'chipx' });
+    e.currentTarget.replaceWith(chip);
+    edit(list.length, chip);
+  } }, '+ Add'));
+  draw();
+  return el;
+}
+function chipRow({ id, label, hint, tip, validate, save, ...o }) {
+  let row;
+  const chips = chipList({ ...o, label, onChange: async (list) => {
+    if (list == null) { rowState(row, 'error', 'Use numbers only'); return false; }
+    const bad = validate(list);
+    if (bad) { rowState(row, 'error', bad.msg); return { bad: bad.index ?? -1 }; }
+    return saveWith(row, () => save(list));
+  } });
+  row = srow({ id, label, hint, tip, ctl: chips, stacked: true });
+  return row;
+}
+/// Toggle chips (pick any): `onChange(list, previous)`.
+function toggleChips(items, selected, onChange, label = '') {
+  let sel = new Set(selected);
+  const el = h('span', { class: 'chiplist', role: 'group', 'aria-label': label });
+  const draw = () => setKids(el, items.map(([v, l]) => h('button', { type: 'button', class: `tchip${sel.has(v) ? ' on' : ''}`, 'aria-pressed': String(sel.has(v)),
+    onclick: () => { const prev = [...sel]; if (sel.has(v)) sel.delete(v); else sel.add(v); draw(); onChange([...sel], prev); } }, l)));
+  draw();
+  el.set = (list) => { sel = new Set(list); draw(); };
+  el.value = () => items.map(([v]) => v).filter((v) => sel.has(v));
+  return el;
+}
+const emptyState = ({ icon: ic, title, text, action = null }) =>
+  h('div', { class: 'sempty' }, h('span', { class: 'eic' }, icon(ic, 28)), h('strong', {}, title), text && h('p', {}, text), action);
+/// The cards of a group not yet in the new look (Phase 2), in the detail pane.
+const legacy = (...cards) => h('div', { class: 'legacy' }, cards);
+/// Lets search find a legacy card (`data-row`).
+const tagRow = (el, row) => { if (el) el.dataset.row = row; return el; };
+
+/// A sheet: a pop-up on wide screens, a bottom sheet on phones, for settings made of
+/// several fields. `onSave()` saves (throw or return a message to keep it open);
+/// `onTest()` returns { ok, text }. Closing with changes asks first, in the foot.
+function sheet({ title, body, onSave, onTest, saveLabel = 'Save', wide = false, left = null }) {
+  const m = document.getElementById('modal');
+  const msg = h('div', { class: 'sheet-msg', hidden: true, role: 'status' });
+  const show = (text, ok) => { msg.hidden = !text; msg.textContent = text ?? ''; msg.className = `sheet-msg ${ok ? 'ok' : 'bad'}`; };
+  let dirty = false;
+  const bodyEl = h('div', { class: 'sheet-body' }, body);
+  bodyEl.addEventListener('input', () => { dirty = true; });
+  bodyEl.addEventListener('change', () => { dirty = true; });
+  bodyEl.addEventListener('click', (e) => { if (e.target.closest('.sseg button, .sstep button, .chiplist button, .lrow .del, .ladd')) dirty = true; });
+  const foot = h('div', { class: 'sheet-foot' });
+  const save = onSave && h('button', { class: 'primary', onclick: async () => {
+    save.disabled = true;
+    setKids(save, h('span', { class: 'spin' }), 'Saving…');
+    show(null);
+    try {
+      const r = await onSave();
+      if (typeof r === 'string') throw r;
+      close();
+    } catch (e) {
+      show(String(e?.message ?? e), false);
+      save.disabled = false;
+      setKids(save, saveLabel);
+    }
+  } }, saveLabel);
+  const test = onTest && h('button', { onclick: async () => {
+    test.disabled = true;
+    show(null);
+    try { const r = await onTest(); show(r.text, r.ok); } catch (e) { show(String(e?.message ?? e), false); } finally { test.disabled = false; }
+  } }, 'Test');
+  const normal = () => setKids(foot, left, test, h('span', { class: 'grow' }), h('button', { class: 'ghost', onclick: () => tryClose() }, onSave ? 'Cancel' : 'Close'), save);
+  const ask = () => setKids(foot, h('strong', { class: 'grow' }, 'Discard changes?'), h('button', { onclick: normal }, 'Keep editing'),
+    h('button', { class: 'danger solid', onclick: close }, 'Discard'));
+  const tryClose = () => { if (dirty && onSave) ask(); else close(); };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    state.sheetBack = null;
+    if (document.getElementById('modal').contains(el)) closeModal();
+    popBack('sheet');
+  };
+  const el = h('div', { class: `sheet${wide ? ' wide' : ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+    h('div', { class: 'grab' }),
+    h('div', { class: 'sheet-head' }, h('h3', {}, title), h('button', { class: 'ghost icon-btn', 'aria-label': 'Close', onclick: () => tryClose() }, icon('x'))),
+    bodyEl, msg, foot);
+  normal();
+  closeModal();
+  m.className = 'sheet-host';
+  setKids(m, el);
+  m.hidden = false;
+  m.onclick = (e) => { if (e.target === m) tryClose(); };
+  state.modalKeys = (e) => { if (e.key === 'Escape') tryClose(); };
+  document.addEventListener('keydown', state.modalKeys);
+  // The phone's back button closes the sheet (or asks first).
+  pushBack('sheet');
+  state.sheetBack = () => { if (dirty && onSave) { ask(); pushBack('sheet'); } else { closed = true; state.sheetBack = null; closeModal(); } };
+  return { el, show, close, foot, normal, test };
+}
+
+/// The bar under a list with changes: "N changes · Discard · Save".
+function saveBar({ onSave, onDiscard }) {
+  const text = h('strong', {});
+  const save = h('button', { class: 'primary' }, 'Save');
+  const el = h('div', { class: 'savebar', hidden: true, role: 'region', 'aria-label': 'Unsaved changes' },
+    text, h('button', { class: 'ghost', onclick: () => { onDiscard(); el.update(0); } }, 'Discard'), save);
+  save.onclick = async () => {
+    save.disabled = true;
+    setKids(save, h('span', { class: 'spin' }), 'Saving…');
+    try { await onSave(); el.update(0); } catch (e) { text.textContent = `Not saved: ${String(e?.message ?? e)}`; text.classList.add('bad'); } finally { save.disabled = false; setKids(save, 'Save'); }
+  };
+  el.update = (n) => {
+    el.hidden = !n;
+    state.dirty = n > 0;
+    text.classList.remove('bad');
+    text.textContent = `${n} change${n === 1 ? '' : 's'}`;
+  };
+  return el;
+}
+/// A list to edit and put in order: drag the grip (or ↑ ↓ on it), × removes, + Add.
+/// `render(row)` gives the cells between the grip and ×; `onChange()` after each change.
+function listEditor({ rows, render, make, addLabel, empty, max = 99, cls = '', onChange, name = (r) => r.name }) {
+  let seq = 0;
+  const key = new WeakMap();
+  const k = (r) => { if (!key.has(r)) key.set(r, ++seq); return key.get(r); };
+  const list = h('div', { class: 'llist' });
+  const emptyEl = empty ? h('div', { class: 'lempty' }, empty) : null;
+  const addBtn = h('button', { type: 'button', class: 'ladd', onclick: () => {
+    rows.push(make());
+    draw();
+    onChange();
+    tapFocus(list.lastElementChild?.querySelector('input:not([type=color])'));
+  } }, icon('plus', 18), addLabel);
+  const move = (i, j) => { const [r] = rows.splice(i, 1); rows.splice(j, 0, r); draw(); onChange(); list.children[j]?.querySelector('.lgrip')?.focus(); };
+  const draw = () => {
+    setKids(list, rows.map((r, i) => h('div', { class: `lrow ${cls}`, 'data-id': k(r) },
+      h('span', { class: 'lgrip', role: 'button', tabindex: 0, 'aria-label': `Drag ${name(r) || 'row'}`, title: 'Drag to change the order',
+        onkeydown: (e) => {
+          if (e.key === 'ArrowUp' && i > 0) { e.preventDefault(); move(i, i - 1); }
+          else if (e.key === 'ArrowDown' && i < rows.length - 1) { e.preventDefault(); move(i, i + 1); }
+        } }, icon('grip', 20)),
+      render(r),
+      h('button', { type: 'button', class: 'del', 'aria-label': `Remove ${name(r) || 'row'}`, onclick: () => { rows.splice(i, 1); draw(); onChange(); } }, '×'))));
+    if (emptyEl) emptyEl.hidden = rows.length > 0;
+    addBtn.hidden = rows.length >= max;
+  };
+  sortable(list, { item: '.lrow', handle: '.lgrip', onDrop: (ids) => {
+    const byKey = new Map(rows.map((r) => [k(r), r]));
+    rows.splice(0, rows.length, ...ids.map((id) => byKey.get(id)));
+    draw();
+    onChange();
+  } });
+  draw();
+  const el = h('div', { class: 'leditor' }, emptyEl, list, addBtn);
+  el.redraw = draw;
+  return el;
+}
+
+// ---------- Settings: Printers ----------
+
+const PAPER = [[42, '80 mm'], [32, '58 mm'], [48, '80 mm small']];
+const PRINTER_KINDS = [['network', 'Network'], ['windows', 'Windows'], ['file', 'Port'], ['none', 'None']];
+const paperText = (w) => (PAPER.find(([v]) => v === Number(w ?? 42)) ?? PAPER[0])[1];
+const connText = (c) => ({ network: `Network · ${c.host || '?'}`, windows: `Windows · ${c.name || '?'}`, file: `Port · ${c.path || '?'}` })[c.kind] ?? 'Not set up';
+const PRINTER_TIP = 'Windows: a printer installed in Windows (USB). Port: a COM port or a shared printer path.';
+const IMAGE_TIP = 'If Thai text prints badly, tap Test Thai and pick the number that prints clearly.';
+/// Last test result per printer this session (there is no live printer status).
+state.printerStatus = {};
+const hhmm = (d = new Date()) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }).replace(/\s*[ap]\.?\s?m\.?$/i, '');
+/// What a test print said, as the printer's status: { ok, at, error }.
+const testResult = (r) => (r?.error ? { ok: false, error: r.error } : { ok: true, at: hhmm() });
+
+async function printersGroup() {
+  const [rc, kc, routes, teams] = await Promise.all([call('get_receipt_settings'), call('get_kitchen_printer'), call('get_kitchen_routes'), call('list_teams').catch(() => [])]);
+  const teamName = (id) => teams.find((t) => t.id === id)?.name;
+  const prints = (r) => [r.drinks && 'Drinks', r.desserts && 'Desserts', ...(r.team_ids ?? []).map(teamName)].filter(Boolean);
+  const printerRow = (key, ic, title, cfg, meta, open, test) => {
+    let row;
+    const make = () => {
+      const st = state.printerStatus[key];
+      const on = cfg.kind && cfg.kind !== 'none';
+      const pill = st?.busy ? { text: 'Printing…', cls: 'busy' } : st?.ok ? { text: `OK · ${st.at}`, cls: 'ok' } : st ? { text: 'Didn’t print', cls: 'bad' }
+        : on ? { text: 'Set up', cls: 'plain' } : { text: 'Not set up' };
+      return statusRow({ id: key, icon: ic, title, meta: st && !st.ok && !st.busy ? st.error : meta, pill, onOpen: open,
+        action: on && h('button', { class: 'test', onclick: async () => {
+          state.printerStatus[key] = { busy: true };
+          redraw();
+          try { state.printerStatus[key] = testResult(await test()); } catch (e) { state.printerStatus[key] = { ok: false, error: String(e?.message ?? e) }; }
+          redraw();
+        } }, 'Test') });
+    };
+    const redraw = () => { const n = make(); row.replaceWith(n); row = n; };
+    row = make();
+    return row;
+  };
+  const ctx = { rc, kc, routes, teams };
+  return [
+    ssec('Printers', [
+      printerRow('receipt', 'receipt', 'Receipt printer', rc, `${connText(rc)} · ${paperText(rc.width)}`,
+        () => printerSheet('receipt', rc, ctx), () => call('test_receipt_printer', { settings: rc, drawerOnly: false }, { quiet: true })),
+      printerRow('kitchen', 'printer', 'Kitchen printer', kc, `${connText(kc)} · ${paperText(kc.width)}`,
+        () => printerSheet('kitchen', kc, ctx), () => call('test_kitchen_printer', { config: kc }, { quiet: true })),
+      routes.map((r, i) => printerRow(`route${i}`, 'cup', r.label || `Kitchen printer ${i + 2}`, r,
+        `${connText(r)} · ${prints(r).length ? `Prints ${prints(r).join(', ')}` : 'Prints nothing yet'}`,
+        () => printerSheet('route', r, { ...ctx, index: i }), () => call('test_route_printer', { route: r }, { quiet: true }))),
+      h('button', { class: 'ladd', 'data-row': 'addroute', onclick: () => printerSheet('route', { kind: 'network', port: 9100, width: 42, copies: 1, team_ids: [] }, { ...ctx, index: null }) },
+        icon('plus', 18), 'Add kitchen printer'),
+    ], 'Extra printers take drinks, desserts or a team. The rest prints in the kitchen.'),
+    ssec('Cash drawer', [statusRow({ id: 'drawer', icon: 'drawer', title: 'Cash drawer', meta: 'Plugged into the receipt printer',
+      onOpen: () => openManage('g:payments', 'drawer_on_cash'),
+      action: h('button', { class: 'test', onclick: async (e) => {
+        const row = e.currentTarget.closest('.srow');
+        if (!rc.kind || rc.kind === 'none') return rowState(row, 'error', 'Set up the receipt printer first', true);
+        rowState(row, 'saving');
+        try {
+          const r = await call('test_receipt_printer', { settings: rc, drawerOnly: true }, { quiet: true });
+          if (r.error) rowState(row, 'error', `Didn’t open: ${r.error}`, true); else rowState(row, 'saved');
+        } catch (err) { rowState(row, 'error', String(err?.message ?? err), true); }
+      } }, 'Open') })]),
+  ];
+}
+
+/// Receipt, kitchen or an extra kitchen printer ("route"): connection, paper,
+/// copies… in a sheet. Test prints with the form as it is (not saved yet).
+async function printerSheet(kind, cfg, { rc, routes, teams, index = null }) {
+  const sys = await call('list_system_printers').catch(() => []);
+  const route = kind === 'route', kitchen = kind === 'kitchen';
+  const NAMES = kitchen ? [['both', 'EN + TH'], ['english', 'English'], ['thai', 'Thai']] : [['english', 'English'], ['both', 'EN + TH']];
+  const f = {
+    kind: cfg.kind ?? 'none', host: cfg.host ?? '', port: String(cfg.port ?? 9100), name: cfg.name ?? '', path: cfg.path ?? '',
+    width: Number(cfg.width ?? 42), copies: cfg.copies ?? 1, copy_delay_secs: cfg.copy_delay_secs ?? 2,
+    names: NAMES.some(([v]) => v === cfg.names) ? cfg.names : NAMES[0][0], bold: cfg.bold ?? true, large_text: cfg.large_text ?? true,
+    app_font: cfg.app_font ?? true, call_table_only: cfg.call_table_only ?? true, slow_send: cfg.slow_send ?? true,
+    image_mode: IMAGE_MODES.some(([v]) => v === cfg.image_mode) ? cfg.image_mode : 'raster',
+    starter_copies: cfg.starter_copies ?? null, mains_copies: cfg.mains_copies ?? null, prep_copies: cfg.prep_copies ?? null, additional_copies: cfg.additional_copies ?? null,
+    label: cfg.label ?? '', drinks: !!cfg.drinks, desserts: !!cfg.desserts, team_ids: [...(cfg.team_ids ?? [])],
+  };
+  if (route && f.kind === 'none') f.kind = 'network';
+  const field = (key, attrs = {}) => { const el = h('input', { value: f[key], ...attrs }); el.addEventListener('input', () => { f[key] = el.value; }); return el; };
+  const host = srow({ label: 'IP address', cls: 'text-row', ctl: field('host', { placeholder: '192.168.1.50', inputmode: 'decimal', 'aria-label': 'IP address' }) });
+  const port = srow({ label: 'Port number', ctl: field('port', { inputmode: 'numeric', class: 'short-in', 'aria-label': 'Port number' }) });
+  let winCtl;
+  if (sys.length) {
+    winCtl = h('select', { 'aria-label': 'Printer' }, sys.map((n) => h('option', { value: n }, n)));
+    if (f.name && !sys.includes(f.name)) winCtl.append(h('option', { value: f.name }, f.name));
+    winCtl.value = f.name || sys[0];
+    f.name = winCtl.value;
+    winCtl.addEventListener('change', () => { f.name = winCtl.value; });
+  } else winCtl = field('name', { placeholder: 'Name in Windows', 'aria-label': 'Printer' });
+  const win = srow({ label: 'Printer', cls: 'text-row', ctl: winCtl });
+  const path = srow({ label: 'Port or path', cls: 'text-row', ctl: field('path', { placeholder: 'COM3 or \\\\PC\\Printer', 'aria-label': 'Port or path' }) });
+  const slow = switchRow({ id: 'slow', label: 'Send slowly', hint: 'For printers that skip lines', value: f.slow_send, onChange: (v) => { f.slow_send = v; } });
+  const showConn = () => {
+    host.hidden = port.hidden = f.kind !== 'network';
+    win.hidden = f.kind !== 'windows';
+    path.hidden = f.kind !== 'file';
+    slow.hidden = !['network', 'file'].includes(f.kind);
+  };
+  const type = srow({ label: 'Type', tip: PRINTER_TIP, stacked: true, ctl: sseg(route ? PRINTER_KINDS.slice(0, 3) : PRINTER_KINDS, f.kind, (v) => { f.kind = v; showConn(); noneHides(); }, 'Type') });
+  showConn();
+  const delay = !route && srow({ label: 'Wait between copies', ctl: stepper({ value: f.copy_delay_secs, min: 0, max: 30, unit: 's', label: 'Wait between copies', onChange: (v) => { f.copy_delay_secs = v; } }) });
+  if (delay) delay.hidden = f.copies < 2;
+  const copies = srow({ label: 'Copies', ctl: stepper({ value: f.copies, min: 1, max: 9, label: 'Copies', onChange: (v) => { f.copies = v; if (delay) delay.hidden = v < 2; } }) });
+  const paper = srow({ label: 'Paper', stacked: true, ctl: sseg(PAPER, f.width, (v) => { f.width = v; }, 'Paper') });
+  // The form as the server takes it.
+  const out = () => {
+    const c = { ...cfg };
+    for (const k of ['host', 'port', 'name', 'path']) delete c[k];
+    Object.assign(c, { kind: f.kind, width: f.width, copies: f.copies, image_mode: f.image_mode, slow_send: f.slow_send });
+    if (!route) Object.assign(c, { copy_delay_secs: f.copy_delay_secs, bold: f.bold });
+    // Not set = the printer's usual names: left unset unless changed.
+    if (!route && (cfg.names != null || f.names !== NAMES[0][0])) c.names = f.names;
+    if (kitchen) Object.assign(c, { large_text: f.large_text, app_font: f.app_font, call_table_only: f.call_table_only,
+      starter_copies: f.starter_copies, mains_copies: f.mains_copies, prep_copies: f.prep_copies, additional_copies: f.additional_copies });
+    if (route) Object.assign(c, { label: f.label.trim(), drinks: f.drinks, desserts: f.desserts, team_ids: f.team_ids });
+    if (f.kind === 'network') Object.assign(c, { host: f.host.trim(), port: Number(f.port) || 9100 });
+    if (f.kind === 'windows') c.name = f.name;
+    if (f.kind === 'file') c.path = f.path.trim();
+    return c;
+  };
+  const problem = () => (f.kind === 'network' && !f.host.trim() ? 'Type the IP address'
+    : f.kind === 'network' && !(Number(f.port) >= 1 && Number(f.port) <= 65535) ? 'Use a port from 1 to 65535'
+      : f.kind === 'windows' && !f.name ? 'Choose the printer' : f.kind === 'file' && !f.path.trim() ? 'Type the port or path' : null);
+  const thai = h('button', { type: 'button', onclick: async () => {
+    if (f.kind === 'none' || problem()) return s.show(problem() ?? 'Choose a printer type first', false);
+    try {
+      const r = await call('test_thai_printer', { config: out() }, { quiet: true });
+      s.show(r.error ? `Didn’t print: ${r.error}` : 'Thai test sent: pick the number that prints clearly', !r.error);
+    } catch (e) { s.show(String(e?.message ?? e), false); }
+  } }, 'Test Thai');
+  const imageMode = h('select', { 'aria-label': 'Image mode' }, IMAGE_MODES.map(([v, l]) => h('option', { value: v }, l)));
+  imageMode.value = f.image_mode;
+  imageMode.addEventListener('change', () => { f.image_mode = imageMode.value; });
+  const imageRow = srow({ id: 'image', label: 'Image mode', tip: IMAGE_TIP, cls: 'image-row', stacked: true, ctl: [imageMode, thai] });
+  const copySteps = (key, label) => srow({ label, tip: key === 'starter_copies' ? 'Dine-in. Starters: sent first. Mains: Call mains, or the first mains after starters. Same = Copies.' : null,
+    ctl: stepper({ value: f[key], min: 1, max: 9, allowEmpty: true, label, onChange: (v) => { f[key] = v; } }) });
+  const sw = (key, label, hint) => switchRow({ label, hint, value: f[key], onChange: (v) => { f[key] = v; } });
+  const nameRow = route && srow({ label: 'Name', cls: 'text-row', ctl: field('label', { placeholder: 'e.g. Bar', 'aria-label': 'Name' }) });
+  const printsRow = route && srow({ label: 'Prints', stacked: true, ctl: toggleChips([['drinks', 'Drinks'], ['desserts', 'Desserts'], ...teams.map((t) => [`t${t.id}`, t.name])],
+    [f.drinks && 'drinks', f.desserts && 'desserts', ...f.team_ids.map((id) => `t${id}`)].filter(Boolean), (list) => {
+      f.drinks = list.includes('drinks');
+      f.desserts = list.includes('desserts');
+      f.team_ids = teams.filter((t) => list.includes(`t${t.id}`)).map((t) => t.id);
+    }, 'Prints') });
+  let paperSec, ticketSec;
+  const body = [
+    route && ssec(null, [nameRow]),
+    ssec('Connection', [type, host, port, win, path]),
+    paperSec = ssec('Paper & copies', [paper, copies, delay]),
+    ticketSec = route ? h('section', { class: 'ssec' }, h('div', { class: 'sgroup' }, printsRow, advanced('route', [imageRow, slow])),
+      h('div', { class: 'ssec-foot' }, 'Names and font follow the kitchen printer.'))
+      : h('section', { class: 'ssec' }, h('h3', { class: 'ssec-title' }, 'Ticket'), h('div', { class: 'sgroup' },
+        srow({ label: 'Item names', ctl: sseg(NAMES, f.names, (v) => { f.names = v; }, 'Item names'), stacked: NAMES.length > 2 }),
+        sw('bold', 'Bold text'),
+        kitchen && sw('large_text', 'Large text', 'Fewer letters per line'),
+        advanced(kind, kitchen ? [copySteps('starter_copies', 'Starters copies'), copySteps('mains_copies', 'Mains copies'), copySteps('prep_copies', 'Prepare copies'),
+          srow({ label: 'Added-later copies', ctl: stepper({ value: f.additional_copies ?? 1, min: 1, max: 9, label: 'Added-later copies', onChange: (v) => { f.additional_copies = v === 1 ? null : v; } }) }),
+          sw('app_font', 'Print in the app’s font'), sw('call_table_only', '“Call mains again” shows table only'), imageRow, slow] : [imageRow, slow]))),
+  ];
+  const testIt = async () => {
+    if (f.kind === 'none') return { ok: false, text: 'Choose a printer type first' };
+    if (problem()) return { ok: false, text: problem() };
+    const r = kind === 'receipt' ? await call('test_receipt_printer', { settings: { ...rc, ...out() }, drawerOnly: false }, { quiet: true })
+      : kitchen ? await call('test_kitchen_printer', { config: out() }, { quiet: true }) : await call('test_route_printer', { route: out() }, { quiet: true });
+    return r.error ? { ok: false, text: `Didn’t print: ${r.error}` } : { ok: true, text: 'Test ticket printed.' };
+  };
+  const key = kind === 'route' ? (index == null ? null : `route${index}`) : kind;
+  const save = async () => {
+    if (f.kind !== 'none' && problem()) return problem();
+    if (kind === 'receipt') {
+      const now = await call('get_receipt_settings', {}, { quiet: true });
+      for (const k of ['host', 'port', 'name', 'path']) delete now[k];
+      const c = out();
+      const part = Object.fromEntries(['kind', 'host', 'port', 'name', 'path', 'width', 'copies', 'copy_delay_secs', 'names', 'bold', 'image_mode', 'slow_send'].filter((k) => k in c).map((k) => [k, c[k]]));
+      await call('set_receipt_settings', { settings: { ...now, ...part } }, { quiet: true });
+    } else if (kitchen) await call('set_kitchen_printer', { config: out() }, { quiet: true });
+    else {
+      const list = routes.map((r) => ({ ...r }));
+      if (index == null) list.push(out()); else list[index] = out();
+      await call('set_kitchen_routes', { routes: list }, { quiet: true });
+    }
+    if (key) delete state.printerStatus[key];
+    redrawGroup(key ?? `route${routes.length}`);
+  };
+  // Remove (extra printers): asks once, in the foot.
+  const remove = route && index != null && h('button', { class: 'ghost danger', onclick: () => setKids(s.foot,
+    h('strong', { class: 'grow' }, `Remove ${f.label.trim() || 'this printer'}?`), h('button', { onclick: s.normal }, 'Keep'),
+    h('button', { class: 'danger solid', onclick: async () => {
+      try {
+        await call('set_kitchen_routes', { routes: routes.filter((_, i) => i !== index) }, { quiet: true });
+        s.close();
+        state.printerStatus = {};
+        redrawGroup();
+      } catch (e) { s.show(String(e?.message ?? e), false); s.normal(); }
+    } }, 'Remove')) }, 'Remove');
+  const title = kind === 'receipt' ? 'Receipt printer' : kitchen ? 'Kitchen printer' : index == null ? 'New kitchen printer' : (cfg.label || 'Kitchen printer');
+  const s = sheet({ title, body, onSave: save, onTest: testIt, left: remove });
+  // No printer: nothing about paper, copies or tickets, and nothing to test.
+  function noneHides() {
+    const none = f.kind === 'none';
+    for (const el of [paperSec, ticketSec, s?.test]) if (el) el.hidden = none;
+  }
+  noneHides();
+}
+
+// ---------- Settings: Payments & receipts ----------
+
+async function paymentsGroup() {
+  const [raw, rc, svc] = await Promise.all([invoke('get_settings', { keys: PAY_KEYS }), call('get_receipt_settings'), call('get_service_settings')]);
+  const c = paySettings(raw);
+  const methods = () => [['cash', payName('cash')], ['card', payName('card')]];
+  const opensOn = segRow({ id: 'pay_default_method', label: 'Opens on', items: methods(), value: c.method, stacked: false, save: (v) => saveKey('pay_default_method', v) });
+  const tipChips = chipRow({ id: 'tip_presets', label: 'Tip buttons', values: c.tips, fixed: true, unit: '%',
+    validate: (l) => (goodTips(l) ? null : { msg: 'Use more than 0 and up to 100 %', index: l.findIndex((p) => !(p > 0 && p <= 100 && twoDecimals(p))) }),
+    save: (l) => saveKey('tip_presets', l.join(',')) });
+  tipChips.hidden = !c.tipsOn;
+  // Cash and Card must keep different names (empty = the standard name).
+  const other = { cash: raw.pay_name_card ?? '', card: raw.pay_name_cash ?? '' };
+  const nameRow = (m, label, tip) => textRow({ id: `pay_name_${m}`, label, tip, value: raw[`pay_name_${m}`] ?? '', placeholder: m === 'cash' ? 'Cash' : 'Card', max: PAY_NAME_MAX,
+    validate: (v) => ((v || (m === 'cash' ? 'Cash' : 'Card')).toLowerCase() === (other[m] || (m === 'cash' ? 'Card' : 'Cash')).toLowerCase() ? 'Cash and Card need different names' : null),
+    save: (v) => saveKey(`pay_name_${m}`, v),
+    after: async (v) => { other[m === 'cash' ? 'card' : 'cash'] = v; await loadUiSettings(); opensOn.seg.setItems(methods()); } });
+  const receipt = (key, label, value, o = {}) => switchRow({ id: key, label, value, save: (v) => saveReceipt({ [key]: v }), ...o });
+  const svcOn = svc.rate_bp > 0;
+  return [
+    ssec('Finish & Pay', [
+      opensOn,
+      keySwitch(raw, 'exact_cash_pays', '“Exact” pays at once', { def: false, hint: 'Off: Exact fills in the amount' }),
+      stepperRow({ id: 'split_max', label: 'Split evenly up to', value: c.splitMax, min: 2, max: 12, unit: 'people', save: (v) => saveKey('split_max', v) }),
+      chipRow({ id: 'cash_quick', label: 'Cash buttons', tip: 'The total rounded up is offered too. The 4 smallest amounts above the total show.', values: c.notes.map((x) => x / 100), min: 1, max: 8,
+        validate: (l) => (goodNotes(l) ? null : { msg: 'Use 1 to 8 amounts above 0', index: l.findIndex((x) => !(x > 0 && x <= 1e6 && twoDecimals(x))) }),
+        save: (l) => saveKey('cash_quick', l.join(',')) }),
+    ]),
+    ssec('Tips', [keySwitch(raw, 'tips_on', 'Ask for tips', { after: (v) => { tipChips.hidden = !v; } }), tipChips]),
+    ssec('Payment names', [nameRow('cash', 'Cash is called'), nameRow('card', 'Card is called', 'Used on buttons, receipts and reports, e.g. เงินสด or QR / Card.')]),
+    ssec('Receipts', [
+      receipt('auto_print', 'Print after payment', rc.auto_print !== false),
+      receipt('drawer_on_cash', 'Open drawer for cash', rc.drawer_on_cash !== false),
+      receipt('staff_copy', 'Staff copy after payment', rc.staff_copy !== false, { hint: 'With tax by class' }),
+      receipt('tax_breakdown', 'VAT breakdown on bills', rc.tax_breakdown === true),
+      receipt('show_staff', 'Show “Served by”', rc.show_staff !== false),
+      textRow({ id: 'footer', label: 'Bottom message', value: rc.footer ?? '', placeholder: 'e.g. Thank you!', save: (v) => saveReceipt({ footer: v || null }) }),
+    ]),
+    ssec('Service charge', [statusRow({ id: 'service', icon: 'tag', title: 'Service charge',
+      meta: svcOn ? `${pct(svc.rate_bp)} % · ${svc.order_types.map((t) => TYPE[t]).join(', ') || 'no orders'}` : 'Not added to bills',
+      pill: svcOn ? { text: 'On', cls: 'ok' } : { text: 'Off' }, onOpen: () => serviceSheet(svc) })]),
+  ];
+}
+function serviceSheet(svc) {
+  const f = { rate: svc.rate_bp / 100, label: svc.label ?? '', types: [...svc.order_types] };
+  const label = h('input', { value: f.label, placeholder: 'Service charge', 'aria-label': 'Name on bill' });
+  label.addEventListener('input', () => { f.label = label.value; });
+  sheet({ title: 'Service charge', body: [
+    ssec('Charge', [srow({ label: 'Rate', ctl: stepper({ value: f.rate, min: 0, max: 30, step: 0.5, unit: '%', label: 'Rate', onChange: (v) => { f.rate = v; } }) }),
+      srow({ label: 'Name on bill', cls: 'text-row', ctl: label })]),
+    ssec('Add it to new', [srow({ label: 'Order types', stacked: true, ctl: toggleChips(Object.entries(TYPE), f.types, (l) => { f.types = l; }, 'Order types') })],
+      '% of the food after discounts, no tax. Staff can remove it.'),
+  ], onSave: async () => {
+    if (!(f.rate >= 0 && f.rate <= 30) || !twoDecimals(f.rate)) return 'Use 0 to 30 %';
+    await call('set_service_settings', { settings: { rate_bp: Math.round(f.rate * 100), label: f.label.trim() || 'Service charge', order_types: f.types } }, { quiet: true });
+    state.menu = null;
+    redrawGroup('service');
+  } });
+}
+
+// ---------- Settings: Orders ----------
+
+const TICKET_LABELS = [['label_dine_in', 'Dine-in', 'DINE-IN', 'Before the table, e.g. DINE-IN T3. Empty: the table alone.'],
+  ['label_takeaway', 'Takeaway', 'TAKEAWAY'], ['label_collection', 'Collection', 'COLLECTION'], ['label_delivery', 'Delivery', 'DELIVERY'],
+  ['label_table', 'Call mains', 'TABLE', 'Before the number on Call mains again. Empty: the number alone.']];
+async function ordersGroup() {
+  const keys = ['show_takeaway', 'show_collection', 'show_delivery', 'discount_presets', 'discount_staff_max_pct', 'starter_choice', QUICK_NOTES_KEY,
+    'print_cancelled_order', 'staff_cancel_sent', ...TICKET_LABELS.map(([k]) => k)];
+  const raw = await invoke('get_settings', { keys });
+  const admin = isAdmin();
+  const ui = uiSettings(raw);
+  // Takeaway, collection and delivery print the standard word when blank; Dine-in and
+  // Call mains print nothing (pos-core printing.rs label()).
+  const labelsCustom = TICKET_LABELS.some(([k, , def]) => raw[k] != null && raw[k].trim() !== def && (BLANK_PRINTS_NOTHING.has(k) || raw[k].trim() !== ''));
+  const notes = quickNotes(raw[QUICK_NOTES_KEY]);
+  return [
+    admin && ssec('Order types', [
+      keySwitch(raw, 'show_takeaway', 'Takeaway'),
+      keySwitch(raw, 'show_collection', 'Collection'),
+      keySwitch(raw, 'show_delivery', 'Delivery', { hint: 'Your own drivers' }),
+      navRow({ id: 'labels', label: 'Names on tickets', value: labelsCustom ? 'Custom' : 'Standard', onOpen: () => labelsSheet(raw) }),
+    ], 'Dine-in always shows. Open orders keep working.'),
+    admin && ssec('Discounts', [
+      chipRow({ id: 'discount_presets', label: 'Discount buttons', values: ui.discountPresets, max: 8, unit: '%',
+        validate: (l) => { const i = l.findIndex((n) => !Number.isInteger(n) || n < 1 || n > 100); return i >= 0 ? { msg: 'Use whole numbers from 1 to 100 %', index: i } : null; },
+        save: (l) => saveKey('discount_presets', l.join(',')) }),
+      staffLimitRow(ui.discountLimit),
+    ]),
+    ssec('Taking orders', [
+      keySwitch(raw, 'starter_choice', 'Ask “Starter or main?”', { hint: 'Dine-in, when a starter is tapped',
+        tip: 'Main course: the dish waits for the mains. “Which team?” replaces this when it is set.' }),
+      navRow({ id: QUICK_NOTES_KEY, label: 'Quick notes', value: `${notes.length} note${notes.length === 1 ? '' : 's'}`, onOpen: () => quickNotesSheet(notes) }),
+    ]),
+    ssec('Cancel & fix', [
+      keySwitch(raw, 'print_cancelled_order', 'Print CANCELLED ticket', { hint: 'When a whole order is cancelled',
+        tip: 'Lists dishes still cooking. Off: nothing prints, so tell the kitchen. Removing one dish always prints.' }),
+      admin && keySwitch(raw, 'staff_cancel_sent', 'Staff can fix sent dishes', { hint: 'Off: admins only' }),
+    ]),
+  ];
+}
+/// Staff limit on discounts: No limit, or Up to N % (more needs a manager's PIN).
+function staffLimitRow(limit) {
+  let saved = limit, timer, row;
+  const step = stepper({ value: limit ?? 20, min: 0, max: 100, step: 5, unit: '%', label: 'Staff limit', onChange: (v) => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => { if (await saveWith(row, () => saveKey('discount_staff_max_pct', v), () => step.set(saved ?? 20))) saved = v; }, 600);
+  } });
+  step.hidden = limit == null;
+  const seg = sseg([['none', 'No limit'], ['upto', 'Up to']], limit == null ? 'none' : 'upto', async (v, prev) => {
+    step.hidden = v === 'none';
+    const value = v === 'none' ? '' : step.value();
+    if (await saveWith(row, () => saveKey('discount_staff_max_pct', value), () => { seg.set(prev); step.hidden = prev === 'none'; })) saved = v === 'none' ? null : step.value();
+  }, 'Staff limit');
+  row = srow({ id: 'discount_staff_max_pct', label: 'Staff limit', hint: 'More needs a manager PIN', stacked: true, cls: 'limit-row', ctl: [seg, step] });
+  return row;
+}
+const BLANK_PRINTS_NOTHING = new Set(['label_dine_in', 'label_table']);
+function labelsSheet(raw) {
+  // Dine-in and Call mains: a saved blank prints nothing ("None"); emptied now, the same.
+  const blankPh = (key, def, cleared) => (BLANK_PRINTS_NOTHING.has(key) && (cleared || raw[key] != null) ? 'None' : def);
+  const touched = new Set();
+  const inputs = TICKET_LABELS.map(([key, , def]) => {
+    const el = h('input', { value: raw[key] ?? '', placeholder: blankPh(key, def, false), 'aria-label': key });
+    el.addEventListener('input', () => { touched.add(key); el.placeholder = blankPh(key, def, true); });
+    return el;
+  });
+  sheet({ title: 'Names on tickets', body: [
+    ssec(null, TICKET_LABELS.map(([, label, , tip], i) => srow({ label, tip, cls: 'text-row', ctl: inputs[i] })),
+      'Empty: the standard word. Dine-in and Call mains: nothing.'),
+  ], onSave: async () => {
+    // Only boxes that were changed are written: an untouched empty box stays "not set".
+    for (const [i, [key]] of TICKET_LABELS.entries()) {
+      const v = inputs[i].value.trim();
+      if (v !== (raw[key] ?? '').trim() || (touched.has(key) && raw[key] == null && BLANK_PRINTS_NOTHING.has(key))) await call('set_setting', { key, value: v }, { quiet: true });
+    }
+    redrawGroup('labels');
+  } });
+}
+function quickNotesSheet(notes) {
+  const rows = notes.map((text) => ({ text }));
+  const editor = listEditor({ rows, cls: 'notes', max: 30, addLabel: 'Add note', name: (r) => r.text, make: () => ({ text: '' }), onChange: () => {},
+    empty: emptyState({ icon: 'orders', title: 'No quick notes', text: 'Add the requests staff type most.' }),
+    render: (r) => h('input', { value: r.text, maxlength: 40, placeholder: 'e.g. No onions', 'aria-label': 'Quick note', oninput: (e) => { r.text = e.target.value; } }) });
+  sheet({ title: 'Quick notes', body: [h('div', { class: 'sgroup' }, editor)], onSave: async () => {
+    const list = rows.map((r) => r.text.trim()).filter(Boolean);
+    if (list.some((n) => n.length > 40)) return 'Keep each note to 40 characters';
+    await call('set_setting', { key: QUICK_NOTES_KEY, value: list.join('\n') }, { quiet: true });
+    state.menu = null;
+    redrawGroup(QUICK_NOTES_KEY);
+  } });
+}
+
+// ---------- Settings: Kitchen (cards not yet in the new look) ----------
+
+async function kitchenGroup() {
+  let n = null;
+  if (isAdmin()) {
+    const [rc, kc, routes] = await Promise.all([call('get_receipt_settings'), call('get_kitchen_printer'), call('get_kitchen_routes')]).catch(() => [null, null, []]);
+    n = [rc, kc, ...routes].filter((p) => p?.kind && p.kind !== 'none').length;
+  }
+  return [
+    isAdmin() && ssec(null, [navRow({ id: 'printers', label: 'Printers', value: n == null ? null : `${n} printer${n === 1 ? '' : 's'}`, onOpen: () => openManage('g:printers') })]),
+    legacy(tagRow(kdsCard(), 'kds'), tagRow(splitCard(), 'split'), tagRow(teamsCard(), 'teams'), tagRow(teamChoiceCard(), 'team_choice')),
+  ];
+}
+
+// ---------- Settings: Login & staff ----------
+
+async function loginGroup() {
+  const raw = await invoke('get_settings', { keys: ['start_screen', 'auto_logout_minutes', 'auto_logout_warn_secs', 'pin_auto_login'] });
+  const ui = uiSettings(raw);
+  const people = await call('list_users').then((u) => u.length).catch(() => null);
+  const mins = [[0, 'Never'], [1, '1 minute'], [2, '2 minutes'], [5, '5 minutes'], [10, '10 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']];
+  if (!mins.some(([v]) => v === ui.autoLogout)) mins.push([ui.autoLogout, `${ui.autoLogout} minutes`]);
+  const secs = [[0, 'No warning'], [10, '10 seconds'], [20, '20 seconds'], [30, '30 seconds'], [60, '1 minute']];
+  if (!secs.some(([v]) => v === ui.warnSecs)) secs.push([ui.warnSecs, `${ui.warnSecs} seconds`]);
+  const warn = selectRow({ id: 'auto_logout_warn_secs', label: 'Warn before', options: secs, value: ui.warnSecs, save: (v) => saveKey('auto_logout_warn_secs', v) });
+  warn.hidden = !ui.autoLogout;
+  return [
+    ssec('After login', [segRow({ id: 'start_screen', label: 'Start screen', items: START_SCREENS, value: ui.startScreen,
+      tip: 'New takeaway opens an order at once. An empty one is dropped.', save: (v) => saveKey('start_screen', v) })]),
+    ssec('Auto logout', [
+      selectRow({ id: 'auto_logout_minutes', label: 'Log out after', hint: 'No touch for this long', options: mins, value: ui.autoLogout,
+        save: (v) => saveKey(AUTO_LOGOUT_KEY, v), after: (v) => { state.autoLogout = Number(v); warn.hidden = !Number(v); } }),
+      warn,
+    ], 'Open orders are kept. Applies to every device.'),
+    ssec('PIN', [keySwitch(raw, 'pin_auto_login', 'Log in without OK', { hint: 'As soon as the PIN is complete',
+      tip: 'Works after each person logs in once. Shorter PINs still press OK.' })]),
+    ssec('Staff', [navRow({ id: 'staff', label: 'Staff & PINs', value: people == null ? null : `${people} ${people === 1 ? 'person' : 'people'}`, onOpen: () => openManage('p:users') })]),
+  ];
+}
+
+// ---------- Settings: Restaurant ----------
+
+async function restaurantGroup() {
+  const rc = await call('get_receipt_settings');
+  return [
+    ssec('Name & address', [
+      textRow({ id: 'store_name', label: 'Restaurant name', value: state.storeName ?? '', placeholder: 'Restaurant name', save: (v) => saveKey('store_name', v),
+        after: (v) => {
+          state.storeName = v;
+          document.title = v || 'POS';
+          document.getElementById('brand').title = v || 'POS';
+          const bills = document.querySelector('[data-row="shop_name"] input');
+          if (bills) bills.placeholder = v || 'Restaurant name';
+        } }),
+      textRow({ id: 'shop_name', label: 'Name on bills', hint: 'Empty: the restaurant name', value: rc.shop_name ?? '', placeholder: state.storeName || 'Restaurant name',
+        save: (v) => saveReceipt({ shop_name: v || null }) }),
+      textRow({ id: 'header', label: 'Address & phone', hint: 'One per line, e.g. VAT number', area: true, value: rc.header ?? '', placeholder: '12 High Street\n020 7946 0000',
+        save: (v) => saveReceipt({ header: v || null }) }),
+      textRow({ id: 'currency', label: 'Currency symbol', value: rc.currency ?? '£', max: 4, cls: 'short', attrs: { class: 'short-in' }, save: (v) => saveReceipt({ currency: v }) }),
+    ]),
+    h('div', { class: 'legacy', 'data-row': 'tax' }, menuDefaultsCard()),
+  ];
+}
+
+// ---------- Settings: Delivery apps ----------
+
+async function deliveryGroup() {
+  const load = async () => (await call('list_channels')).map((c) => ({ id: c.id, name: c.name, color: c.color || '#374151' }));
+  let saved = await load();
+  const rows = saved.map((r) => ({ ...r }));
+  const changes = () => {
+    const ids = new Set(rows.map((r) => r.id));
+    return rows.filter((r, i) => { const s = saved[i]; return !s || s.id !== r.id || s.name !== r.name || s.color !== r.color; }).length
+      + saved.filter((s) => !ids.has(s.id)).length;
+  };
+  const bar = saveBar({
+    onSave: async () => {
+      await call('save_channels', { channels: rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name.trim(), color: r.color })) }, { quiet: true });
+      saved = await load();
+      rows.splice(0, rows.length, ...saved.map((r) => ({ ...r })));
+      editor.redraw();
+    },
+    onDiscard: () => { rows.splice(0, rows.length, ...saved.map((r) => ({ ...r }))); editor.redraw(); },
+  });
+  const editor = listEditor({ rows, cls: 'apps', addLabel: 'Add app', make: () => ({ id: null, name: '', color: '#374151' }), onChange: () => bar.update(changes()),
+    empty: emptyState({ icon: 'bike', title: 'No delivery apps', text: 'Add Uber Eats, Just Eat or others.' }),
+    render: (r) => [h('input', { type: 'color', class: 'swatch', value: r.color, 'aria-label': `Colour of ${r.name || 'the app'}`, oninput: (e) => { r.color = e.target.value; bar.update(changes()); } }),
+      h('input', { value: r.name, placeholder: 'App name', 'aria-label': 'App name', oninput: (e) => { r.name = e.target.value; bar.update(changes()); } })] });
+  state.dirty = false;
+  return [h('p', { class: 'snote' }, 'Each app gets an Orders button, a ticket heading and a report line.'), h('div', { class: 'sgroup' }, editor), bar];
+}
+
+// ---------- cards not yet in the new look (Phase 2) ----------
+
+/// Product name, version and credits: shown at the top of About.
+const creditsCard = () => h('div', { class: 'card about-credits' },
+  h('div', { class: 'about-head' },
+    h('h3', { class: 'about-name' }, 'Limehouse POS'),
+    state.version && h('span', { class: 'chip info' }, `Version ${state.version}`)),
+  h('div', { class: 'about-by' }, 'Developed by ', h('strong', {}, 'Pheeraphat Bunliang')),
+  h('div', { class: 'muted small' }, 'Designed and developed with AI-assisted programming.'),
+  h('div', { class: 'about-copy muted small' }, '© 2026 Pheeraphat Bunliang. All rights reserved.'));
+const aboutCard = () => h('div', { class: 'card stack', 'data-row': 'updates' },
+  h('h3', {}, 'Updates'),
+  state.remote
+    ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
+    : [h('div', { class: 'muted' }, 'The app checks for updates every few hours while an admin is logged in on this till. Installing one takes about a minute: ' +
+      'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
+    h('div', { class: 'row' }, h('button', { onclick: act(async () => {
+      const info = await checkForUpdate(false);
+      if (info && !info.available) toast(`You have the latest version (${info.current})`);
+    }) }, 'Check for updates'))]);
+function backupCard() {
+  const list = h('div', { class: 'backup-list' });
+  const admin = isAdmin();
+  let files = [];
+  const load = async () => {
+    files = await call('list_full_backups').catch(() => []);
+    setKids(list, files.length ? files.map((f) => h('div', { class: 'backup-row' },
+      h('div', { class: 'grow' }, h('div', {}, fmtTime(f.modified)),
+        h('div', { class: 'muted small' }, `${backupKind(f.name)} · ${f.name} · ${fileSize(f.size)}`)),
+      admin && h('div', { class: 'row backup-acts' },
+        h('button', { onclick: act(async () => restoreDialog(f, await call('inspect_backup', { name: f.name }))) }, 'Restore'),
+        state.remote && h('button', { onclick: act(() => downloadBackup(f.name)) }, 'Download'),
+        confirmBtn('Delete', 'Tap again to delete', async () => {
+          await call('delete_backups', { names: [f.name] }); toast('Backup deleted'); await load();
+        }, 'danger-outline'))))
+      : h('div', { class: 'muted' }, 'No backups yet.'));
+  };
+  load();
+  // How many full backups to keep (setting backups_kept; not set = 14).
+  const [KEEP_MIN, KEEP_MAX, KEEP_DEF] = [3, 90, 14];
+  const keep = numBox('', { inputmode: 'numeric', placeholder: String(KEEP_DEF), 'aria-label': 'Backups kept' });
+  const keepText = h('span', {}, `the last ${KEEP_DEF} are kept`);
+  invoke('get_setting', { key: 'backups_kept' }).then((v) => {
+    const n = Number(v);
+    if (v != null && Number.isInteger(n) && n >= KEEP_MIN && n <= KEEP_MAX) { keep.value = String(n); keepText.textContent = `the last ${n} are kept`; }
+  }).catch(() => {});
+  // Where the files are, to copy one to a USB stick (moving to a new PC).
+  const folder = h('div', { class: 'muted small backup-folder' });
+  if (admin) invoke('backup_folder').then((dir) => setKids(folder, state.remote ? 'Backup folder on the main till: ' : 'Backup folder: ', h('code', {}, dir))).catch(() => {});
+  const status = h('div', { class: 'muted', hidden: true });
+  const fileInput = h('input', { type: 'file', accept: '.db', hidden: true });
+  const fromFile = h('button', { onclick: () => fileInput.click() }, 'Restore everything from a file…');
+  fileInput.onchange = act(async () => {
+    const f = fileInput.files[0];
+    fileInput.value = '';
+    if (!f) return;
+    fromFile.disabled = true;
+    status.hidden = false;
+    try {
+      const r = await uploadBackup(f, (pct) => { status.textContent = `Loading ${f.name}… ${pct}%`; });
+      status.textContent = '';
+      await load();
+      restoreDialog(r.file, r.summary);
+    } finally {
+      fromFile.disabled = false;
+      status.hidden = true;
+    }
+  });
+  return h('div', { class: 'card stack', 'data-row': 'backup' },
+    h('h3', {}, 'Backup'),
+    h('p', { class: 'muted' }, 'Everything (orders, menu, customers, staff and PINs, settings) is backed up automatically once a day at startup; ', keepText,
+      '. The copies made before an update, a reset or a restore, and files loaded from elsewhere, are kept apart (the last 3 of each, and any from the last 7 days).'),
+    admin && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Keep the last', keep, 'backups'),
+      h('button', { onclick: act(async () => {
+        const raw = keep.value.trim(), n = Number(raw);
+        if (raw && (!Number.isInteger(n) || n < KEEP_MIN || n > KEEP_MAX)) return toast(`Backups kept: a whole number from ${KEEP_MIN} to ${KEEP_MAX}`, true);
+        await call('set_setting', { key: 'backups_kept', value: raw });
+        keepText.textContent = `the last ${raw || KEEP_DEF} are kept`;
+        toast(`Keeping the last ${raw || KEEP_DEF} backups. Older ones are deleted at the next backup.`);
+      }) }, 'Save')),
+    admin && h('div', { class: 'muted small' }, `${KEEP_MIN} to ${KEEP_MAX} (empty = ${KEEP_DEF}). Daily backups only: safety copies and files loaded from elsewhere are kept apart. Each backup is a full copy of the database.`),
+    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => { toast('Backup saved: ' + (await call('backup_now'))); await load(); }) }, 'Back up everything now'),
+      admin && fromFile, fileInput,
+      admin && !state.remote && h('button', { onclick: act(() => invoke('open_backup_folder')) }, 'Open backup folder'),
+      h('span', { class: 'grow' }),
+      admin && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete backups', files.map((f) => ({ id: f.name, label: fmtTime(f.modified), sub: `${f.name} · ${fileSize(f.size)}` })),
+        async (names) => `${await call('delete_backups', { names })} backup(s) deleted`, load) }, 'Delete several…')),
+    status,
+    admin && h('div', { class: 'muted small' }, h('strong', {}, 'Moving to a new PC? '),
+      state.remote ? 'Download a backup here, ' : 'Back up, open the backup folder and copy the newest backup to a USB stick, ',
+      'then on the new PC open Backup & data and use Restore everything from a file…'),
+    admin && folder,
+    list);
 }
 
 /// A small number box for the settings cards.
 const numBox = (value, attrs = {}) => h('input', { inputmode: 'decimal', value, style: 'width:70px', ...attrs });
-
-/// Settings card: tips, cash quick buttons, split evenly, how Finish & Pay opens (admins).
-function paymentsCard() {
-  const card = h('div', { class: 'card stack' });
-  invoke('get_settings', { keys: PAY_KEYS }).then((raw) => {
-    const c = paySettings(raw);
-    const tips = c.tips.map((p) => numBox(String(p), { 'aria-label': 'Tip %' }));
-    const notes = h('input', { value: c.notes.map((x) => String(x / 100)).join(', '), placeholder: '5, 10, 20, 50, 100', style: 'width:240px' });
-    const split = numBox(String(c.splitMax), { inputmode: 'numeric' });
-    const method = h('select', {}, h('option', { value: 'cash' }, payName('cash')), h('option', { value: 'card' }, payName('card')));
-    method.value = c.method;
-    const nameBox = (v, def) => h('input', { value: v ?? '', placeholder: def, maxlength: PAY_NAME_MAX, style: 'width:200px' });
-    const cashName = nameBox(raw.pay_name_cash, 'Cash'), cardName = nameBox(raw.pay_name_card, 'Card');
-    setKids(card,
-      h('h3', {}, 'Payments'),
-      h('div', { class: 'muted' }, 'How Finish & Pay looks. Switches save at once; the rest with the Save button.'),
-      settingSwitch('tips_on', 'Ask for tips (a Tip row in Finish & Pay)', 'Finish & Pay asks for tips', 'No Tip row in Finish & Pay'),
-      h('div', { class: 'row' }, h('span', {}, 'Tip buttons'),
-        tips.map((t) => h('label', { class: 'field' }, t, '%'))),
-      h('label', { class: 'field' }, 'Cash quick buttons', notes),
-      h('div', { class: 'muted small' }, 'Note values, separated by commas. The total rounded up is offered too; the four smallest amounts above the total show.'),
-      h('label', { class: 'field' }, 'Split evenly: up to', split, 'people (2 to 12)'),
-      h('label', { class: 'field' }, 'Payment method when Finish & Pay opens', method),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Call Cash', cashName), h('label', { class: 'field' }, 'Call Card', cardName)),
-      h('div', { class: 'muted small' }, 'How the payment buttons, receipts, History, reports and the shift report name them, e.g. เงินสด or QR / Card. ' +
-        'Empty = Cash and Card. Reports still count them the same way.'),
-      settingSwitch('exact_cash_pays', 'Tapping "Exact" takes the cash payment at once (no second tap)',
-        '"Exact" takes the payment at once', '"Exact" fills in the amount, then tap Take cash', false),
-      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
-        const tipList = numberList(tips.map((t) => t.value.replace(',', '.')).join(','));
-        if (!goodTips(tipList)) return toast('Enter three tip percentages, e.g. 5, 10 and 15 (more than 0, at most 100)', true);
-        const noteList = numberList(notes.value);
-        if (!goodNotes(noteList)) return toast('Enter 1 to 8 cash amounts separated by commas, e.g. 5, 10, 20, 50, 100', true);
-        const n = Number(split.value);
-        if (!goodSplit(n)) return toast('Split evenly: enter a number of people from 2 to 12', true);
-        const names = [cashName.value.trim(), cardName.value.trim()];
-        if (names.some((x) => x.length > PAY_NAME_MAX)) return toast(`Payment names: up to ${PAY_NAME_MAX} characters`, true);
-        if ((names[0] || 'Cash').toLowerCase() === (names[1] || 'Card').toLowerCase()) return toast('Give Cash and Card different names', true);
-        const values = { tip_presets: tipList.join(','), cash_quick: noteList.join(','), split_max: String(n), pay_default_method: method.value,
-          pay_name_cash: names[0], pay_name_card: names[1] };
-        for (const [key, value] of Object.entries(values)) await call('set_setting', { key, value });
-        await loadUiSettings();
-        toast(`Payments saved: tips ${tipList.join(' / ')} %, split up to ${n}, opens on ${payName(method.value)}`);
-      }) }, 'Save payments')));
-  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
-  return card;
-}
 
 /// Settings card: kitchen screen colours, refresh, how long paid orders stay (managers too).
 function kdsCard() {
@@ -4964,16 +5766,6 @@ function splitCard() {
       'Off = they print on the normal ticket with the rest. Drinks still go to the kitchen straight away.'));
 }
 
-/// Settings card: ask "Starter or Main?" when a starter is tapped.
-function courseCard() {
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Starter or main course'),
-    settingSwitch('starter_choice', 'When a starter is tapped on a dine-in order, ask "Starter or Main course?"',
-      'Starters ask Starter or Main', 'Starters are added as starters'),
-    h('div', { class: 'muted' }, 'Main course: the dish waits and goes with the mains. A dish not yet sent can also be changed later: tap ✎ on it, then Starter or Main course.'),
-    h('div', { class: 'muted small' }, 'When teams are ticked under Manage → Kitchen teams → "Which team makes this?", that question is asked instead of this one.'));
-}
-
 /// Reloads the "Which team makes this?" card on screen (after the teams are saved).
 let reloadTeamChoice = null;
 /// Settings card: "Which team makes this?" — the teams a dish can be moved
@@ -5002,25 +5794,6 @@ function teamChoiceCard() {
   load();
   reloadTeamChoice = () => { if (card.isConnected) load(); };
   return card;
-}
-
-/// Settings card: whether cancelling a whole order prints a CANCELLED kitchen ticket.
-function cancelTicketCard() {
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Cancelling an order'),
-    settingSwitch('print_cancelled_order', 'Print a CANCELLED ticket for the kitchen when an order is cancelled',
-      'Cancelling an order prints a CANCELLED ticket', 'Cancelling an order prints nothing for the kitchen'),
-    h('div', { class: 'muted' }, 'On: the ticket lists the dishes still cooking (not yet marked done on the kitchen screen). Off: the order is cancelled the same way, but nothing is printed, so tell the kitchen yourself. ' +
-      'Taking one dish off an order (− or Remove) still prints a CANCELLED ticket for that dish.'));
-}
-
-/// Settings card: who may fix a dish that was already sent.
-function fixSentCard() {
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Fixing a dish already sent'),
-    settingSwitch('staff_cancel_sent', 'Staff can take off or reduce dishes already sent', 'Staff can fix sent dishes', 'Only an admin can take off sent dishes'),
-    h('div', { class: 'muted' }, 'Wrong dish sent? On the order tap ✎ on it: − or Remove prints a CANCELLED ticket for the kitchen, a new note prints a CHANGED ticket, ' +
-      '"Print again" prints that dish again. Then add the right dish and send it.'));
 }
 
 /// An on/off switch for setting `key` ("1" / "0"; not set = `def`).

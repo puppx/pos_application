@@ -605,7 +605,7 @@ impl Pos {
 
         if opts.customers {
             report.customers = count(&tx, "SELECT COUNT(*) FROM customers WHERE active = 1")?;
-            tx.execute_batch("UPDATE orders SET customer_id = NULL; DELETE FROM customers;")?;
+            tx.execute_batch("UPDATE orders SET customer_id = NULL WHERE customer_id IS NOT NULL; DELETE FROM customers;")?;
         }
 
         if opts.menu {

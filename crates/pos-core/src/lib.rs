@@ -54,7 +54,7 @@ pub use printing::{
     PRINT_CANCELLED_ORDER_KEY, SLOW_CHUNK, SLOW_PAUSE,
 };
 pub use orders::{
-    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, EMPTY_ORDER_AGE, OPEN_ITEM_SKU,
+    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, EMPTY_ORDER_AGE, EMPTY_ORDER_SWEPT, OPEN_ITEM_SKU,
 };
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
@@ -107,6 +107,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0027_item_team.sql"),
     include_str!("migrations/0028_plan_labels.sql"),
     include_str!("migrations/0029_line_menu_price.sql"),
+    include_str!("migrations/0030_order_activity.sql"),
 ];
 /// The schema this app creates; backups up to this version can be restored.
 pub const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
@@ -149,6 +150,7 @@ impl Pos {
         conn.set_prepared_statement_cache_capacity(256);
         migrate(&conn)?;
         conn.execute_batch(receipt::BILL_STALE_TRIGGERS)?;
+        conn.execute_batch(orders::ACTIVITY_TRIGGERS)?;
         let pin_salt = load_or_create_salt(&conn)?;
         if database_id(&conn)?.is_none() {
             new_database_id(&conn)?;

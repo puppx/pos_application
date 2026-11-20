@@ -56,6 +56,20 @@ impl Drop for PreparedRestore {
     }
 }
 
+/// Put `path`'s modified time back to `made` if reading it changed it (some
+/// systems count a copy, e.g. through a backup or antivirus filter): the
+/// backup folder is ordered by these times, so a restored or checked file
+/// must never pass for the newest daily backup. Best effort.
+fn keep_modified(path: &Path, made: Option<std::time::SystemTime>) {
+    let Some(made) = made else { return };
+    if std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|now| now != made) {
+        let reset = std::fs::File::options().write(true).open(path).and_then(|f| f.set_modified(made));
+        if let Err(e) = reset {
+            eprintln!("backup check: cannot keep the file's time: {e}");
+        }
+    }
+}
+
 /// Delete a database file and any journal / WAL files next to it.
 fn remove_with_sidecars(path: &Path) {
     for suffix in ["", "-journal", "-wal", "-shm"] {
@@ -206,7 +220,10 @@ fn prepare(src: &Path, work: &Path, page_size: Option<i64>) -> Result<PreparedRe
     }
     // Never pick up a journal or WAL left over from an earlier attempt.
     remove_with_sidecars(work);
-    if let Err(e) = std::fs::copy(src, work) {
+    let made = std::fs::metadata(src).and_then(|m| m.modified()).ok();
+    let copied = std::fs::copy(src, work);
+    keep_modified(src, made);
+    if let Err(e) = copied {
         remove_with_sidecars(work);
         return Err(io_error(&e, "cannot copy the backup"));
     }
@@ -360,11 +377,12 @@ impl Pos {
             s.name,
             prepared.summary.store_name.as_deref().map(|n| format!(", from {n}")).unwrap_or_default(),
         );
-        let steps: [(&str, &AfterCopy); 5] = [
+        let steps: [(&str, &AfterCopy); 6] = [
             // Keep WAL for a file database (in memory it stays "memory").
             ("journal mode", &|p| Ok(p.conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?)),
             ("migrate", &|p| migrate(&p.conn)),
             ("triggers", &|p| Ok(p.conn.execute_batch(receipt::BILL_STALE_TRIGGERS)?)),
+            ("activity triggers", &|p| Ok(p.conn.execute_batch(crate::orders::ACTIVITY_TRIGGERS)?)),
             ("audit", &|p| p.audit(None, "backup.restore", &detail)),
             // Fold the copied pages back into the main file now.
             ("checkpoint", &|p| Ok(p.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?)),
@@ -438,14 +456,21 @@ mod tests {
         let src = dir.path().join("old.db");
         other_pc(&src);
         let (mut pos, s) = live();
+        // An old file: checking and restoring it never makes it look new.
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+        std::fs::File::options().write(true).open(&src).unwrap().set_modified(made).unwrap();
+        let modified = || std::fs::metadata(&src).unwrap().modified().unwrap();
         let before = std::fs::read(&src).unwrap();
+        Pos::check_backup(&src, dir.path().join("check.db")).unwrap();
+        assert_eq!(modified(), made);
         let prepared = pos.prepare_restore(&src, dir.path().join("work.db")).unwrap();
         assert_eq!(prepared.summary.store_name.as_deref(), Some("Old Shop"));
         assert_eq!((prepared.summary.orders, prepared.summary.open_orders, prepared.summary.menu_items, prepared.summary.staff), (1, 1, 1, 2));
         let summary = pos.restore(&s, prepared).unwrap();
         assert_eq!(summary.schema_version, SCHEMA_VERSION);
-        // The backup file itself is untouched and the work file is gone.
+        // The backup file itself is untouched (its time too) and the work file is gone.
         assert_eq!(std::fs::read(&src).unwrap(), before);
+        assert_eq!(modified(), made);
         assert!(!dir.path().join("work.db").exists());
         // The old PC's PINs work; this till's do not.
         let mut t = Default::default();
@@ -458,12 +483,14 @@ mod tests {
         assert_eq!(menu, ["Massaman"]);
         let open = pos.list_open_orders(&nok).unwrap();
         assert_eq!(open.len(), 1);
-        // Still a working database: new orders, and the bill triggers are back.
+        // Still a working database: new orders, and the bill and activity triggers are back.
         let o = pos.get_order(&nok, open[0].id).unwrap();
-        pos.conn.execute("UPDATE orders SET bill_printed_at = 1 WHERE id = ?1", [o.id]).unwrap();
+        pos.conn.execute("UPDATE orders SET bill_printed_at = 1, touched_at = NULL WHERE id = ?1", [o.id]).unwrap();
         pos.add_item(&nok, o.id, menu_id(&pos, &nok), 1, None, None, &[]).unwrap();
-        let stale: Option<i64> = pos.conn.query_row("SELECT bill_printed_at FROM orders WHERE id = ?1", [o.id], |r| r.get(0)).unwrap();
+        let (stale, touched): (Option<i64>, Option<i64>) =
+            pos.conn.query_row("SELECT bill_printed_at, touched_at FROM orders WHERE id = ?1", [o.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(stale, None);
+        assert!(touched.is_some());
         let audit: String =
             pos.conn.query_row("SELECT detail FROM audit_log WHERE action = 'backup.restore'", [], |r| r.get(0)).unwrap();
         assert!(audit.contains("by Owner") && audit.contains("Old Shop"), "{audit}");

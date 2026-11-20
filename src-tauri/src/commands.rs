@@ -1899,6 +1899,12 @@ mod tests {
     fn restoring_a_full_backup_replaces_everything_and_logs_everyone_out() {
         let dir = tempfile::tempdir().unwrap();
         other_pc_backup(dir.path(), "pos-1700000000.db");
+        // A backup from two days ago: restoring it must not make it look new
+        // (the daily backup and pruning go by the files' modified times).
+        let backup = dir.path().join("pos-1700000000.db");
+        let made = SystemTime::now() - Duration::from_secs(2 * 86_400);
+        std::fs::File::options().write(true).open(&backup).unwrap().set_modified(made).unwrap();
+        let modified = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
         let app = till(dir.path());
         let tablet = "web-0123456789abcdef0123456789abcdef";
         dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
@@ -1925,6 +1931,8 @@ mod tests {
         assert_eq!(files(dir.path()), ["pos-1700000000.db"]);
 
         let r = restore(LOCAL, "1111", " RESTORE ").unwrap();
+        assert_eq!(modified(&backup), made, "the restored file keeps its time");
+        assert!(newest_regular_backup(dir.path()).is_some_and(|t| t == made));
         assert_eq!(r["summary"]["orders"], 1);
         assert_eq!(r["restored"], "pos-1700000000.db");
         let safety = r["safety_copy"].as_str().unwrap().to_string();

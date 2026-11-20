@@ -1,0 +1,36 @@
+# tiny_http 0.12.0 from crates.io (MIT OR Apache-2.0, see the LICENSE files),
+# used through [patch.crates-io] in the workspace Cargo.toml. The one change
+# is in src/util/task_pool.rs (`TaskPool::spawn`, marked PATCHED): a burst
+# of new connections could leave one never read. Tests, examples and
+# benches of the original are left out.
+[package]
+name = "tiny_http"
+version = "0.12.0"
+authors = ["pierre.krieger1708@gmail.com", "Corey Farwell <coreyf@rwell.org>"]
+description = "Low level HTTP server library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tiny-http/tiny-http"
+edition = "2018"
+publish = false
+
+[features]
+default = []
+ssl = ["ssl-openssl"]
+ssl-openssl = ["openssl", "zeroize"]
+ssl-rustls = ["rustls", "rustls-pemfile", "zeroize"]
+
+[dependencies]
+ascii = "1.0"
+chunked_transfer = "1"
+log = "0.4.4"
+httpdate = "1.0.2"
+
+openssl = { version = "0.10", optional = true }
+rustls = { version = "0.20", optional = true }
+rustls-pemfile = { version = "0.2.1", optional = true }
+zeroize = { version = "1", optional = true }
+
+# Warnings newer compilers give about the original code, left as it is.
+[lints.rust]
+unused_imports = "allow"
+dead_code = "allow"

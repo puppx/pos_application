@@ -428,6 +428,47 @@ mod tests {
         );
     }
 
+    /// A burst of new keep-alive connections, as a tablet opens after a
+    /// restart (about 6 at once): each gets its answer while all of them
+    /// stay open. tiny_http 0.12's own thread pool could queue a new
+    /// connection behind a kept-alive one, so its first request was never
+    /// read until another connection closed (see vendor/tiny_http).
+    #[test]
+    fn every_connection_of_a_burst_is_answered_while_the_others_stay_open() {
+        for round in 0..200 {
+            // A new server each round: four idle connection threads, as right after a start.
+            let (listener, _) = listen(0).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let http = Arc::new(tiny_http::Server::from_listener(listener, None).unwrap());
+            let worker = {
+                let http = http.clone();
+                std::thread::spawn(move || {
+                    while let Ok(rq) = http.recv() {
+                        let _ = rq.respond(Response::from_string("ok"));
+                    }
+                })
+            };
+            let mut conns: Vec<TcpStream> = (0..8).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+            for c in &mut conns {
+                c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                c.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            }
+            for (i, c) in conns.iter_mut().enumerate() {
+                let mut got = Vec::new();
+                while !got.ends_with(b"ok") {
+                    let mut buf = [0u8; 256];
+                    match c.read(&mut buf) {
+                        Ok(n) if n > 0 => got.extend_from_slice(&buf[..n]),
+                        other => panic!("round {round}: connection {i} of 8 got no answer ({other:?})"),
+                    }
+                }
+            }
+            drop(conns);
+            http.unblock();
+            worker.join().unwrap();
+        }
+    }
+
     #[test]
     fn any_backup_name_makes_a_safe_download_header() {
         assert_eq!(attachment("pos-1.db"), "attachment; filename=\"pos-1.db\"; filename*=UTF-8''pos-1.db");

@@ -310,15 +310,16 @@
     window.addEventListener('click', eat, true);
     setTimeout(() => window.removeEventListener('click', eat, true), 400);
   }
+  let pendingHide = null;
   const finishTap = () => {
     if (hideAfterKeyTap) {
       hideAfterKeyTap = false;
       swallowTapClick();
-      setTimeout(hide, 0);
+      pendingHide = setTimeout(hide, 0);
     }
     if (!hideAfterTap) return;
     hideAfterTap = false;
-    setTimeout(hide, 0);
+    pendingHide = setTimeout(hide, 0);
   };
   document.addEventListener('pointerup', finishTap, true);
   document.addEventListener('pointercancel', finishTap, true);
@@ -347,6 +348,17 @@
       OSK.onchange?.();
     },
     hide,
+    /// Open for a field the app has just focused because of the user's tap
+    /// (e.g. "+ Add" turns into a box): a tap on a plain button does not open it
+    /// by itself. Cancels the close that tap would cause. Never for a field
+    /// focused without a tap (the order screen's search box).
+    open(el) {
+      el = eligible(el);
+      if (!S.enabled || !el) return;
+      clearTimeout(pendingHide);
+      hideAfterTap = false;
+      if (S.el !== el || !S.visible) show(el);
+    },
   };
   window.OSK = OSK;
 })();

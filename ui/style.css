@@ -108,12 +108,10 @@ label.check input[type=checkbox] { width: 22px; height: 22px; flex: none; margin
 /* Toggle switch: <label class="switch"><input type=checkbox><span></span>Text</label> */
 .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; color: var(--ink-2); font-weight: 500; position: relative; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
-.switch span { width: 44px; height: 26px; border-radius: 13px; background: var(--line-2); position: relative; transition: background .15s; flex: none; }
+.switch span { width: 44px; height: 26px; border-radius: 13px; background: var(--switch-off); position: relative; transition: background .15s; flex: none; }
 .switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .15s; }
 .switch input:checked + span { background: var(--brand); }
 .switch input:checked + span::after { transform: translateX(18px); }
-/* Settings switches: the whole row is a 44px touch target. */
-.page.settings .switch { min-height: 44px; }
 
 /* ---------- layout helpers ---------- */
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -205,25 +203,6 @@ main { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
 .page { display: flex; flex-direction: column; gap: 14px; }
 .page.narrow { max-width: 720px; }
 .page.split { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr); align-items: start; gap: 16px; }
-.page.settings { max-width: 820px; }
-.settings-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 14px; max-width: 1400px; }
-.settings-tile {
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center;
-  aspect-ratio: 1 / 1; min-height: 150px; padding: 14px; border: 1px solid var(--line); border-radius: 14px;
-  background: var(--surface); color: var(--ink); box-shadow: var(--shadow); white-space: normal;
-}
-.settings-tile .icon { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 50%; background: var(--brand-soft); color: var(--brand); }
-.settings-tile strong { font-size: 18px; line-height: 1.2; }
-.settings-tile small { color: var(--muted); font-weight: 500; font-size: 13px; line-height: 1.3; }
-.settings-tile:hover { border-color: var(--brand); }
-.settings-tile:active { transform: scale(.98); background: var(--brand-soft); }
-.settings-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; column-span: all; }
-.settings-head h2 { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 22px; }
-.settings-head .back-btn { display: inline-flex; align-items: center; gap: 4px; padding-left: 10px; }
-.sent-hint { margin-bottom: 6px; }
-.manage-back { margin-bottom: 12px; }
-.manage-back .back-btn, .settings-head .back-btn { display: inline-flex; align-items: center; gap: 4px; padding-left: 10px; }
-.page.settings-home { gap: 10px; }
 /* About: product name and version, then the credits; the copyright line sits under a rule. */
 .about-credits { display: flex; flex-direction: column; gap: 6px; }
 .about-head { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -231,13 +210,6 @@ main { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
 .about-by { color: var(--ink-2); }
 .about-by strong { color: var(--ink); }
 .about-copy { margin-top: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
-.manage-title { margin: 6px 0 0; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-@media (max-width: 700px) {
-  .settings-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-  .settings-tile { min-height: 130px; }
-  .settings-tile .icon { width: 56px; height: 56px; }
-  .settings-tile strong { font-size: 16px; }
-}
 .sticky { position: sticky; top: 0; }
 .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .section-title { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
@@ -589,11 +561,6 @@ pre.report { background: var(--surface); border: 1px dashed var(--line-2); borde
   .tools button { font-size: 13px; }
   .stat small { font-size: 11.5px; }
 }
-/* Settings: two columns of cards when there is room, instead of one long narrow list. */
-@media (min-width: 1180px) {
-  .page.settings { display: block; max-width: none; columns: 2 480px; column-gap: 14px; }
-  .page.settings > * { break-inside: avoid; margin-bottom: 14px; }
-}
 
 /* ---------- smaller screens (tablets in portrait, phones) ---------- */
 @media (max-width: 1180px) {
@@ -642,9 +609,8 @@ pre.report { background: var(--surface); border: 1px dashed var(--line-2); borde
   border: 2px dashed var(--line-2); border-radius: var(--radius); color: var(--muted); font-weight: 500;
 }
 
-/* settings: danger zone */
-.danger-zone { border-color: var(--danger); border-left-width: 6px; background: var(--danger-soft); }
-.danger-zone h3 { color: var(--danger); }
+/* Danger buttons */
+
 button.danger.solid { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
 button.danger.solid:hover { background: var(--danger-fill-2); }
 
@@ -909,13 +875,9 @@ td.short, strong.short { color: var(--danger); }
 .dish-choices .row { align-items: center; flex-wrap: wrap; }
 .dish-choices .with-label { text-align: left; }
 
-/* Bulk delete, PIN confirm */
+/* Danger outline, PIN confirm */
 button.danger-outline { color: var(--danger); border-color: var(--danger); background: var(--surface); }
 button.danger-outline:hover { background: var(--danger-soft); }
-.bulk-list { max-height: 55vh; overflow: auto; gap: 4px; }
-.bulk-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
-.bulk-row.on { border-color: var(--danger); background: var(--danger-soft); }
-.bulk-row input { width: 20px; height: 20px; }
 .warn-box { padding: 8px 10px; border-radius: var(--radius-sm); background: var(--warn-soft); border: 1px solid var(--warn); color: var(--ink); font-size: 14px; }
 .confirm-hint { gap: 8px; font-size: 17px; }
 .confirm-hint .cancel-warn { color: var(--danger); font-weight: 600; }
@@ -1076,17 +1038,11 @@ body.big-buttons .new-tile { min-height: 112px; font-size: 19px; }
   .order.show-ticket .lines { flex: none; min-height: 120px; overflow-y: visible; }
 }
 
-/* Settings > Backup & data: full backups */
-.backup-list { display: flex; flex-direction: column; }
-.backup-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 2px; border-bottom: 1px solid var(--line); }
-.backup-row:last-child { border-bottom: 0; }
-.backup-row .muted { overflow-wrap: anywhere; }
-.backup-acts { flex-wrap: nowrap; }
-.backup-acts button { min-height: 40px; padding: 0 12px; }
-.backup-folder code { overflow-wrap: anywhere; font-size: 13px; }
-.restore-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; align-items: baseline; }
-.restore-facts strong { overflow-wrap: anywhere; }
-@media (max-width: 600px) { .backup-acts { width: 100%; justify-content: flex-end; } }
+/* Restore sheet: what the backup holds, two facts a row. */
+.restore-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 14px 4px 4px; }
+.restore-facts > div { display: flex; flex-direction: column; min-width: 0; }
+.restore-facts span { font-size: 13px; }
+.restore-facts strong { font-size: 17px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 /* Phones: the floor's status strip in smaller pills, starting at the left. */
 @media (max-width: 600px) {
   .floor-stats { margin-left: 0; gap: 6px; }
@@ -1110,28 +1066,8 @@ body.big-buttons .new-tile { min-height: 112px; font-size: 19px; }
 
 /* ---------- finding things: Manage search, page lines, help ---------- */
 /* Manage: one big search box, then the pages and settings as compact rows (icon, name, one line). */
-.manage-find { max-width: 720px; min-height: 56px; border-radius: 14px; padding: 0 16px; margin-bottom: 4px; box-shadow: var(--shadow); }
-.manage-find input { font-size: 17px; min-height: 54px; }
-.settings-tiles { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
-.settings-tile {
-  aspect-ratio: auto; min-height: 76px; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto;
-  column-gap: 14px; row-gap: 1px; align-content: center; justify-items: start; text-align: left; padding: 12px 16px; border-radius: 14px;
-}
-.settings-tile .icon { grid-row: 1 / span 2; width: 48px; height: 48px; border-radius: 12px; align-self: center; }
-.settings-tile strong { font-size: 16.5px; }
-.settings-tile small { font-size: 13px; }
-.settings-tile strong:last-child { grid-row: 1 / span 2; align-self: center; }
-.settings-tile[hidden] { display: none; }
-.manage-title { margin-top: 10px; font-size: 13px; letter-spacing: .06em; }
-.manage-title[hidden] { display: none; }
-@media (max-width: 700px) {
-  .settings-tiles { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .settings-tile { min-height: 68px; }
-  .settings-tile .icon { width: 42px; height: 42px; }
-}
-/* A page opened from Manage: the way back, then what the page is for. */
-.manage-back { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.page-sub { color: var(--muted); font-size: 15px; }
+
+
 /* Help: numbered steps in plain words. */
 .dialog.help-dialog { width: min(560px, 100%); gap: 14px; }
 .help-steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 12px; }
@@ -1566,7 +1502,7 @@ hr.rail-only { border: 0; border-top: 1px solid var(--line); margin: 6px 8px; }
 
 /* ---------- 2. Sections and setting rows ---------- */
 .ssec { margin-top: 18px; }
-.sbody > .ssec:first-child, .sbody > .legacy:first-child { margin-top: 6px; }
+.sbody > .ssec:first-child { margin-top: 6px; }
 .ssec-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 0 4px 8px; }
 .ssec-foot { font-size: 13px; color: var(--muted); padding: 8px 4px 0; }
 .sgroup { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
@@ -1614,7 +1550,7 @@ hr.rail-only { border: 0; border-top: 1px solid var(--line); margin: 6px 8px; }
 @keyframes fadeout { 0%, 70% { opacity: 1; } 100% { opacity: 0; } }
 @keyframes nudge { 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
 .nudge { animation: nudge .18s 2; }
-.srow.found, .legacy > .found { animation: found 2s ease-out; }
+.srow.found { animation: found 2s ease-out; }
 @keyframes found { 0%, 40% { background: var(--brand-soft); } 100% { background: var(--surface); } }
 
 /* ---------- 3. Switch (the whole row is the <label>) ---------- */
@@ -1740,8 +1676,6 @@ button.danger.solid { background: var(--danger-fill); border-color: var(--danger
 .sempty p { margin: 0 0 8px; font-size: 14px; color: var(--muted); max-width: 320px; }
 
 /* Cards not yet in the new look, inside the detail pane. */
-.legacy { display: flex; flex-direction: column; gap: 14px; margin-top: 18px; }
-.legacy .switch { min-height: 44px; }
 
 /* Phones: Daily work as tiles; staff get two big cards. */
 .dgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -1750,7 +1684,6 @@ button.danger.solid { background: var(--danger-fill); border-color: var(--danger
 @media (hover: none) { .dtile:hover { border-color: var(--line); } }
 .dtile.dtile-big { min-height: 76px; font-size: 18px; padding: 0 20px; gap: 14px; }
 .staff-manage { max-width: 480px; margin: 12px auto 0; display: flex; flex-direction: column; gap: 12px; }
-.staff-manage .legacy { margin-top: 4px; }
 .staff-head { margin-bottom: 10px; }
 .grp-row .srow-label { gap: 12px; }
 .grp-ic { display: inline-flex; color: var(--brand); }
@@ -1837,3 +1770,113 @@ body.kb-open #modal.sheet-host .sheet { max-height: 100%; }
 /* A printer whose test failed: its reason may take two lines. Phones: the meta line too. */
 .srow.sstat:has(.pill.bad) .srow-hint { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 @media (max-width: 700px) { .srow.sstat .srow-hint { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; } }
+
+/* ==========================================================================
+   Manage, phase 2: Kitchen › Teams, Restaurant › Tax, Devices, Backup & data,
+   About, the floor plan's inspector and the save bar on forms.
+   ========================================================================== */
+/* A level-2 page: ‹ Kitchen  Teams */
+.dhead.sub h2 { font-size: 21px; }
+.dhead.sub .back { padding-right: 12px; }
+/* A unit after a box (Default tax rate … %). */
+.sunit { font-size: 15px; font-weight: 600; color: var(--muted); }
+/* "12 items are at 0 %  [Apply 20 %]": a strip under a row. */
+.srow-strip { position: relative; display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 6px 16px; background: var(--warn-soft); font-size: 14.5px; font-weight: 600; color: var(--ink); }
+.srow-strip[hidden] { display: none; }
+.srow-strip button { min-height: 44px; }
+.srow-strip .ok { color: var(--go-ink); }
+.srow-strip .bad { color: var(--danger-ink); }
+/* Segmented control on the row's right; it goes under the label on narrow screens. */
+@media (max-width: 560px) {
+  .srow.seg-fold { grid-template-columns: minmax(0, 1fr) 20px; row-gap: 10px; padding-block: 12px; }
+  .srow.seg-fold .srow-ctl { grid-column: 1 / -1; justify-self: stretch; }
+  .srow.seg-fold .sseg { display: flex; flex: 1; }
+  .srow.seg-fold .sseg button { flex: 1 1 0; padding: 0 8px; }
+}
+/* Kitchen screen colour dots before Orange after / Red after. */
+.srow-label .kds-dot { margin-right: 8px; }
+/* Teams: grip | name | Thai | items | × */
+.lrow.teams { grid-template-columns: 44px minmax(0, 1fr) minmax(0, 150px) 64px 44px; }
+.lmeta { font-size: 13px; color: var(--muted); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.lrow input.bad, .srow input.bad { border-color: var(--danger); background: var(--danger-soft); }
+@media (max-width: 560px) {
+  .lrow.teams { grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) 44px; }
+  .lrow.teams .lmeta { display: none; }
+}
+/* ⋯ menu (backups): the same pop-over as (i), with full-width actions. */
+.more-btn { min-width: 44px; min-height: 44px; padding: 0; color: var(--muted); }
+.pop.pop-menu-host { padding: 6px; min-width: 180px; }
+.pop-menu { display: flex; flex-direction: column; gap: 2px; }
+.pop-menu button { justify-content: flex-start; min-height: 44px; border: 0; box-shadow: none; background: transparent; padding: 0 14px; font-size: 15px; }
+.pop-menu button:hover { background: var(--surface-2); }
+.pop-menu button.danger { color: var(--danger-ink); }
+/* Backup rows: time, kind · size, [Restore] ⋯ */
+.srow.brow .srow-label { font-variant-numeric: tabular-nums; }
+.srow.brow .srow-ctl { gap: 4px; }
+.srow.path-row .srow-hint { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+/* A level-2 list's bar: "18 backups  [Select…]" */
+.sbar { display: flex; align-items: center; gap: 12px; margin: 6px 4px 10px; }
+.sbar button { min-height: 44px; }
+/* Reset sheet: All / Before a date, then the date. */
+.srow.when-row .srow-ctl { flex-wrap: wrap; gap: 10px; }
+.srow.when-row .sseg { flex: 1 1 220px; display: flex; }
+.srow.when-row .sseg button { flex: 1 1 0; }
+.srow.when-row input[type=date] { min-height: 44px; }
+.sheet .warn-box { margin: 14px 4px 0; }
+/* Local server: the addresses to open on a tablet. */
+.server-urls { display: flex; flex-direction: column; gap: 4px; }
+.server-urls code { font-size: 16px; font-weight: 700; color: var(--go-ink); overflow-wrap: anywhere; }
+/* About: logo beside the name, version and credits. */
+.about-credits { display: flex; flex-direction: row; align-items: flex-start; gap: 16px; padding: 18px; margin-top: 6px; }
+.about-logo { width: 56px; height: 56px; border-radius: 14px; flex: none; }
+.about-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.about-name { font-size: 22px; font-weight: 700; margin: 0; }
+.staff-manage .about-credits { margin-top: 0; }
+/* Floor plan: the inspector is a small settings card. */
+.plan-card { display: flex; flex-direction: column; gap: 10px; }
+.plan-card-head { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 4px; }
+.plan-card-head h3 { flex: 1; margin: 0; font-size: 18px; }
+.plan-card-head .icon-btn { min-width: 44px; min-height: 44px; }
+.plan-card .sgroup .srow { padding-inline: 12px; column-gap: 8px; }
+.plan-card .sgroup .srow input { width: 120px; }
+.plan-card-actions { display: flex; gap: 8px; }
+.plan-card-actions button { flex: 1; min-height: 44px; }
+.plan-empty .sempty { padding: 24px 16px; }
+.plan-page > .savebar { margin-top: 0; }
+/* Staff: the save bar sits at the foot of the editor card. */
+.popup .savebar, .panel + .savebar, .card > .savebar { position: sticky; bottom: 0; margin-top: 4px; max-width: none; }
+.staff-form > .sgroup { box-shadow: none; }
+/* The rail (a page open on a 1000-1365 px screen): an 11 px name under each icon. */
+.rail-label { display: none; }
+@media (min-width: 1000px) and (max-width: 1365px) {
+  .manage.rail { grid-template-columns: 76px minmax(0, 1fr); }
+  .manage.rail:not(.peek) .mside { padding: 6px 6px 12px; }
+  .manage.rail:not(.peek) .mnav-item { flex-direction: column; gap: 1px; min-height: 46px; padding: 3px 0 2px; }
+  .manage.rail:not(.peek) .rail-label { display: block; font-size: 11px; font-weight: 600; line-height: 1.15; color: var(--ink-2); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .manage.rail:not(.peek) .mnav-item.on .rail-label { color: var(--brand-ink); }
+  .manage.rail:not(.peek) hr.rail-only { margin: 4px 8px; }
+}
+/* Switches inside Manage pages (menu editor…) keep a 44 px row; in a table cell, a 44 px square. */
+.mdetail .switch { min-height: 44px; }
+.switch.mini { min-width: 44px; justify-content: center; gap: 0; }
+/* Daily work pages in Manage: one look for the page's main button, the empty side panel and the start card. */
+.dhead > button.primary { flex: none; min-height: 44px; }
+.mdetail [data-hint]:empty::before { border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); min-height: 140px; font-size: 15px; }
+.mdetail .page > .panel .sempty, .mdetail .split .panel .sempty { padding: 36px 20px; }
+.shift-start { max-width: 520px; }
+.shift-start .primary.lg { min-height: 52px; }
+.mdetail .page .card h3 { font-size: 17px; }
+@media (max-width: 600px) { .dhead > button.primary { padding: 0 12px; } }
+/* Manage pages: buttons and boxes keep 44 px on short tills too (the app's own shrink to 42). */
+.mdetail :is(button, select, input:not([type=checkbox]):not([type=color]):not([type=file]):not(.val)), .dhead .back, .sheet input:not([type=checkbox]) { min-height: 44px; }
+.mdetail .cat-tabs button { min-height: 44px; }
+.srow input[type=password] { width: 240px; min-width: 0; }
+@media (max-width: 700px) { .srow input[type=password] { width: 100%; } }
+/* Floor plan: the save bar sits in the floor row (in place of This floor / Delete floors), so it covers nothing. */
+.plan-bar > .savebar { position: static; margin: 0; min-height: 44px; padding: 0 0 0 14px; max-width: none; box-shadow: none; flex: 0 1 auto; animation: none; }
+.plan-bar > .savebar strong { flex: none; white-space: nowrap; }
+.plan-bar > .savebar button { min-height: 44px; }
+@media (max-width: 700px) { .plan-bar > .savebar { flex: 1 1 100%; } .plan-bar > .savebar strong { flex: 1; } }
+/* Pop-up editors (staff, menu): the same × as the sheets. */
+.modal-x.icon-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; display: grid; place-items: center; color: var(--muted); }
+.staff-form .srow.stacked .sseg { display: flex; }

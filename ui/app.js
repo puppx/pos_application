@@ -38,7 +38,7 @@ const app = document.getElementById('app');
 const state = {
   session: null, storeName: null, plan: { w: 1000, h: 700 },
   view: 'floor', floorId: null, orderId: null, returnTo: 'floor',
-  menu: null, cats: null, catId: null, planDirty: false,
+  menu: null, cats: null, catId: null, dirty: false,
 };
 const TYPE = { dine_in: 'Dine-in', takeaway: 'Takeaway', collection: 'Collection', delivery: 'Delivery' };
 const typeChip = (t) => h('span', { class: `chip type-${t}` }, TYPE[t]);
@@ -131,7 +131,7 @@ function applyTheme() {
     b.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
     b.setAttribute('aria-label', b.title);
   }
-  // E.g. the "Light or dark" card in Screen & devices shows the new choice.
+  // E.g. the Theme row in Devices & display shows the new choice.
   document.dispatchEvent(new Event('themechange'));
 }
 function setTheme(p) {
@@ -346,17 +346,20 @@ const act = (fn) => async (ev) => {
 };
 
 let refreshTimer;
+/// Put a page on screen. A first argument { action } is the page's one main
+/// button, in its header (Manage pages).
 function screen(...kids) {
   clearInterval(refreshTimer);
   closeInfoPop();
+  const action = kids[0] && !(kids[0] instanceof Node) && 'action' in kids[0] ? kids.shift().action : null;
   // Pages opened from Manage open inside it (managers and admins); staff get
   // their one page (Kitchen screen) with a way back to Manage.
   if (state.session && !state.orderId && inManage(state.view)) {
     const id = state.view, name = VIEWS.find(([v]) => v === id)?.[1];
-    if (useShell()) return manageScreen([dhead(id, name), ...kids]);
+    if (useShell()) return manageScreen([dhead(id, name, action), ...kids]);
     return setKids(app, h('div', { class: 'dhead staff-head' }, h('button', { class: 'ghost back show', onclick: () => go('settings') }, icon('back', 22), h('span', {}, 'Manage')), h('h2', {}, name)), ...kids);
   }
-  setKids(app, ...kids);
+  setKids(app, action, ...kids);
 }
 // Poll a live view (floor, open orders). Each refresh is well under 1 ms.
 function live(fn, ms = 10000) {
@@ -374,7 +377,7 @@ function forgetSession() {
     session: null, orderId: null, orderOpen: false, orderEmpty: null, view: 'floor', returnTo: 'floor', floorId: null,
     menu: null, cats: null, catId: null, subId: null, itemGroups: null, itemVariants: null, service: null, defaultTax: null,
     quickNotes: null, starterChoice: null, menuTab: null, menuShown: null, newSubOf: null, openEditor: null, settingsTab: null,
-    planDirty: false, day: null,
+    day: null,
   });
   resetManage();
 }
@@ -740,12 +743,13 @@ const HELP = {
   settings: ['Manage', [
     'Pick a page or a settings group in the list. Search finds a setting by name, like "printer", "tax" or "PIN".',
     'Switches and choices save at once: a ✓ shows next to them. Printers, the service charge and other settings with several parts open a panel with Save.',
+    'Lists (teams, delivery apps, the floor plan) keep changes in a bar at the bottom until you tap Save.',
     'Tap (i) next to a setting for a short explanation.']],
   menuAdmin: ['Menu', [
     'Tap + Menu item to add a dish: a name, a category and a price is enough.',
     'Tap any item to change it. More options holds tax, choices, extras and stock.',
     'Paste a menu copies a whole list from Excel or Google Sheets.']],
-  plan: ['Floor plan', ['Pick a floor at the top, or add one with + Floor. This floor renames or deletes it.', 'Add a square or round table, or an Area for things that are not tables (the bar, a window).', 'Drag shapes to move them. Tap one to change its name, shape, size or kind in the card on the right.', 'Tap Save layout when you are done.']],
+  plan: ['Floor plan', ['Pick a floor at the top, or add one with + Floor. This floor renames or deletes it.', 'Add a square or round table, or an Area for things that are not tables (the bar, a window).', 'Drag shapes to move them. Tap one to change its name, shape, size or kind in the card on the right.', 'Changes wait in the bar at the bottom: tap Save layout when you are done.']],
   users: ['Staff', ['Add each person with a name, a role and a PIN they log in with.', 'Staff sell; managers also see reports and history; admins change settings.']],
   customers: ['Customers', ['Find a saved customer by phone, name or postcode.', 'Tap one to change their details or see their recent orders.']],
   shift: ['Shift & cash', ['Start the shift with the float in the drawer.', 'Record money put in or taken out, and count the drawer at the end.']],
@@ -810,7 +814,7 @@ async function logOut(message = null) {
   hideIdleWarn();
   await dropEmptyOrder(state.orderId);
   try { await invoke('logout'); } catch { /* already logged out on the server */ }
-  Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null, planDirty: false });
+  Object.assign(state, { session: null, orderId: null, view: 'floor', menu: null, cats: null });
   resetManage();
   document.getElementById('bar').hidden = true;
   renderLogin();
@@ -818,12 +822,26 @@ async function logOut(message = null) {
 }
 
 document.getElementById('logout').onclick = act(async () => {
-  if (state.planDirty) return toast('Save or discard your floor plan changes first', true);
-  // A list with a save bar (e.g. Delivery apps): log out only once its changes are let go.
-  if (state.dirty && !await confirmDialog({ title: 'Discard your changes?', hint: 'They are not saved yet.', okLabel: 'Discard and log out',
-    okClass: 'danger solid', keepLabel: 'Keep editing', submit: () => {} })) return;
+  // A list or form with a save bar (Delivery apps, Teams, the floor plan, a staff member or
+  // customer being edited): log out only once its changes are let go.
+  if (state.dirty && !await discardDialog()) return;
   await logOut();
 });
+
+/// "Discard your changes?" before logging out: Keep editing is the big button. True = discard.
+function discardDialog() {
+  return new Promise((resolve) => {
+    const done = (v) => { state.onModalClose = null; closeModal(); resolve(v); };
+    showModal(h('h3', {}, 'Discard your changes?'), h('div', { class: 'stack confirm-hint' }, 'They are not saved yet.'),
+      h('button', { class: 'primary paybig', onclick: () => done(false) }, 'Keep editing'),
+      h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { class: 'danger-outline', onclick: () => done(true) }, 'Discard and log out')));
+    state.onModalClose = () => resolve(false);
+    document.removeEventListener('keydown', state.modalKeys);
+    state.modalKeys = (e) => { if (e.key === 'Escape') closeModal(); };
+    document.addEventListener('keydown', state.modalKeys);
+    document.querySelector('#modal .primary')?.focus();
+  });
+}
 
 // ---------- auto logout ----------
 
@@ -869,8 +887,8 @@ setInterval(() => {
   const mins = state.autoLogout ?? AUTO_LOGOUT_DEFAULT;
   if (!state.session || !mins) { idleWarned = false; return hideIdleWarn(); }
   // Never throw away an unsaved floor plan: wait until it is saved or discarded.
-  // The floor plan editor with unsaved changes, and the kitchen screen for staff, stay logged in.
-  if (state.planDirty || (state.view === 'kitchen' && !state.orderId && !isAdmin())) { lastActivity = Date.now(); return; }
+  // The floor plan editor with unsaved changes (its save bar holds), and the kitchen screen for staff, stay logged in.
+  if (state.dirty === 'hold' || (state.view === 'kitchen' && !state.orderId && !isAdmin())) { lastActivity = Date.now(); return; }
   const idle = Date.now() - lastActivity;
   const limit = mins * 60_000;
   // The warning never takes more than half the time.
@@ -2545,7 +2563,7 @@ async function renderHistory() {
   const date = h('input', { type: 'date', value: today() });
   const list = h('div');
   const span = h('div', { class: 'muted small history-span' });
-  const detail = h('div', { 'data-hint': 'Tap an order to see its details, reprint or void it.' });
+  const detail = h('div', { 'data-hint': 'Tap an order to see it' });
   // Quick dates follow the business day (header), which runs from the last
   // day close: "Today" is the open business day, so orders after midnight
   // before the day is closed are still today. "Yesterday" is the business
@@ -2611,9 +2629,9 @@ async function renderHistory() {
         h('td', {}, typeChip(o.order_type)), h('td', {}, where(o)), h('td', {}, h('span', { class: `status s-${o.status}` }, o.status)),
         h('td', { class: 'num' }, money(o.total_cents))))));
     if (more) list.prepend(h('div', { class: 'badge warn' }, `Showing the latest ${MAX} orders: pick one day to see the rest.`));
-    if (!orders.length) setKids(list, h('div', { class: 'empty small' }, icon('history', 36), h('p', {}, {
-      today: 'No closed orders yet in this business day.', yesterday: 'No closed orders in the previous business day.',
-      week: 'No closed orders in the last 7 days.', day: 'No closed orders on this day.' }[mode])));
+    if (!orders.length) setKids(list, emptyState({ icon: 'history', title: 'No orders', text: {
+      today: 'None closed yet this business day.', yesterday: 'None in the previous business day.',
+      week: 'None in the last 7 days.', day: 'None on this day.' }[mode] }));
   });
   async function show(id) {
     setKids(detail, orderDetail(await call('get_order', { id }), async (what) => {
@@ -2629,7 +2647,7 @@ async function renderHistory() {
   })), (ids) => deleteMany('order', ids, 'order(s)'), async () => { setKids(detail); await load(); });
   screen(h('div', { class: 'page split' },
     h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, quick, h('label', { class: 'field' }, 'Day', date), h('span', { class: 'grow' }),
-      isAdmin() && h('button', { class: 'danger-outline', onclick: bulk }, 'Delete several…')), span, h('div', { class: 'panel' }, list)),
+      isAdmin() && h('button', { onclick: bulk }, 'Select…')), span, h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, detail)));
   await load();
 }
@@ -2643,18 +2661,31 @@ function popupHost() {
   new MutationObserver(() => {
     const card = host.firstElementChild;
     if (card && !card.querySelector(':scope > .modal-x')) {
-      card.prepend(h('button', { class: 'modal-x ghost', title: 'Close (Esc)', onclick: () => setKids(host) }, '×'));
+      card.prepend(h('button', { class: 'modal-x ghost icon-btn', title: 'Close (Esc)', 'aria-label': 'Close', onclick: () => closePopup(host) }, icon('x')));
     }
   }).observe(host, { childList: true });
   if (!state.popupEscBound) {
     state.popupEscBound = true;
     document.addEventListener('keydown', (e) => {
       const open = [...document.querySelectorAll('.popup')].find((m) => m.firstChild);
-      if (e.key === 'Escape' && open && document.getElementById('modal').hidden) setKids(open);
+      if (e.key === 'Escape' && open && document.getElementById('modal').hidden) closePopup(open);
     });
   }
   return host;
 }
+
+/// Close a pop-up editor; with unsaved changes its save bar asks first (Discard changes?).
+function closePopup(host) {
+  const bar = host.querySelector('.savebar:not([hidden])');
+  if (state.dirty && bar?.ask) return bar.ask();
+  if (leaveOk()) setKids(host);
+}
+// Esc on a form with a save bar in a page (Customers): ask in the bar, as × does.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !state.dirty || !document.getElementById('modal').hidden || openPop) return;
+  const bar = document.querySelector('.mdetail .savebar.askable:not([hidden])');
+  if (bar && !bar.closest('.popup')) bar.ask(bar.closeTo);
+});
 
 async function renderMenuAdmin() {
   const [cats, groups, feed, allVariants, defaultTaxRaw, teams] = await Promise.all([
@@ -2740,7 +2771,7 @@ async function renderMenuAdmin() {
           variantsOf[p.id] ? h('div', { class: 'muted' }, variantsOf[p.id].map((v) => v.name).join(' / ')) : ''),
         h('td', {}, catById[p.category_id]?.name ?? '—'),
         teams.length > 0 && h('td', {}, teamById[p.team_id]?.name ?? '—'),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
           type: 'checkbox', checked: p.starter, title: 'Starter: sent to the kitchen first',
           onchange: act(async (e) => {
             await call('set_starter', { id: p.id, starter: e.target.checked });
@@ -2748,35 +2779,35 @@ async function renderMenuAdmin() {
             state.menu = null;
             toast(`${p.name}: ${p.starter ? 'starter' : 'not a starter'}`);
           }),
-        })),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+        }), h('span', {}))),
+        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
           type: 'checkbox', checked: p.prep, title: 'Prepare ahead: the kitchen gets a PREPARE NOW ticket while the mains wait',
           onchange: act(async (e) => {
             await call('set_prep', { id: p.id, prep: e.target.checked });
             p.prep = e.target.checked;
             toast(`${p.name}: ${p.prep ? 'prepared ahead' : 'not prepared ahead'}`);
           }),
-        })),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+        }), h('span', {}))),
+        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
           type: 'checkbox', checked: p.drink, title: 'Drink: goes straight away, on its own DRINKS ticket',
           onchange: act(async (e) => {
             await call('set_drink', { id: p.id, drink: e.target.checked });
             p.drink = e.target.checked;
             toast(`${p.name}: ${p.drink ? 'drink (own ticket)' : 'not a drink'}`);
           }),
-        })),
-        h('td', { onclick: (e) => e.stopPropagation() }, h('input', {
+        }), h('span', {}))),
+        h('td', { onclick: (e) => e.stopPropagation() }, h('label', { class: 'switch mini' }, h('input', {
           type: 'checkbox', checked: p.dessert, title: 'Dessert: printed on its own DESSERTS ticket',
           onchange: act(async (e) => {
             await call('set_dessert', { id: p.id, dessert: e.target.checked });
             p.dessert = e.target.checked;
             toast(`${p.name}: ${p.dessert ? 'dessert (own ticket)' : 'not a dessert'}`);
           }),
-        })),
+        }), h('span', {}))),
         h('td', { class: 'num' }, itemPrice(p, variantsOf[p.id])),
         h('td', { class: 'num' }, pct(p.tax_rate_bp)), h('td', { class: 'num' }, p.track_stock ? p.stock_qty : '—'))));
     setKids(list, table,
-      !products.length && h('div', { class: 'empty small' }, q ? 'No items match your search.' : 'No items here yet: tap "+ Menu item" to add one, or "Paste a menu" to add many.'),
+      !products.length && emptyState({ icon: 'menuAdmin', title: q ? 'Nothing found' : 'No items here yet', text: q ? 'Try another name.' : 'Add one with + Menu item, or many with Paste a menu.' }),
       canDrag && products.length > 1 && h('div', { class: 'muted small pad' }, 'Drag ⠿ to change the order items appear on the order screen.'));
     if (canDrag) sortable(table, { item: 'tr[data-id]', handle: '.grip', onDrop: act(async (ids) => { await call('reorder_products', { ids }); state.menu = null; toast('Order saved'); }) });
   });
@@ -2796,7 +2827,7 @@ async function renderMenuAdmin() {
       const sub = () => (parent.value ? catById[Number(parent.value)] : null);
       const draw = () => {
         const m = sub();
-        if (!m) return setKids(wrap, h('label', { class: 'check', title }, box, ` ${label}`));
+        if (!m) return setKids(wrap, h('label', { class: 'switch', title }, box, h('span', {}), `${label}`));
         const was = pick.value;
         setKids(pick, h('option', { value: 'inherit' }, `Same as main: ${m[key] ? 'on' : 'off'}`),
           h('option', { value: 'on' }, 'On'), h('option', { value: 'off' }, 'Off'));
@@ -2868,7 +2899,7 @@ async function renderMenuAdmin() {
     });
     name.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
     setKids(form, h('div', { class: 'card stack' }, h('h3', {}, c ? `Edit ${c.name}` : 'New category'),
-      h('div', { class: 'row' }, name, h('label', { class: 'field' }, 'Colour', color), c && h('label', { class: 'check' }, active, ' Active')),
+      h('div', { class: 'row' }, name, h('label', { class: 'field' }, 'Colour', color), c && h('label', { class: 'switch' }, active, h('span', {}), 'Active')),
       h('div', { class: 'field-col', style: 'display:flex;gap:4px' }, alt, h('div', { class: 'muted small' }, 'Printed next to the heading on kitchen tickets')),
       h('div', { class: 'muted' }, 'Defaults for new items added to this category:'),
       h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', tax), flags.map((f) => f.el)),
@@ -2878,7 +2909,7 @@ async function renderMenuAdmin() {
           : 'Pick one to make this a sub-category: on the order screen it shows as a button after you tap the main category.'),
         c && isMain(c) && h('button', { onclick: () => { state.newSubOf = c.id; editCategory(null); } }, '+ Sub-category here')),
       teams.length > 0 && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Kitchen team', team),
-        h('label', { class: 'check' }, moveItems, ' Also move the items already here to this team'),
+        h('label', { class: 'switch' }, moveItems, h('span', {}), 'Also move the items already here to this team'),
         h('span', { class: 'muted small' }, 'Each team gets its own ticket with its name as a big header.')),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: save }, 'Save'),
@@ -2890,7 +2921,7 @@ async function renderMenuAdmin() {
           state.menuTab = 'all';
           await changed();
         }))));
-    name.focus();
+    tapFocus(name);
   }
 
   // ---- option groups ----
@@ -2906,7 +2937,7 @@ async function renderMenuAdmin() {
       h('input', { value: r.alt, placeholder: 'Thai (optional)', lang: 'th', class: 'alt-input', oninput: (e) => (r.alt = e.target.value) }),
       h('input', { value: r.price, placeholder: '+0.00', style: 'width:90px', inputmode: 'decimal', oninput: (e) => (r.price = e.target.value) }),
       h('button', { class: 'danger', onclick: () => { rows.splice(i, 1); drawRows(); } }, '×'))));
-    const addRow = () => { rows.push({ id: null, name: '', alt: '', price: '' }); drawRows(); optList.lastChild.querySelector('input').focus(); };
+    const addRow = () => { rows.push({ id: null, name: '', alt: '', price: '' }); drawRows(); tapFocus(optList.lastChild.querySelector('input')); };
     const save = act(async () => {
       const args = { name: name.value, minSelect: parseInt(min.value, 10) || 0, maxSelect: parseInt(max.value, 10) || 1 };
       const options = rows.filter((r) => r.name.trim()).map((r) => ({ id: r.id, name: r.name, name_alt: r.alt.trim() || null, price_cents: parseSignedMoney(r.price) }));
@@ -2918,7 +2949,7 @@ async function renderMenuAdmin() {
     });
     setKids(form, h('div', { class: 'card stack' },
       h('h3', {}, g ? `Edit ${g.name}` : 'New option group'),
-      h('div', { class: 'row' }, name, g && h('label', { class: 'check' }, active, ' In use')),
+      h('div', { class: 'row' }, name, g && h('label', { class: 'switch' }, active, h('span', {}), 'In use')),
       h('div', { class: 'row' }, 'Customer must choose at least', min, 'and at most', max),
       h('div', { class: 'muted' }, 'Sizes: at least 1, at most 1. Extras: at least 0, at most e.g. 5. Prices are added to the item (use -1.00 for a cheaper option). ' +
         'Untick "In use" to hide it for now; Delete removes it from every item (past orders are not affected).'),
@@ -2932,7 +2963,7 @@ async function renderMenuAdmin() {
         }))));
     drawRows();
     if (!rows.length) addRow();
-    name.focus();
+    tapFocus(name);
   }
 
   // ---- 1, 3, 7, 9, 10, 11: the item editor ----
@@ -2992,11 +3023,11 @@ async function renderMenuAdmin() {
         h('input', { value: c.price, placeholder: 'Price', inputmode: 'decimal', style: 'width:100px', 'data-f': `choice${i}`, oninput: (e) => { c.price = e.target.value; preview(); } }),
         h('button', { class: 'danger', onclick: () => { choices.splice(i, 1); drawChoices(); preview(); } }, '×'))));
     };
-    const addChoice = () => { choices.push({ id: null, name: '', alt: '', price: '' }); drawChoices(); choiceList.lastChild.querySelector('input').focus(); };
+    const addChoice = () => { choices.push({ id: null, name: '', alt: '', price: '' }); drawChoices(); tapFocus(choiceList.lastChild.querySelector('input')); };
     drawChoices();
     const groupBoxes = activeGroups.map((g) => ({ g, box: h('input', { type: 'checkbox', checked: linked.has(g.id) }) }));
     const groupRow = h('div', { class: 'row' });
-    const drawGroups = () => setKids(groupRow, groupBoxes.map(({ g, box }) => h('label', { class: 'check' }, box, ` ${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))),
+    const drawGroups = () => setKids(groupRow, groupBoxes.map(({ g, box }) => h('label', { class: 'switch' }, box, h('span', {}), `${g.name} `, h('span', { class: 'muted' }, `(${groupRule(g)})`))),
       !groupBoxes.length && h('span', { class: 'muted' }, 'No option groups yet.'));
     drawGroups();
 
@@ -3027,7 +3058,7 @@ async function renderMenuAdmin() {
             toast(`${saved.name} created and ticked; Save the item to keep it`);
           }) }, 'Create group'),
           h('button', { onclick: () => setKids(newGroup) }, 'Cancel'))));
-      gname.focus();
+      tapFocus(gname);
     };
 
     // 10: live preview of the order-screen tile.
@@ -3114,19 +3145,19 @@ async function renderMenuAdmin() {
       h('summary', {}, 'More options', h('span', { class: 'muted' }, ' · tax, starter, drink, dessert, choices, extras, stock, codes')),
       h('div', { class: 'stack' },
         h('div', { class: 'row' }, h('label', { class: 'field' }, 'Tax %', f.tax), h('label', { class: 'field' }, 'Cost', f.cost),
-          h('label', { class: 'check' }, f.starter, ' Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)')),
-          h('label', { class: 'check' }, f.prep, ' Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)')),
-          h('label', { class: 'check' }, f.drink, ' Drink ', h('span', { class: 'muted' }, '(sent straight away, own DRINKS ticket)')),
-          h('label', { class: 'check' }, f.dessert, ' Dessert ', h('span', { class: 'muted' }, '(own DESSERTS ticket)')),
-          h('label', { class: 'check' }, f.setOnly, ' Only in set menus ', h('span', { class: 'muted' }, '(no tile of its own on the order screen)'))),
+          h('label', { class: 'switch' }, f.starter, h('span', {}), 'Starter ', h('span', { class: 'muted' }, '(sent to the kitchen first)')),
+          h('label', { class: 'switch' }, f.prep, h('span', {}), 'Prepare ahead ', h('span', { class: 'muted' }, '(kitchen gets it early while mains wait)')),
+          h('label', { class: 'switch' }, f.drink, h('span', {}), 'Drink ', h('span', { class: 'muted' }, '(sent straight away, own DRINKS ticket)')),
+          h('label', { class: 'switch' }, f.dessert, h('span', {}), 'Dessert ', h('span', { class: 'muted' }, '(own DESSERTS ticket)')),
+          h('label', { class: 'switch' }, f.setOnly, h('span', {}), 'Only in set menus ', h('span', { class: 'muted' }, '(no tile of its own on the order screen)'))),
         h('div', { class: 'stack' }, h('div', {}, h('strong', {}, 'Choices with their own price'), ' ', priceHint),
           h('div', { class: 'muted' }, 'For one item sold in versions, e.g. a soup with Chicken 6.50 / Beef 7.50. Staff pick one when ordering.'),
           choiceList, h('div', {}, h('button', { onclick: addChoice }, '+ Choice'))),
         h('div', { class: 'stack' }, h('strong', {}, 'Options (sizes, extras…)'), groupRow,
           h('div', {}, h('button', { onclick: openNewGroup }, '+ New option group')), newGroup),
         h('div', { class: 'row' }, f.barcode, f.sku),
-        h('div', { class: 'row' }, h('label', { class: 'check' }, f.track, ' Count stock (e.g. bottled drinks)'),
-          !p && h('label', { class: 'field' }, 'Opening stock', f.stock), p && h('label', { class: 'check' }, f.active, ' On the menu')),
+        h('div', { class: 'row' }, h('label', { class: 'switch' }, f.track, h('span', {}), 'Count stock (e.g. bottled drinks)'),
+          !p && h('label', { class: 'field' }, 'Opening stock', f.stock), p && h('label', { class: 'switch' }, f.active, h('span', {}), 'On the menu')),
         p && p.track_stock && h('div', { class: 'row' }, `Stock: ${p.stock_qty}`, delta, reason,
           h('button', { onclick: act(async () => {
             await call('adjust_stock', { id: p.id, delta: parseInt(delta.value, 10) || 0, reason: reason.value });
@@ -3157,7 +3188,7 @@ async function renderMenuAdmin() {
           toast(`${p.name} deleted`);
           await changed();
         }))));
-    (p ? f.name : f.name).focus();
+    tapFocus(f.name);
     if (!p) f.name.select();
   }
   // ---- set menus: price, sections (Starter, Main, Side...) and their dishes ----
@@ -3212,7 +3243,7 @@ async function renderMenuAdmin() {
       drawList();
       return h('div', { class: 'stack dish-picker' },
         h('div', { class: 'row' }, h('div', { class: 'searchbox grow' }, icon('search', 18), q),
-          rule && h('label', { class: 'check', title: 'Also list dishes that do not normally belong in this section' }, showAll, ' Show all dishes')),
+          rule && h('label', { class: 'switch', title: 'Also list dishes that do not normally belong in this section' }, showAll, h('span', {}), 'Show all dishes')),
         tabsEl, grid);
     };
     const draw = () => setKids(list, sections.map((sec, i) => {
@@ -3247,8 +3278,8 @@ async function renderMenuAdmin() {
           h('input', { value: sec.name, placeholder: 'Section, e.g. Main', oninput: (e) => (sec.name = e.target.value) }),
           h('input', { value: sec.alt, placeholder: 'Thai name', lang: 'th', oninput: (e) => (sec.alt = e.target.value) }),
           h('label', { class: 'field' }, 'Choose', pick),
-          h('label', { class: 'check', title: 'Goes to the kitchen with the starters; the rest waits for "Call mains"' },
-            h('input', { type: 'checkbox', checked: sec.starter, onchange: (e) => { sec.starter = e.target.checked; draw(); } }), ' Starter course'),
+          h('label', { class: 'switch', title: 'Goes to the kitchen with the starters; the rest waits for "Call mains"' },
+            h('input', { type: 'checkbox', checked: sec.starter, onchange: (e) => { sec.starter = e.target.checked; draw(); } }), h('span', {}), 'Starter course'),
           h('span', { class: 'sec-tools' }, h('button', { title: 'Move up', disabled: i === 0, onclick: () => { [sections[i - 1], sections[i]] = [sections[i], sections[i - 1]]; draw(); } }, '↑'),
           h('button', { title: 'Move down', disabled: i === sections.length - 1, onclick: () => { [sections[i + 1], sections[i]] = [sections[i], sections[i + 1]]; draw(); } }, '↓'),
           h('button', { class: 'danger', title: 'Remove this section', onclick: () => { sections.splice(i, 1); draw(); } }, '×'))),
@@ -3296,7 +3327,7 @@ async function renderMenuAdmin() {
       h('div', { class: 'row' }, h('div', { class: 'grow field-col' }, name), cat),
       h('div', { class: 'row' }, alt,
         h('label', { class: 'field' }, taxIncluded ? 'Price (tax included)' : 'Price (before tax)', h('span', { class: 'field-col' }, price)),
-        h('label', { class: 'field' }, 'Tax %', tax), p && h('label', { class: 'check' }, active, ' On the menu')),
+        h('label', { class: 'field' }, 'Tax %', tax), p && h('label', { class: 'switch' }, active, h('span', {}), 'On the menu')),
       h('div', { class: 'muted small' }, 'The bill shows only the set and its price. Each section\'s dishes go to the kitchen under the set\'s name; '
         + '"Starter course" sections go first on dine-in orders. Dishes with choices (e.g. chicken or beef) or options are fine: staff pick them with the dish; options with a price add to the set price.'),
       list,
@@ -3310,7 +3341,7 @@ async function renderMenuAdmin() {
           toast(`${p.name} deleted`);
           await changed();
         }))));
-    name.focus();
+    tapFocus(name);
   }
 
   state.openEditor = editProduct;
@@ -3358,7 +3389,7 @@ async function renderMenuAdmin() {
         'Missing categories are created; each item gets its category\'s tax and starter defaults. Check the preview, then import.'),
       text, out));
     parse();
-    text.focus();
+    tapFocus(text);
   }
 
   // ---- 8: category tabs + drag to reorder categories ----
@@ -3409,10 +3440,10 @@ async function renderMenuAdmin() {
         h('button', { onclick: act(() => editSet(null)) }, icon('plus', 18), 'Set menu'),
         h('button', { onclick: pasteImport }, 'Paste a menu'),
         h('div', { class: 'searchbox grow' }, icon('search', 18), search),
-        h('label', { class: 'check' }, showInactive, ' Show removed'),
-        isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete menu items', (state.menuShown ?? []).map((p) => ({
+        h('label', { class: 'switch' }, showInactive, h('span', {}), 'Show removed'),
+        isAdmin() && h('button', { onclick: () => bulkDelete('Delete menu items', (state.menuShown ?? []).map((p) => ({
           id: p.id, label: p.name, sub: [catById[p.category_id]?.name, money(p.price_cents)].filter(Boolean).join(' · '),
-        })), (ids) => deleteMany('product', ids, 'item(s)'), () => changed()) }, 'Delete several…')),
+        })), (ids) => deleteMany('product', ids, 'item(s)'), () => changed()) }, 'Select…')),
       h('div', { class: 'panel' }, list)),
     form));
   await loadProducts();
@@ -3441,8 +3472,8 @@ function splitCsv(line) {
 async function renderPlan() {
   const floors = await call('list_floors');
   if (!floors.some((f) => f.id === state.floorId)) state.floorId = floors[0]?.id ?? null;
-  // Changes on this floor must be saved or discarded before going elsewhere.
-  const busy = () => { if (state.planDirty) { toast('Save or discard changes on this floor first', true); return true; } return false; };
+  // Changes on this floor must be saved or discarded before going elsewhere (the save bar).
+  const busy = () => !leaveOk();
   const newFloor = () => {
     if (busy()) return;
     const name = h('input', { placeholder: 'e.g. Ground floor, Terrace', 'aria-label': 'Floor name' });
@@ -3455,12 +3486,12 @@ async function renderPlan() {
     name.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(e); });
     showModal(h('h3', {}, 'New floor'), name,
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: add }, 'Add floor'), h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Cancel')));
-    name.focus();
+    tapFocus(name);
   };
+  state.dirty = false;
   if (!floors.length) {
-    return screen(h('div', { class: 'page narrow card stack' },
-      h('h3', {}, 'Floor plan'), h('p', { class: 'muted' }, 'Create your first floor (for example "Ground floor"), then add tables to it.'),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: newFloor }, icon('plus', 18), 'Add a floor'))));
+    return screen(h('div', { class: 'page' }, h('div', { class: 'sgroup' }, emptyState({ icon: 'plan', title: 'No floors yet', text: 'Add a floor, e.g. Ground floor, then its tables.',
+      action: h('button', { class: 'primary', onclick: newFloor }, icon('plus', 18), 'Add a floor') }))));
   }
   const floor = floors.find((f) => f.id === state.floorId);
   const { w: PW, h: PH } = state.plan;
@@ -3470,15 +3501,13 @@ async function renderPlan() {
   const plan = planBox(250);
   plan.classList.add('edit');
   const panel = h('div', { class: 'plan-side' });
-  // One Save and one Discard, in the tool row above the plan.
-  const saveBtn = h('button', { class: 'primary', onclick: act(save) });
-  const discardBtn = h('button', { onclick: () => { setDirty(false); renderPlan(); } }, 'Discard');
-  const setDirty = (d) => {
-    state.planDirty = d;
-    saveBtn.textContent = d ? 'Save layout •' : 'Saved';
-    saveBtn.disabled = !d;
-    discardBtn.disabled = !d;
-  };
+  // Changes wait in the save bar under the plan: "Layout changed · Discard · Save layout".
+  const bar = saveBar({ text: 'Layout changed', saveLabel: 'Save layout', hold: true, onSave: () => save(), onDiscard: () => setTimeout(renderPlan) });
+  const floorTools = [];
+  const setDirty = (d) => bar.update(d ? 1 : 0);
+  // While the bar shows (it holds Discard and Save layout), This floor and Delete floors make room.
+  const observeBar = new MutationObserver(() => { for (const b of floorTools) if (b) b.hidden = !bar.hidden; });
+  observeBar.observe(bar, { attributes: true, attributeFilter: ['hidden'] });
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const snap = (v) => Math.round(v / SNAP) * SNAP;
 
@@ -3541,51 +3570,36 @@ async function renderPlan() {
   function drawPanel() {
     if (!sel) {
       const n = tables.filter((t) => t.is_table !== false).length;
-      setKids(panel, h('div', { class: 'card stack plan-empty' },
-        icon('plan', 36), h('strong', {}, 'Tap a table to change it'),
-        h('div', { class: 'muted small' }, 'Drag tables to move them. Tap one to rename it, change its shape or size, or mark it as not a table.'),
-        h('div', { class: 'muted small' }, `${floor.name}: ${n} table${n === 1 ? '' : 's'}${tables.length > n ? ` and ${tables.length - n} other shape${tables.length - n === 1 ? '' : 's'}` : ''}.`)));
+      setKids(panel, h('div', { class: 'sgroup plan-empty' }, emptyState({ icon: 'plan', title: 'Tap a table to change it',
+        text: `Drag to move. ${floor.name}: ${n} table${n === 1 ? '' : 's'}${tables.length > n ? `, ${tables.length - n} other` : ''}.` })));
       return;
     }
     const t = sel;
-    const name = h('input', { value: t.name, 'aria-label': 'Name' });
-    const shape = segmented([['rect', 'Square'], ['round', 'Round']], t.shape, (v) => { t.shape = v; apply(); drawPanel(); });
-    const w = h('input', { type: 'number', value: t.w, step: SNAP, min: 30, max: 400, 'aria-label': 'Width' });
-    const hh = h('input', { type: 'number', value: t.h, step: SNAP, min: 30, max: 400, 'aria-label': 'Depth' });
+    const name = h('input', { value: t.name, maxlength: 20, 'aria-label': 'Name' });
     const label = () => (t.is_table === false ? t.name : `Table ${t.name}`);
     const title = h('h3', {}, label());
-    // Off: a shape that only shows where something is (the bar, a window, the door).
-    const isTable = h('input', { type: 'checkbox', checked: t.is_table !== false });
-    const kindHint = h('div', { class: 'muted small' });
-    const drawKind = () => { kindHint.textContent = isTable.checked
-      ? 'Takes orders and is counted on the Tables screen.'
-      : 'Only shows where something is (bar, window, door). It never takes an order and is not counted.'; };
-    drawKind();
     // Applied as soon as something is typed or picked, so Save can be tapped straight away.
     const apply = () => {
       t.name = name.value.trim() || t.name;
-      const size = (el, old) => { const v = Number(el.value); return v >= 30 ? clamp(snap(v), 30, 400) : old; };
-      t.w = size(w, t.w);
-      t.h = size(hh, t.h);
       t.x = clamp(t.x, 0, PW - t.w);
       t.y = clamp(t.y, 0, PH - t.h);
       title.textContent = label();
       setDirty(true);
       drawTables();
     };
-    isTable.addEventListener('change', () => { t.is_table = isTable.checked; drawKind(); apply(); });
-    [name, w, hh].forEach((el) => el.addEventListener('input', apply));
-    setKids(panel, h('div', { class: 'card stack plan-card' },
-      h('div', { class: 'row nowrap' }, title, h('span', { class: 'grow' }),
+    name.addEventListener('input', apply);
+    const size = (key, lbl) => srow({ label: lbl, ctl: stepper({ value: t[key], min: 30, max: 400, step: SNAP, label: lbl, onChange: (v) => { t[key] = clamp(snap(v), 30, 400); apply(); } }) });
+    // Off: a shape that only shows where something is (the bar, a window, the door).
+    const kind = switchRow({ label: 'This is a table', hint: (v) => (v ? 'Counted on Tables' : 'Only shows a place'), value: t.is_table !== false,
+      onChange: (v) => { t.is_table = v; apply(); } });
+    setKids(panel, h('div', { class: 'plan-card' },
+      h('div', { class: 'plan-card-head' }, title,
         h('button', { class: 'icon-btn ghost', title: 'Done', 'aria-label': 'Done', onclick: () => { sel = null; draw(); } }, icon('x', 20))),
-      h('div', { class: 'edit-field' }, h('label', {}, 'Name'), name),
-      h('div', { class: 'edit-field' }, h('label', {}, 'Shape'), shape),
-      h('div', { class: 'plan-size' },
-        h('div', { class: 'edit-field' }, h('label', {}, 'Width'), w),
-        h('div', { class: 'edit-field' }, h('label', {}, 'Depth'), hh)),
-      h('label', { class: 'switch' }, isTable, h('span', {}), 'This is a table'),
-      kindHint,
-      h('div', { class: 'row plan-card-actions' },
+      h('div', { class: 'sgroup' },
+        srow({ label: 'Name', cls: 'text-row', ctl: name }),
+        srow({ label: 'Shape', ctl: sseg([['rect', 'Square'], ['round', 'Round']], t.shape, (v) => { t.shape = v; apply(); }, 'Shape') }),
+        size('w', 'Width'), size('h', 'Depth'), kind),
+      h('div', { class: 'plan-card-actions' },
         h('button', { onclick: () => { const c = { ...t, id: null, name: nextName(t.is_table === false ? 'Area ' : 'T'), ...freeSpot(t.w, t.h) }; tables.push(c); sel = c; setDirty(true); draw(); } }, 'Duplicate'),
         h('button', { class: 'danger', onclick: () => { tables = tables.filter((x) => x !== t); sel = null; setDirty(true); draw(); } }, 'Remove'))));
   }
@@ -3615,20 +3629,19 @@ async function renderPlan() {
     const selName = sel?.name;
     tables = saved;
     sel = tables.find((t) => t.name === selName) ?? null;
-    setDirty(false);
     draw();
     toast('Floor plan saved');
   }
 
-  setDirty(false);
   // Floors across the top, the tools under them, then the plan with its card at the side.
   screen(h('div', { class: 'page plan-page' },
     h('div', { class: 'plan-bar' },
       segmented(floors.map((f) => [f.id, f.name]), floor.id, (id) => { if (busy()) return; state.floorId = id; renderPlan(); }),
       h('button', { onclick: newFloor }, icon('plus', 18), 'Floor'),
       h('span', { class: 'grow' }),
-      h('button', { onclick: floorSettings }, icon('settings', 18), 'This floor'),
-      isAdmin() && floors.length > 1 && h('button', { class: 'danger-outline', onclick: () => {
+      bar,
+      floorTools[0] = h('button', { onclick: floorSettings }, icon('settings', 18), 'This floor'),
+      floorTools[1] = isAdmin() && floors.length > 1 && h('button', { class: 'danger-outline', onclick: () => {
         if (busy()) return;
         bulkDelete('Delete floors', floors.map((f) => ({ id: f.id, label: f.name })),
           (ids) => deleteMany('floor', ids, 'floor(s)'), () => { setDirty(false); state.floorId = null; return renderPlan(); });
@@ -3636,9 +3649,7 @@ async function renderPlan() {
     h('div', { class: 'plan-tools' },
       h('button', { onclick: addShape('rect') }, h('span', { class: 'shape-ico sq' }), 'Square table'),
       h('button', { onclick: addShape('round') }, h('span', { class: 'shape-ico rd' }), 'Round table'),
-      h('button', { onclick: addShape('rect', false) }, h('span', { class: 'shape-ico area' }), 'Area (not a table)'),
-      h('span', { class: 'grow' }),
-      discardBtn, saveBtn),
+      h('button', { onclick: addShape('rect', false) }, h('span', { class: 'shape-ico area' }), 'Area (not a table)')),
     h('div', { class: 'plan-editor' }, plan, panel)));
   draw();
 }
@@ -3646,24 +3657,24 @@ async function renderPlan() {
 // ---------- users (admin) ----------
 
 async function renderUsers() {
+  state.dirty = false;
   const list = h('div');
   const form = popupHost();
   const load = async () => {
     const users = await call('list_users');
     setKids(list, h('table', {},
-      h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Role'), h('th', {}, 'Status'), h('th', {}, 'Last login')),
-      users.map((u) => h('tr', { class: 'click', onclick: () => edit(u) },
+      h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Role'), h('th', {}, 'Login'), h('th', {}, 'Last login')),
+      users.map((u) => h('tr', { class: 'click', onclick: () => { if (leaveOk()) edit(u); } },
         h('td', {}, h('span', { class: 'row nowrap' }, h('span', { class: 'avatar sm' }, initials(u.name)), u.name)),
         h('td', {}, h('span', { class: `chip ${u.role === 'staff' ? '' : 'info'}` }, ROLE_LABEL[u.role] ?? 'Staff')),
-        h('td', {}, h('span', { class: `status ${u.active ? 's-paid' : 's-cancelled'}` }, u.active ? 'active' : 'disabled')),
+        h('td', {}, h('span', { class: `pill ${u.active ? 'ok' : ''}` }, u.active ? 'Can log in' : 'Off')),
         h('td', {}, u.last_login_at ? fmtTime(u.last_login_at) : '—')))));
   };
   function edit(u) {
     const name = h('input', { value: u?.name ?? '', placeholder: 'Name' });
-    const role = h('select', { title: 'Staff: take orders and payments. Manager: also the menu, floor plan, voids, reports and kitchen settings (cannot delete or manage staff). Admin: everything.' },
-      h('option', { value: 'staff' }, 'Staff'), h('option', { value: 'manager' }, 'Manager'), h('option', { value: 'admin' }, 'Admin'));
-    role.value = u?.role ?? 'staff';
-    const active = h('input', { type: 'checkbox', checked: u ? u.active : true });
+    const ROLE_HINT = { staff: 'Takes orders and payments', manager: 'Also menu, reports, voids and kitchen settings', admin: 'Everything' };
+    const role = sseg([['staff', 'Staff'], ['manager', 'Manager'], ['admin', 'Admin']], u?.role ?? 'staff', (v) => { setHint(roleRow, ROLE_HINT[v]); bar.update(1); }, 'Role');
+    const roleRow = srow({ label: 'Role', hint: ROLE_HINT[u?.role ?? 'staff'], stacked: true, ctl: role });
     const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: u ? 'New PIN (optional)' : 'PIN (4-8 digits)' });
     for (const el of [name, pin]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
     // Shared PINs are allowed, but say so before saving.
@@ -3680,31 +3691,35 @@ async function renderUsers() {
         shared.textContent = names.length ? `${names.join(', ')} already ${names.length > 1 ? 'use' : 'uses'} this PIN. Better give each person their own: when someone else types a shared PIN to approve, it counts as the lowest role among them.` : '';
       }, 200);
     });
-    const save = act(async () => {
+    const saveIt = async () => {
       if (u) {
-        await call('update_user', { id: u.id, name: name.value, role: role.value, active: active.checked });
-        if (pin.value) await call('reset_pin', { id: u.id, pin: pin.value });
+        await call('update_user', { id: u.id, name: name.value, role: role.value(), active: active.input.checked }, { quiet: true });
+        if (pin.value) await call('reset_pin', { id: u.id, pin: pin.value }, { quiet: true });
       } else {
-        await call('create_user', { name: name.value, role: role.value, pin: pin.value });
+        await call('create_user', { name: name.value, role: role.value(), pin: pin.value }, { quiet: true });
       }
       toast('Saved');
+      bar.update(0);
       setKids(form);
       await start(); // own role/name may have changed
-    });
-    setKids(form, h('div', { class: 'card stack' },
+    };
+    const save = act(saveIt);
+    // Unsaved changes: the save bar, and Manage keeps you here until they are saved or let go.
+    const bar = saveBar({ text: 'Not saved yet', onSave: saveIt, onDiscard: () => setTimeout(() => setKids(form)) });
+    const active = switchRow({ label: 'Can log in', value: u ? u.active : true, onChange: () => bar.update(1) });
+    const card = h('div', { class: 'card stack staff-form' },
       h('h3', {}, u ? `Edit ${u.name}` : 'New staff member'),
       h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, 'Name', name),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Role', role), u && h('label', { class: 'check' }, active, ' Active')),
+      h('div', { class: 'sgroup' }, roleRow, u && active),
       h('label', { class: 'field-col', style: 'display:flex;gap:4px' }, u ? 'New PIN' : 'PIN', pin,
         h('span', { class: 'muted small' }, u ? 'Leave empty to keep the current PIN.' : '4 to 8 digits; used to log in.'), shared),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Save'), h('button', { onclick: () => setKids(form) }, 'Cancel'))));
-    name.focus();
+      bar);
+    card.addEventListener('input', () => bar.update(1));
+    setKids(form, card);
+    tapFocus(name);
   }
-  screen(h('div', { class: 'page' },
-    h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Staff member'),
-      h('span', { class: 'muted' }, 'Tap a staff member to edit them or reset their PIN.')),
-      h('div', { class: 'panel' }, list)),
-    form));
+  screen({ action: h('button', { class: 'primary', onclick: () => { if (leaveOk()) edit(null); } }, icon('plus', 18), 'Staff member') }, h('div', { class: 'page' },
+    h('div', { class: 'panel' }, list), form));
   await load();
 }
 
@@ -3858,10 +3873,10 @@ async function renderShift(shown = null) {
   let main;
   if (!cur) {
     const float = moneyIn('e.g. 100');
-    main = h('div', { class: 'card stack' },
-      h('h3', {}, 'No shift open'),
-      h('div', { class: 'muted' }, 'Count the cash in the drawer (the float) and open the shift. At the end, count again: the POS shows if anything is missing.'),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Cash in the drawer now', float),
+    main = h('div', { class: 'card stack shift-start' },
+      h('h3', {}, 'Start a shift'),
+      h('div', { class: 'muted' }, 'Count the float first.'),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Cash in the drawer', float),
         h('button', { class: 'primary lg', onclick: act(async () => {
           const c = cents(float);
           if (c == null) return toast('Enter the cash in the drawer (0 if empty)', true);
@@ -3883,7 +3898,7 @@ async function renderShift(shown = null) {
             toast(`${kind === 'in' ? 'Money in' : 'Money out'}: ${money(c)}` + (r.print.error ? ` (drawer did not open: ${r.print.error})` : ''));
             renderShift();
           }) }, 'Save'), h('button', { onclick: () => setKids(box) }, 'Cancel'))));
-      amt.focus();
+      tapFocus(amt);
     };
     const count = moneyIn('Counted');
     const note = h('input', { placeholder: 'Note (optional)', style: 'flex:1' });
@@ -3926,13 +3941,15 @@ async function renderShift(shown = null) {
   }
   const closed = past.filter((p) => p.shift.closed_at);
   screen(h('div', { class: 'page' }, main,
-    closed.length > 0 && h('div', { class: 'card stack' }, h('h3', {}, 'Past shifts'), h('table', {},
-      closed.map((p) => h('tr', {},
-        h('td', {}, `${fmtTime(p.shift.opened_at)} – ${fmtTime(p.shift.closed_at)}`), h('td', { class: 'muted' }, p.shift.closed_by_name),
-        h('td', { class: 'num' }, `expected ${money(p.shift.expected_cents)}`),
-        h('td', { class: `num ${p.shift.difference_cents < 0 ? 'short' : ''}` }, p.shift.difference_cents === 0 ? 'OK' : `${p.shift.difference_cents < 0 ? 'short' : 'over'} ${money(Math.abs(p.shift.difference_cents))}`),
-        h('td', {}, h('button', { onclick: () => { report.textContent = p.text; report.hidden = false; } }, 'View'),
-          h('button', { onclick: act(async () => printResult(await call('print_shift', { id: p.shift.id }), 'Shift report printed')) }, 'Print')))))),
+    closed.length > 0 && ssec('Past shifts', closed.map((p) => {
+      const d = p.shift.difference_cents;
+      const t = (x) => new Date(x * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return srow({ id: `shift${p.shift.id}`, label: friendlyTime(p.shift.opened_at), cls: 'brow',
+        hint: `to ${t(p.shift.closed_at)} · ${p.shift.closed_by_name} · Expected ${money(p.shift.expected_cents)}`,
+        ctl: [h('span', { class: `pill ${d === 0 ? 'ok' : d < 0 ? 'bad' : 'plain'}` }, d === 0 ? 'Exactly right' : `${d < 0 ? 'Short' : 'Over'} ${money(Math.abs(d))}`),
+          moreMenu('this shift', () => [h('button', { onclick: () => { report.textContent = p.text; report.hidden = false; report.scrollIntoView({ block: 'nearest' }); } }, 'View'),
+            h('button', { onclick: act(async () => printResult(await call('print_shift', { id: p.shift.id }), 'Shift report printed')) }, 'Print')])] });
+    })),
     report));
 }
 
@@ -4019,9 +4036,10 @@ async function renderReports() {
 // ---------- customers ----------
 
 async function renderCustomers() {
-  const q = h('input', { placeholder: 'Search: phone, name or postcode', style: 'flex:1' });
+  state.dirty = false;
+  const q = h('input', { placeholder: 'Phone, name or postcode', 'aria-label': 'Search customers', style: 'flex:1' });
   const list = h('div');
-  const panel = h('div', { 'data-hint': 'Find a customer to edit them, see their orders or start a new order.' });
+  const panel = h('div', { 'data-hint': 'Tap a customer to see them' });
   let timer;
   let found = [];
   const load = async () => {
@@ -4031,42 +4049,51 @@ async function renderCustomers() {
       found.map((c) => h('tr', { class: 'click', onclick: () => edit(c) },
         h('td', {}, c.name), h('td', {}, c.phone ?? ''), h('td', { class: 'muted' }, addressText(c)),
         h('td', { class: 'num' }, c.order_count))))
-      : h('div', { class: 'empty small' }, icon('customers', 36), h('p', {}, q.value ? 'No customers match.' : 'No saved customers yet. They are added when you take delivery or collection orders, or with + Customer.')));
+      : emptyState({ icon: 'customers', title: q.value ? 'Nothing found' : 'No saved customers', text: q.value ? 'Try a phone number or postcode.' : 'They are added with delivery and collection orders.' }));
   };
   q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => load().catch(() => {}), 150); });
 
   async function edit(c) {
+    if (!leaveOk()) return;
     const ce = customerEditor({ customer: c, search: false, saveToggle: false });
     const history = h('div');
     const orderFor = (type) => act(async () => {
       await ce.commit(true);
+      bar.update(0);
       await startCustomerOrder(type, ce, null);
     });
+    // Typed changes: the save bar (and Manage keeps you here until saved or let go).
+    const bar = saveBar({ text: 'Not saved yet', onSave: async () => { const saved = await ce.commit(true); toast('Saved'); bar.update(0); await load(); await edit(saved); },
+      onDiscard: () => setTimeout(() => (c ? edit(c) : setKids(panel))) });
+    ce.el.addEventListener('input', () => bar.update(1));
+    bar.classList.add('askable');
+    bar.closeTo = () => setKids(panel);
+    const close = () => (state.dirty ? bar.ask(bar.closeTo) : setKids(panel));
     setKids(panel, h('div', { class: 'card stack' },
-      h('h3', {}, c ? c.name : 'New customer'), ce.el,
+      h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, c ? c.name : 'New customer'),
+        h('button', { class: 'ghost icon-btn', title: 'Close (Esc)', 'aria-label': 'Close', onclick: close }, icon('x'))),
+      ce.el, bar,
       h('div', { class: 'row' },
-        h('button', { class: 'primary', onclick: act(async () => { const saved = await ce.commit(true); toast('Saved'); await load(); await edit(saved); }) }, 'Save'),
-        typeShown('delivery') && h('button', { onclick: orderFor('delivery') }, 'New delivery order'),
-        typeShown('collection') && h('button', { onclick: orderFor('collection') }, 'New collection order'),
-        c && isAdmin() && h('button', { class: 'danger', onclick: act(async () => {
-          await call('delete_customer', { id: c.id }); toast('Customer removed'); setKids(panel); await load();
-        }) }, 'Delete')),
+        c && typeShown('delivery') && h('button', { onclick: orderFor('delivery') }, 'New delivery order'),
+        c && typeShown('collection') && h('button', { onclick: orderFor('collection') }, 'New collection order'),
+        c && isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => {
+          await call('delete_customer', { id: c.id }); bar.update(0); toast('Customer removed'); setKids(panel); await load();
+        }, 'danger')),
       history));
     if (c) {
       const orders = await call('customer_orders', { id: c.id });
       setKids(history, orders.length ? h('div', { class: 'stack' }, h('strong', {}, 'Recent orders'), h('table', {},
-        orders.map((o) => h('tr', { class: 'click', onclick: () => openOrder(o.id) },
+        orders.map((o) => h('tr', { class: 'click', onclick: () => { if (leaveOk()) openOrder(o.id); } },
           h('td', {}, `#${o.id}`), h('td', {}, fmtTime(o.opened_at)), h('td', {}, TYPE[o.order_type]),
           h('td', {}, o.status), h('td', { class: 'num' }, money(o.total_cents)))))) : '');
     }
-    if (!c) ce.focus();
+    if (!c) { ce.focus(); tapFocus(document.activeElement); }
   }
 
-  screen(h('div', { class: 'page split' },
+  screen({ action: h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Customer') }, h('div', { class: 'page split' },
     h('div', { class: 'stack' }, h('div', { class: 'toolbar' }, h('div', { class: 'searchbox grow' }, icon('search', 20), q),
-      isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete customers', found.map((c) => ({ id: c.id, label: c.name, sub: c.phone ?? '' })),
-        (ids) => deleteMany('customer', ids, 'customer(s)'), async () => { setKids(panel); await load(); }) }, 'Delete several…'),
-      h('button', { class: 'primary', onclick: () => edit(null) }, icon('plus', 18), 'Customer')), h('div', { class: 'panel' }, list)),
+      isAdmin() && h('button', { onclick: () => bulkDelete('Delete customers', found.map((c) => ({ id: c.id, label: c.name, sub: c.phone ?? '' })),
+        (ids) => deleteMany('customer', ids, 'customer(s)'), async () => { if (!state.dirty) setKids(panel); await load(); }) }, 'Select…')), h('div', { class: 'panel' }, list)),
     h('div', { class: 'stack sticky' }, panel)));
   await load();
   q.focus();
@@ -4076,182 +4103,73 @@ async function renderCustomers() {
 /// Thai test page so "the one marked 2" is the one to pick. Standard is the default.
 const IMAGE_MODES = [['column', '1. Compatible (older printers)'], ['raster_small', '2. Small pieces'], ['raster', '3. Standard (default)']];
 
-/// Settings card: defaults for new menu items.
-function menuDefaultsCard() {
-  const tax = h('input', { inputmode: 'decimal', style: 'width:90px', placeholder: '0' });
-  const fill = h('input', { type: 'checkbox', checked: true });
-  const incl = h('input', { type: 'checkbox', checked: true });
-  invoke('get_setting', { key: 'prices_include_tax' }).then((v) => (incl.checked = v !== '0')).catch(() => {});
-  incl.onchange = act(async () => {
-    await call('set_setting', { key: 'prices_include_tax', value: incl.checked ? '1' : '0' });
-    state.menu = null;
-    toast(incl.checked ? 'New orders: menu prices include the tax' : 'New orders: tax is added on top of menu prices');
-  });
-  const untaxed = h('span', { class: 'muted' });
-  const count = () => invoke('untaxed_items').then((n) => {
-    untaxed.textContent = n ? `(${n} item${n === 1 ? '' : 's'} at 0% now)` : '';
-  }).catch(() => {});
-  invoke('get_setting', { key: 'default_tax_bp' }).then((v) => (tax.value = v ? pct(Number(v)) : '')).catch(() => {});
-  count();
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Menu defaults'),
-    h('label', { class: 'switch' }, incl, h('span', {}, ''), 'Menu prices include tax'),
-    h('div', { class: 'muted' }, 'On: the price on the menu is what the customer pays and the tax is worked out inside it (10.00 at 20% = 8.33 + 1.67 tax). ' +
-      'Off: the tax is added on top (10.00 + 2.00 = 12.00). Orders already open keep the way they were rung up.'),
-    h('div', { class: 'muted' }, 'Tax rate for menu items (e.g. 20 for 20% VAT). A category can use its own rate instead (Menu → tap the category); ' +
-      'set a category to 0% for items that are really tax-free.'),
-    h('div', { class: 'row' }, h('label', { class: 'field' }, 'Default tax', tax, '%'),
-      h('button', { class: 'primary', onclick: act(async () => {
-        const v = Number((tax.value || '0').replace(',', '.').replace('%', ''));
-        if (!Number.isFinite(v) || v < 0 || v > 100) return toast('Enter a tax rate from 0 to 100', true);
-        await call('set_setting', { key: 'default_tax_bp', value: String(Math.round(v * 100)) });
-        const n = fill.checked ? await call('apply_default_tax') : 0;
-        state.menu = null;
-        toast(n ? `Default tax ${v}% saved and applied to ${n} item${n === 1 ? '' : 's'} that had 0%` : `Default tax ${v}% saved`);
-        count();
-      }) }, 'Save')),
-    h('label', { class: 'check' }, fill, ' Also apply it to existing items that are at 0% ', untaxed));
-}
+// ---------- Settings: Devices & display ----------
 
-/// Settings card: kitchen teams (a separate ticket with a big header for each).
-function teamsCard() {
-  const on = h('input', { type: 'checkbox', checked: true });
-  invoke('get_setting', { key: 'teams_on' }).then((v) => { on.checked = v !== '0'; body.hidden = !on.checked; }).catch(() => {});
-  on.onchange = act(async () => {
-    await call('set_setting', { key: 'teams_on', value: on.checked ? '1' : '0' });
-    body.hidden = !on.checked;
-    toast(on.checked ? 'Kitchen teams on' : 'Kitchen teams off: tickets print without team headers (your teams are kept)');
-  });
-  const split = h('input', { type: 'checkbox', checked: true });
-  invoke('get_setting', { key: 'teams_split' }).then((v) => (split.checked = v !== '0')).catch(() => {});
-  split.onchange = act(async () => {
-    await call('set_setting', { key: 'teams_split', value: split.checked ? '1' : '0' });
-    toast(split.checked ? 'Each team gets its own ticket' : 'One ticket for the whole kitchen');
-  });
-  let rows = [];
-  const list = h('div', { class: 'stack' });
-  const draw = () => setKids(list, rows.map((r, i) => h('div', { class: 'row team-row', 'data-team': i },
-    h('input', { value: r.name, placeholder: 'Team name, e.g. Curry', style: 'width:180px', oninput: (e) => (r.name = e.target.value) }),
-    h('input', { value: r.name_alt ?? '', placeholder: 'Thai, e.g. แกง', lang: 'th', class: 'alt-input', oninput: (e) => (r.name_alt = e.target.value) }),
-    r.items != null && h('span', { class: 'muted small' }, `${r.items} item${r.items === 1 ? '' : 's'}`),
-    h('button', { title: 'Move up', disabled: i === 0, onclick: () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); } }, '↑'),
-    h('button', { title: 'Move down', disabled: i === rows.length - 1, onclick: () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; draw(); } }, '↓'),
-    h('button', { class: 'danger', title: 'Remove this team', onclick: () => { rows.splice(i, 1); draw(); } }, '×'))),
-    !rows.length && h('div', { class: 'muted' }, 'No teams: the kitchen gets one ticket.'));
-  const load = () => invoke('list_teams').then((t) => { rows = t.map((x) => ({ ...x })); draw(); }).catch((e) => toast(String(e?.message ?? e), true));
-  load();
-  // Everything below the main switch hides while teams are off.
-  const body = h('div', { class: 'stack' });
-  const card = h('div', { class: 'card stack' },
-    h('h3', {}, 'Kitchen teams'),
-    h('label', { class: 'switch' }, on, h('span', {}, ''), 'Use kitchen teams'),
-    body);
-  // Language of the team's bar on tickets (setting team_names).
-  const lang = h('select', {}, [['both', 'English / Thai'], ['english', 'English only'], ['thai', 'Thai only']].map(([v, t]) => h('option', { value: v }, t)));
-  invoke('get_setting', { key: 'team_names' }).then((v) => (lang.value = v || 'both')).catch(() => {});
-  lang.onchange = act(async () => {
-    await call('set_setting', { key: 'team_names', value: lang.value });
-    toast(`Team names on tickets: ${lang.selectedOptions[0].textContent}`);
-  });
-  setKids(body,
-    h('label', { class: 'switch' }, split, h('span', {}, ''), 'Print a separate ticket for each team'),
-    h('label', { class: 'field' }, 'Team name on tickets', lang),
-    h('div', { class: 'muted' }, 'When on, each team prints its own ticket with its name as a big white-on-black header, so Starter, Main, Curry and Rice each get just their dishes; off = one ticket for everything, still with each team\'s header over its dishes. ' +
-      'Choose a team for each category (Menu → tap the category) or for single items. Items without a team print on a plain ticket last. ' +
-      'A team is where a ticket prints; "Starter" on an item is when it is sent.'),
-    list,
-    h('div', { class: 'row' },
-      h('button', { onclick: () => { rows.push({ id: null, name: '', name_alt: '', items: null }); draw(); list.querySelector('.team-row:last-child input')?.focus(); } }, '+ Team'),
-      h('button', { class: 'primary', onclick: act(async () => {
-        if (rows.some((r) => !r.name.trim())) return toast('Give every team a name', true);
-        await call('save_teams', { teams: rows.map((r) => ({ id: r.id, name: r.name.trim(), name_alt: (r.name_alt ?? '').trim() || null })) });
-        state.menu = null;
-        await load();
-        reloadTeamChoice?.();
-        toast('Teams saved');
-      }) }, 'Save teams'),
-      h('button', { onclick: act(async () => { printResult(await call('test_teams_print'), 'Sample tickets printed'); }) }, 'Print sample tickets')));
-  return card;
-}
-
-/// Settings card: bigger menu tiles and order buttons, on every device.
-function buttonSizeCard() {
-  const seg = h('div', { class: 'seg' });
-  const draw = (big) => setKids(seg, [[false, 'Normal'], [true, 'Large']].map(([v, label]) => h('button', {
-    class: v === big ? 'on' : '',
-    onclick: act(async () => {
-      await call('set_setting', { key: 'button_size', value: v ? 'large' : 'normal' });
-      document.body.classList.toggle('big-buttons', v);
-      draw(v);
-      toast(`Menu buttons: ${label.toLowerCase()}`);
-    }),
-  }, label)));
-  draw(!!state.ui?.bigButtons);
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Menu button size'),
-    seg,
-    h('div', { class: 'muted small' }, 'Large: bigger menu tiles, categories and order buttons, easier to hit. Fewer tiles fit on the screen. Applies to every device.'));
-}
-
-/// Settings card for full screen (desktop window only).
-/// Light, dark or the same as the device; this device only (the moon / sun button at the top does the same).
-function themeCard() {
-  const box = h('div');
-  const draw = () => setKids(box, segmented([['light', 'Light'], ['dark', 'Dark'], ['auto', 'Same as this device']], themePref(), (v) => { setTheme(v); draw(); }));
-  draw();
-  // The moon / sun button at the top changes it too: follow it while the card is on screen.
-  const follow = () => { if (box.isConnected) draw(); else document.removeEventListener('themechange', follow); };
+async function devicesGroup() {
+  const raw = await invoke('get_settings', { keys: ['start_fullscreen', 'button_size'] });
+  const srv = state.remote ? null : await call('server_status', {}, { quiet: true }).catch(() => null);
+  const theme = segRow({ id: 'theme', label: 'Theme', hint: 'This device only', items: [['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']], value: themePref(),
+    stacked: false, cls: 'seg-fold', save: (v) => setTheme(v) });
+  // The moon / sun button at the top changes it too: follow it while the row is on screen.
+  const follow = () => { if (theme.isConnected) theme.seg.set(themePref()); else document.removeEventListener('themechange', follow); };
   document.addEventListener('themechange', follow);
-  return h('div', { class: 'card stack' }, h('h3', {}, 'Light or dark'), box,
-    h('div', { class: 'muted small' }, 'Saved on this device only, so a till and a tablet can differ.'));
+  return [
+    ssec('This device', [
+      theme,
+      !state.remote && keySwitch(raw, 'start_fullscreen', 'Full screen at start', { def: false }),
+      !state.remote && srow({ id: 'fullscreen', label: 'Full screen', hint: 'Or press F11', ctl: h('button', { class: 'test', onclick: act(toggleFullscreen) }, icon('expand', 18), 'On / off') }),
+    ]),
+    ssec('All devices', [segRow({ id: 'buttons', label: 'Menu button size', hint: 'Large: fewer tiles fit', items: [['normal', 'Normal'], ['large', 'Large']],
+      value: raw.button_size === 'large' ? 'large' : 'normal', save: (v) => saveKey('button_size', v),
+      after: (v) => { if (state.ui) state.ui.bigButtons = v === 'large'; document.body.classList.toggle('big-buttons', v === 'large'); } })]),
+    srv && ssec('Other devices', serverRows(srv)),
+  ];
 }
-
-function displayCard() {
-  const on = h('input', { type: 'checkbox' });
-  invoke('get_setting', { key: 'start_fullscreen' }).then((v) => (on.checked = v === '1')).catch(() => {});
-  on.onchange = act(async () => {
-    await call('set_setting', { key: 'start_fullscreen', value: on.checked ? '1' : '0' });
-    toast(on.checked ? 'The POS will open in full screen' : 'The POS will open in a window');
-  });
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Display'),
-    h('label', { class: 'switch' }, on, h('span', {}), 'Open in full screen when the POS starts'),
-    h('div', { class: 'row' },
-      h('button', { onclick: act(toggleFullscreen) }, icon('expand', 18), 'Full screen on / off'),
-      h('span', { class: 'muted' }, 'Shortcut: F11, or the full-screen button at the top right.')));
-}
-
-/// Settings card for the local network server (desktop window only).
-function serverCard() {
-  const card = h('div', { class: 'card stack' });
-  const draw = (st) => {
-    const port = h('input', { type: 'number', min: 1024, max: 65535, value: st.settings.port, style: 'width:110px' });
-    const auto = h('input', { type: 'checkbox', checked: st.settings.auto_start });
-    const settings = () => ({ port: Number(port.value) || 8080, auto_start: auto.checked });
-    const apply = (run) => act(async () => {
-      const next = await call('set_server', { settings: settings(), run });
-      draw(next);
-      toast(run ? 'Local server running' : next.running ? 'Saved' : 'Local server stopped');
-    });
-    setKids(card,
-      h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Local server'),
-        h('span', { class: `status ${st.running ? 's-paid' : 's-cancelled'}` }, st.running ? 'running' : 'stopped')),
-      h('div', { class: 'muted' }, 'Use this POS from other devices on the same network (tablets, laptops, phones) in a web browser. ' +
-        'Each device logs in with its own PIN and shares the same orders, menu and printers. This PC must stay on with the POS open.'),
-      st.running && h('div', { class: 'server-urls' }, h('div', { class: 'muted small' }, 'Open this address on the other device:'),
-        st.urls.map((u) => h('code', {}, u))),
-      st.error && !st.running && h('div', { class: 'badge warn' }, st.error),
-      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Port', port),
-        h('label', { class: 'switch' }, auto, h('span', {}), 'Start automatically when the POS opens')),
-      h('div', { class: 'row' },
-        st.running
-          ? [h('button', { class: 'primary', onclick: apply(true) }, 'Save & restart'), h('button', { class: 'danger', onclick: apply(false) }, 'Stop server')]
-          : h('button', { class: 'primary', onclick: apply(true) }, 'Start server'),
-        !st.running && h('button', { onclick: apply(false) }, 'Save')),
-      h('div', { class: 'muted small' }, 'The first time, Windows may ask whether to allow the POS on the network: choose Allow on private networks.'));
+/// Local server: status, [Start] / [Stop], the sheet for port and start-up; the addresses while it runs.
+function serverRows(st) {
+  // Only Start is one tap: stopping cuts off every tablet and the kitchen screen, so it
+  // lives in the sheet behind a second tap.
+  const start = async (row) => {
+    rowState(row, 'saving');
+    try { await call('set_server', { settings: st.settings, run: true }, { quiet: true }); await redrawGroup('server'); } catch (e) { rowState(row, 'error', String(e?.message ?? e), true); }
   };
-  call('server_status').then(draw).catch(() => {});
-  return card;
+  const pill = st.running ? { text: 'Running', cls: 'ok' } : st.error ? { text: 'Error', cls: 'bad' } : { text: 'Stopped' };
+  const row = statusRow({ id: 'server', icon: 'wifi', title: 'Local server', pill, onOpen: () => serverSheet(st),
+    meta: st.error && !st.running ? st.error : `Port ${st.settings.port} · ${st.settings.auto_start ? 'Starts with the POS' : 'Start by hand'}`,
+    action: !st.running && h('button', { class: 'test', onclick: () => start(row) }, 'Start') });
+  return [row, st.running && st.urls.length > 0 && srow({ id: 'urls', label: 'Open on a tablet', stacked: true, cls: 'urls-row',
+    ctl: h('div', { class: 'server-urls' }, st.urls.map((u) => h('code', {}, u))) })];
+}
+function serverSheet(st) {
+  const f = { port: String(st.settings.port), auto: !!st.settings.auto_start };
+  const port = h('input', { value: f.port, inputmode: 'numeric', class: 'short-in', 'aria-label': 'Port' });
+  port.addEventListener('input', () => { f.port = port.value; });
+  const apply = async (on) => {
+    const n = Number(f.port);
+    if (!Number.isInteger(n) || n < 1024 || n > 65535) return 'Use a port from 1024 to 65535';
+    await call('set_server', { settings: { port: n, auto_start: f.auto }, run: on }, { quiet: true });
+    redrawGroup('server');
+  };
+  let sure = false, sureTimer;
+  const stop = st.running && h('button', { class: 'ghost danger', onclick: async () => {
+    if (!sure) {
+      sure = true;
+      stop.textContent = 'Tap again: stop · tablets disconnect';
+      sureTimer = setTimeout(() => { sure = false; stop.textContent = 'Stop server'; }, 5000);
+      return;
+    }
+    clearTimeout(sureTimer);
+    const m = await apply(false).catch((e) => String(e?.message ?? e));
+    if (m) { s.show(m, false); sure = false; stop.textContent = 'Stop server'; } else s.close();
+  } }, 'Stop server');
+  const left = st.running
+    ? stop
+    : h('button', { onclick: async () => { const m = await apply(true).catch((e) => String(e?.message ?? e)); if (m) s.show(m, false); else s.close(); } }, 'Start');
+  const s = sheet({ title: 'Local server', left, saveLabel: st.running ? 'Save & restart' : 'Save', onSave: () => apply(st.running), body: [
+    ssec(null, [srow({ label: 'Port', cls: 'text-row', ctl: port }),
+      switchRow({ label: 'Start with the POS', value: f.auto, onChange: (v) => { f.auto = v; } })],
+    'The first time, Windows may ask: choose Allow on private networks.'),
+  ] });
 }
 
 const printResult = (r, ok) => toast(r.error ? `Did not print: ${r.error}` : ok, !!r.error);
@@ -4268,15 +4186,16 @@ const MANAGE_GROUPS = [
   { id: 'printers', icon: 'printer', title: 'Printers', need: 'admin', build: printersGroup },
   { id: 'payments', icon: 'receipt', title: 'Payments & receipts', need: 'admin', build: paymentsGroup },
   { id: 'orders', icon: 'orders', title: 'Orders', need: 'kitchen', build: ordersGroup },
-  { id: 'kitchen', icon: 'chef', title: 'Kitchen', need: 'kitchen', build: kitchenGroup },
+  { id: 'kitchen', icon: 'chef', title: 'Kitchen', need: 'kitchen', build: kitchenGroup, subs: { teams: { title: 'Teams', build: teamsPage } } },
   { id: 'login', icon: 'lock', title: 'Login & staff', need: 'admin', build: loginGroup },
   { id: 'restaurant', icon: 'store', title: 'Restaurant', need: 'admin', build: restaurantGroup },
   { id: 'delivery', icon: 'bike', title: 'Delivery apps', need: 'admin', build: deliveryGroup },
   // Full screen and the local server are this PC's own (not on a phone or tablet).
-  { id: 'devices', icon: 'monitor', title: 'Devices & display', need: 'admin', build: () => legacy(tagRow(themeCard(), 'theme'), tagRow(buttonSizeCard(), 'buttons'), !state.remote && tagRow(displayCard(), 'fullscreen'), !state.remote && tagRow(serverCard(), 'server')) },
-  { id: 'data', icon: 'database', title: 'Backup & data', need: 'admin', build: () => legacy(backupCard(), tagRow(menuBackupCard(), 'menu'), tagRow(resetCard(), 'reset')) },
+  { id: 'devices', icon: 'monitor', title: 'Devices & display', need: 'admin', build: devicesGroup },
+  { id: 'data', icon: 'database', title: 'Backup & data', need: 'admin', build: dataGroup,
+    subs: { backups: { title: 'All backups', build: () => backupsPage('full') }, menus: { title: 'All menu backups', build: () => backupsPage('menu') } } },
   // Checking for and installing updates is for admins only.
-  { id: 'about', icon: 'info', title: 'About', need: 'all', build: () => legacy(creditsCard(), isAdmin() && aboutCard()) },
+  { id: 'about', icon: 'info', title: 'About', need: 'all', build: aboutGroup },
 ];
 const needOk = (need) => !need || need === 'all' || (need === 'kitchen' || need === 'manager' ? isManager() : isAdmin());
 const visibleGroups = () => MANAGE_GROUPS.filter((g) => needOk(g.need));
@@ -4295,7 +4214,6 @@ const manageItem = () => (state.view === 'settings' ? (state.settingsTab ? `g:${
 
 /// Unsaved changes in a list with a save bar (or the floor plan) keep you on the page.
 function leaveOk() {
-  if (state.planDirty) { toast('Save or discard your floor plan changes first', true); return false; }
   if (state.dirty) {
     toast('Save or discard first', true);
     const bar = document.querySelector('.savebar:not([hidden])');
@@ -4332,6 +4250,11 @@ window.addEventListener('popstate', () => {
   if (ignorePops) { ignorePops--; return; }
   const kind = backStack.pop();
   if (kind === 'sheet') return state.sheetBack?.();
+  if (kind === 'sub') {
+    if (!leaveOk()) { pushBack('sub'); return; }
+    state.groupSub = null;
+    return renderShell();
+  }
   if (kind === 'detail' && state.session && !state.orderId && manageItem()) {
     if (!leaveOk()) { pushBack('detail'); return; }
     manageBack();
@@ -4341,6 +4264,7 @@ window.addEventListener('popstate', () => {
 function manageBack() {
   state.view = 'settings';
   state.settingsTab = null;
+  state.groupSub = null;
   renderShell();
 }
 const tapBack = () => { if (!leaveOk()) return; if (backStack.at(-1) === 'detail') history.back(); else manageBack(); };
@@ -4352,6 +4276,7 @@ function openManage(item, row = null) {
   const fromList = !wideQ.matches && !manageItem();
   const id = item.slice(2);
   if (item.startsWith('p:')) { state.view = id; state.settingsTab = null; } else { state.view = 'settings'; state.settingsTab = id; }
+  state.groupSub = null;
   state.findRow = row;
   if (fromList) pushBack('detail');
   // A page folds the list to the rail (below 1366 px): its search results have no room.
@@ -4368,7 +4293,7 @@ let mshell = null;
 /// state.dirty), the open group, a search result to show, the side list, the
 /// phone's back steps. Called on every logout and login.
 function resetManage() {
-  Object.assign(state, { dirty: false, settingsTab: null, findRow: null, sheetBack: null, groupGen: (state.groupGen ?? 0) + 1 });
+  Object.assign(state, { dirty: false, settingsTab: null, groupSub: null, findRow: null, sheetBack: null, groupGen: (state.groupGen ?? 0) + 1 });
   mshell = null;
   if (backStack.length) clearBack();
 }
@@ -4400,11 +4325,26 @@ function manageScreen(kids) {
   }
 }
 
-/// Detail header: [‹ Manage on phones] [icon] Title … [action].
-function dhead(ic, title, action = null) {
-  return h('div', { class: 'dhead' },
-    h('button', { class: 'ghost back', onclick: tapBack, 'aria-label': 'Back to Manage' }, icon('back', 22), h('span', {}, 'Manage')),
-    ic && h('span', { class: 'dicon' }, icon(ic, 20)), h('h2', {}, title), action);
+/// Detail header: [‹ Manage on phones] [icon] Title … [action]. A level-2 page
+/// (`up`: { label, onclick }) shows its way back on every screen, without the icon.
+function dhead(ic, title, action = null, up = null) {
+  return h('div', { class: `dhead${up ? ' sub' : ''}` },
+    up ? h('button', { class: 'ghost back show', onclick: up.onclick, 'aria-label': `Back to ${up.label}` }, icon('back', 22), h('span', {}, up.label))
+      : h('button', { class: 'ghost back', onclick: tapBack, 'aria-label': 'Back to Manage' }, icon('back', 22), h('span', {}, 'Manage')),
+    ic && !up && h('span', { class: 'dicon' }, icon(ic, 20)), h('h2', {}, title), action);
+}
+/// A group's level-2 page (Kitchen › Teams, Backup › All backups): a history step on phones.
+function openSub(id) {
+  if (!leaveOk()) return;
+  state.groupSub = id;
+  pushBack('sub');
+  renderShell();
+}
+function closeSub() {
+  if (!leaveOk()) return;
+  if (backStack.at(-1) === 'sub') popBack('sub');
+  state.groupSub = null;
+  renderShell();
 }
 
 function buildShell() {
@@ -4415,7 +4355,10 @@ function buildShell() {
   const pages = visiblePages();
   const groups = visibleGroups();
   const name = (id) => VIEWS.find(([v]) => v === id)?.[1];
-  const item = (data, ic, label, cls = '') => h('button', { class: `mnav-item ${cls}`, 'data-item': data, onclick: () => openManage(data), title: label }, icon(ic, 20), h('span', {}, label));
+  // On the rail (a page open, 1000-1365 px) each icon has a short name under it.
+  const RAIL_NAME = { shift: 'Shift', kitchen: 'Kitchen', plan: 'Floor', menuAdmin: 'Menu' };
+  const item = (data, ic, label, cls = '') => h('button', { class: `mnav-item ${cls}`, 'data-item': data, onclick: () => openManage(data), title: label },
+    icon(ic, 20), h('span', {}, label), h('small', { class: 'rail-label', 'aria-hidden': 'true' }, RAIL_NAME[data.slice(2)] ?? label));
   let folded = pref('pos.manage.fold') === '1';
   const dailyItems = h('div', { class: 'mnav-daily', hidden: folded }, pages.map((id) => item(`p:${id}`, id, name(id))));
   const foldBtn = h('button', { class: 'mnav-title fold', 'aria-expanded': String(!folded), onclick: () => {
@@ -4429,8 +4372,9 @@ function buildShell() {
     const last = pref('pos.manage.lastGroup');
     const g = groups.find((x) => `g:${x.id}` === last) ?? groups[0];
     openManage(`g:${g.id}`);
-  } }, icon('settings', 20));
-  const railFind = h('button', { class: 'mnav-item rail-only', title: 'Search', 'aria-label': 'Search', onclick: () => { el.classList.add('peek'); tapFocus(find); } }, icon('search', 20));
+  } }, icon('settings', 20), h('small', { class: 'rail-label', 'aria-hidden': 'true' }, 'Settings'));
+  const railFind = h('button', { class: 'mnav-item rail-only', title: 'Search', 'aria-label': 'Search', onclick: () => { el.classList.add('peek'); tapFocus(find); } },
+    icon('search', 20), h('small', { class: 'rail-label', 'aria-hidden': 'true' }, 'Search'));
   const wide = h('nav', { class: 'mnav-wide', 'aria-label': 'Manage' },
     railFind,
     pages.length > 0 && [foldBtn, dailyItems],
@@ -4493,9 +4437,11 @@ async function renderSettings() {
   if (!g) { state.settingsTab = null; return renderSettings(); }
   drawTitle('Manage');
   const gen = (state.groupGen = (state.groupGen ?? 0) + 1);
-  const body = h('div', { class: 'sbody', 'data-group': g.id });
-  manageScreen([h('div', { class: 'sbody-wrap' }, dhead(g.icon, g.title), body)]);
-  const kids = await g.build(g);
+  const sub = state.groupSub && g.subs?.[state.groupSub];
+  if (!sub) state.groupSub = null;
+  const body = h('div', { class: 'sbody', 'data-group': g.id, 'data-sub': sub ? state.groupSub : null });
+  manageScreen([h('div', { class: 'sbody-wrap' }, sub ? dhead(null, sub.title, null, { label: g.title, onclick: closeSub }) : dhead(g.icon, g.title), body)]);
+  const kids = await (sub ? sub.build(g) : g.build(g));
   if (gen !== state.groupGen) return;
   setKids(body, kids);
   const row = state.findRow;
@@ -4507,13 +4453,16 @@ async function redrawGroup(savedRow = null) {
   const body = document.querySelector('.mdetail .sbody');
   const g = MANAGE_GROUPS.find((x) => x.id === body?.dataset.group);
   if (!g) return;
-  const kids = await g.build(g);
+  const sub = body.dataset.sub && g.subs?.[body.dataset.sub];
+  const kids = await (sub ? sub.build(g) : g.build(g));
   setKids(body, kids);
   if (savedRow) rowState(body.querySelector(`[data-row="${savedRow}"]`), 'saved');
 }
 /// A search result: open Advanced if the row is in it, bring it into view and flash it.
 function showRow(body, id) {
-  const row = body.querySelector(`[data-row="${id}"]`);
+  let row = body.querySelector(`[data-row="${id}"]`);
+  // A row hidden while its master switch is off (the team rows): show the switch.
+  if (row?.hidden && row.dataset.dep) row = body.querySelector(`[data-row="${row.dataset.dep}"]`);
   if (!row) return;
   const adv = row.closest('.adv-body');
   if (adv?.hidden) adv.previousElementSibling?.click();
@@ -4531,7 +4480,7 @@ function renderStaffManage() {
     const back = () => { state.settingsTab = null; renderShell(); };
     return setKids(app, h('div', { class: 'staff-manage' },
       h('div', { class: 'dhead' }, h('button', { class: 'ghost back show', onclick: back }, icon('back', 22), h('span', {}, 'Manage')), h('h2', {}, 'About')),
-      legacy(creditsCard())));
+      creditsCard()));
   }
   drawTitle('Manage');
   setKids(app, h('div', { class: 'staff-manage' },
@@ -4586,10 +4535,19 @@ const MANAGE_INDEX = [
   ['g:orders#print_cancelled_order', 'Print CANCELLED ticket', 'cancel cancelled cancelling kitchen ticket', 'kitchen'],
   ['g:orders#staff_cancel_sent', 'Staff can fix sent dishes', 'fix sent remove reduce dish', 'admin'],
   ['g:kitchen', 'Kitchen', 'kitchen screen kds teams team drinks desserts tickets orange red refresh beep sound curry rice station sample', 'kitchen'],
-  ['g:kitchen#kds', 'Kitchen screen colours', 'kitchen screen kds orange red late slow refresh paid beep sound', 'kitchen'],
-  ['g:kitchen#split', 'Drinks & desserts tickets', 'drinks desserts own ticket bar', 'kitchen'],
-  ['g:kitchen#teams', 'Kitchen teams', 'teams team station curry rice grill sample tickets', 'kitchen'],
-  ['g:kitchen#team_choice', 'Which team?', 'which team choose', 'kitchen'],
+  ['g:kitchen#drinks_split', 'Drinks on their own ticket', 'drinks own ticket bar split desserts', 'kitchen'],
+  ['g:kitchen#desserts_split', 'Desserts on their own ticket', 'desserts own ticket split drinks', 'kitchen'],
+  ['g:kitchen#teams_on', 'Use kitchen teams', 'kitchen teams team station on off', 'kitchen'],
+  ['g:kitchen#teams', 'Teams', 'kitchen teams team names thai station curry rice grill order list add', 'kitchen'],
+  ['g:kitchen#teams_split', 'Own ticket per team', 'teams team own separate ticket headers split', 'kitchen'],
+  ['g:kitchen#team_names', 'Team names', 'team names english thai language tickets', 'kitchen'],
+  ['g:kitchen#team_choice', 'Ask “Which team?”', 'which team choose teams', 'kitchen'],
+  ['g:kitchen#sample', 'Sample tickets', 'sample test print teams tickets', 'kitchen'],
+  ['g:kitchen#kds_slow_mins', 'Orange after', 'kitchen screen kds orange slow minutes colour color late', 'kitchen'],
+  ['g:kitchen#kds_late_mins', 'Red after', 'kitchen screen kds red late minutes colour color', 'kitchen'],
+  ['g:kitchen#kds_refresh_secs', 'Refresh every', 'kitchen screen kds refresh seconds', 'kitchen'],
+  ['g:kitchen#kds_paid_hours', 'Keep paid orders', 'kitchen screen kds paid orders hours remove', 'kitchen'],
+  ['g:kitchen#kds_beep', 'Beep for new tickets', 'kitchen screen kds beep sound new ticket', 'kitchen'],
   ['g:login', 'Login & staff', 'login log in logout auto lock pin start screen staff timeout', 'admin'],
   ['g:login#start_screen', 'Start screen', 'after login start screen tables orders takeaway', 'admin'],
   ['g:login#auto_logout_minutes', 'Log out after', 'auto logout idle timeout lock', 'admin'],
@@ -4601,17 +4559,24 @@ const MANAGE_INDEX = [
   ['g:restaurant#shop_name', 'Name on bills', 'shop name bill receipt top', 'admin'],
   ['g:restaurant#header', 'Address & phone', 'address phone vat number header bill receipt', 'admin'],
   ['g:restaurant#currency', 'Currency symbol', 'currency pound baht euro dollar money symbol', 'admin'],
-  ['g:restaurant#tax', 'Tax', 'tax vat rate prices include included default', 'admin'],
+  ['g:restaurant#prices_include_tax', 'Prices include tax', 'tax vat prices include included added on top', 'admin'],
+  ['g:restaurant#default_tax_bp', 'Default tax rate', 'tax vat rate percent default apply items 0', 'admin'],
   ['g:delivery', 'Delivery apps', 'delivery apps uber eats just eat deliveroo grab platform', 'admin'],
   ['g:devices', 'Devices & display', 'theme dark light button size large full screen display local server network tablet phone wifi', 'admin'],
-  ['g:devices#theme', 'Light or dark', 'theme dark light mode night', 'admin'],
+  ['g:devices#theme', 'Theme', 'theme light or dark mode night auto colours', 'admin'],
   ['g:devices#buttons', 'Menu button size', 'button size large big tiles', 'admin'],
+  ['g:devices#start_fullscreen', 'Full screen at start', 'full screen start open window display', 'admin', true],
   ['g:devices#fullscreen', 'Full screen', 'full screen display window f11', 'admin', true],
-  ['g:devices#server', 'Local server', 'local server network tablet phone browser wifi port', 'admin', true],
+  ['g:devices#server', 'Local server', 'local server network tablet phone browser wifi port start stop', 'admin', true],
+  ['g:devices#urls', 'Open on a tablet', 'address url tablet phone browser local server', 'admin', true],
   ['g:data', 'Backup & data', 'backup restore reset delete data menu copy export import move new pc usb', 'admin'],
-  ['g:data#backup', 'Back up now', 'backup restore copy usb new pc folder', 'admin'],
-  ['g:data#menu', 'Menu backup', 'menu backup copy load file', 'admin'],
-  ['g:data#reset', 'Reset data', 'reset delete clear data', 'admin'],
+  ['g:data#backup', 'Back up now', 'backup last backup restore copy', 'admin'],
+  ['g:data#backups_kept', 'Keep backups', 'keep how many backups daily old delete', 'admin'],
+  ['g:data#fromfile', 'Restore from a file', 'restore backup file upload new pc usb', 'admin'],
+  ['g:data#folder', 'Backup folder', 'backup folder path usb new pc move open', 'admin'],
+  ['g:data#menu', 'Back up the menu', 'menu backup copy restore', 'admin'],
+  ['g:data#menufile', 'Load a menu file', 'menu file load import other till', 'admin'],
+  ['g:data#reset', 'Reset data', 'reset delete clear data danger', 'admin'],
   ['g:about', 'About', 'about version credits', 'all'],
   ['g:about#updates', 'Updates', 'update updates install version', 'admin', true],
 ].map(([id, label, words, need, local]) => {
@@ -4725,14 +4690,21 @@ function saveReceipt(patch) {
 /// (i): a short explanation in a pop-over, instead of a paragraph on the page.
 let openPop = null;
 function infoTip(text, label) {
-  const b = h('button', { type: 'button', class: 'itip', 'aria-label': `About ${label}`, 'aria-expanded': 'false' });
+  return popButton(h('button', { type: 'button', class: 'itip', 'aria-label': `About ${label}`, 'aria-expanded': 'false' }), () => text, label);
+}
+/// ⋯: a short menu of actions (Download, Delete) in the same pop-over; `items()` gives its buttons.
+const moreMenu = (label, items) => popButton(h('button', { type: 'button', class: 'ghost more-btn', 'aria-label': `More for ${label}`, 'aria-expanded': 'false' }, icon('more', 20)),
+  () => h('div', { class: 'pop-menu' }, items()), label, 'menu');
+/// A button that opens `content()` in the pop-over under it (one open at a time).
+function popButton(b, content, label, role = 'dialog') {
   b.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
     const mine = openPop?.btn === b;
     closeInfoPop();
     if (mine) return;
-    const pop = h('div', { class: 'pop', role: 'dialog', 'aria-label': label }, text);
+    const pop = h('div', { class: `pop${role === 'menu' ? ' pop-menu-host' : ''}`, role, 'aria-label': label }, content());
+    if (role === 'menu') pop.addEventListener('click', (ev) => { if (ev.target.closest('button') && !ev.target.closest('button').dataset.keep) setTimeout(closeInfoPop); });
     document.body.append(pop);
     const place = () => {
       const r = b.getBoundingClientRect();
@@ -4881,12 +4853,12 @@ function sseg(items, current, onPick, label = '') {
   el.value = () => cur;
   return el;
 }
-function segRow({ id, label, hint, tip, items, value, save, after, stacked = items.length >= 3 }) {
+function segRow({ id, label, hint, tip, items, value, save, after, stacked = items.length >= 3, cls = '' }) {
   let row;
   const seg = sseg(items, value, async (v, prev) => {
     if (await saveWith(row, () => save(v), () => seg.set(prev))) after?.(v);
   }, label);
-  row = srow({ id, label, hint, tip, ctl: seg, stacked });
+  row = srow({ id, label, hint, tip, ctl: seg, stacked, cls });
   row.seg = seg;
   return row;
 }
@@ -4904,7 +4876,7 @@ function selectRow({ id, label, hint, tip, options, value, save, after }) {
   return row;
 }
 /// Text row: saves on blur or Enter; Esc puts the saved text back.
-function textRow({ id, label, hint, tip, value, placeholder, max, area = false, cls = '', save, validate, after, attrs = {} }) {
+function textRow({ id, label, hint, tip, value, placeholder, max, area = false, cls = '', save, validate, after, attrs = {}, unit = '' }) {
   const input = area ? h('textarea', { rows: 3, placeholder, 'aria-label': label, ...attrs }) : h('input', { placeholder, maxlength: max, 'aria-label': label, ...attrs });
   input.value = value ?? '';
   let saved = input.value, row;
@@ -4920,7 +4892,7 @@ function textRow({ id, label, hint, tip, value, placeholder, max, area = false, 
     if (e.key === 'Enter' && !area) { e.preventDefault(); input.blur(); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); input.value = saved; input.blur(); }
   });
-  row = srow({ id, label, hint, tip, ctl: input, cls: `${area ? '' : 'text-row'} ${cls}`, stacked: area });
+  row = srow({ id, label, hint, tip, ctl: [input, unit && h('span', { class: 'sunit' }, unit)], cls: `${area ? '' : 'text-row'} ${cls}`, stacked: area });
   row.input = input;
   return row;
 }
@@ -5048,15 +5020,11 @@ function toggleChips(items, selected, onChange, label = '') {
 }
 const emptyState = ({ icon: ic, title, text, action = null }) =>
   h('div', { class: 'sempty' }, h('span', { class: 'eic' }, icon(ic, 28)), h('strong', {}, title), text && h('p', {}, text), action);
-/// The cards of a group not yet in the new look (Phase 2), in the detail pane.
-const legacy = (...cards) => h('div', { class: 'legacy' }, cards);
-/// Lets search find a legacy card (`data-row`).
-const tagRow = (el, row) => { if (el) el.dataset.row = row; return el; };
 
 /// A sheet: a pop-up on wide screens, a bottom sheet on phones, for settings made of
 /// several fields. `onSave()` saves (throw or return a message to keep it open);
 /// `onTest()` returns { ok, text }. Closing with changes asks first, in the foot.
-function sheet({ title, body, onSave, onTest, saveLabel = 'Save', wide = false, left = null }) {
+function sheet({ title, body, onSave, onTest, saveLabel = 'Save', wide = false, left = null, danger = false }) {
   const m = document.getElementById('modal');
   const msg = h('div', { class: 'sheet-msg', hidden: true, role: 'status' });
   const show = (text, ok) => { msg.hidden = !text; msg.textContent = text ?? ''; msg.className = `sheet-msg ${ok ? 'ok' : 'bad'}`; };
@@ -5066,18 +5034,21 @@ function sheet({ title, body, onSave, onTest, saveLabel = 'Save', wide = false, 
   bodyEl.addEventListener('change', () => { dirty = true; });
   bodyEl.addEventListener('click', (e) => { if (e.target.closest('.sseg button, .sstep button, .chiplist button, .lrow .del, .ladd')) dirty = true; });
   const foot = h('div', { class: 'sheet-foot' });
-  const save = onSave && h('button', { class: 'primary', onclick: async () => {
+  // `onSave()` may return false: stay open, nothing to say (e.g. the first of two taps).
+  const save = onSave && h('button', { class: danger ? 'danger solid' : 'primary', onclick: async () => {
+    const label = save.textContent;
     save.disabled = true;
-    setKids(save, h('span', { class: 'spin' }), 'Saving…');
+    setKids(save, h('span', { class: 'spin' }), danger ? 'Working…' : 'Saving…');
     show(null);
     try {
       const r = await onSave();
       if (typeof r === 'string') throw r;
+      if (r === false) { save.disabled = false; if (save.querySelector('.spin')) setKids(save, label); return; }
       close();
     } catch (e) {
       show(String(e?.message ?? e), false);
       save.disabled = false;
-      setKids(save, saveLabel);
+      setKids(save, label);
     }
   } }, saveLabel);
   const test = onTest && h('button', { onclick: async () => {
@@ -5112,25 +5083,35 @@ function sheet({ title, body, onSave, onTest, saveLabel = 'Save', wide = false, 
   // The phone's back button closes the sheet (or asks first).
   pushBack('sheet');
   state.sheetBack = () => { if (dirty && onSave) { ask(); pushBack('sheet'); } else { closed = true; state.sheetBack = null; closeModal(); } };
-  return { el, show, close, foot, normal, test };
+  return { el, show, close, foot, normal, test, save };
 }
 
-/// The bar under a list with changes: "N changes · Discard · Save".
-function saveBar({ onSave, onDiscard }) {
+/// The bar under a list or form with changes: "N changes · Discard · Save" (or `text`).
+/// While it shows, state.dirty keeps you on the page; `hold`: auto logout waits too
+/// (the floor plan, which takes long to redo).
+function saveBar({ onSave, onDiscard, text: fixed = null, saveLabel = 'Save', hold = false }) {
   const text = h('strong', {});
-  const save = h('button', { class: 'primary' }, 'Save');
-  const el = h('div', { class: 'savebar', hidden: true, role: 'region', 'aria-label': 'Unsaved changes' },
-    text, h('button', { class: 'ghost', onclick: () => { onDiscard(); el.update(0); } }, 'Discard'), save);
+  const save = h('button', { class: 'primary' }, saveLabel);
+  const discard = h('button', { class: 'ghost', onclick: () => { onDiscard(); el.update(0); } }, 'Discard');
+  const el = h('div', { class: 'savebar', hidden: true, role: 'region', 'aria-label': 'Unsaved changes' }, text, discard, save);
+  const normal = () => setKids(el, text, discard, save);
+  /// × or Esc with changes: ask in the bar (`then` runs after Discard; default onDiscard).
+  el.ask = (then = onDiscard) => {
+    setKids(el, h('strong', {}, 'Discard changes?'), h('button', { class: 'ghost', onclick: normal }, 'Keep editing'),
+      h('button', { class: 'danger solid', onclick: () => { then(); el.update(0); } }, 'Discard'));
+    el.querySelector('button')?.focus();
+  };
   save.onclick = async () => {
     save.disabled = true;
     setKids(save, h('span', { class: 'spin' }), 'Saving…');
-    try { await onSave(); el.update(0); } catch (e) { text.textContent = `Not saved: ${String(e?.message ?? e)}`; text.classList.add('bad'); } finally { save.disabled = false; setKids(save, 'Save'); }
+    try { await onSave(); el.update(0); } catch (e) { text.textContent = `Not saved: ${String(e?.message ?? e)}`; text.classList.add('bad'); } finally { save.disabled = false; setKids(save, saveLabel); }
   };
   el.update = (n) => {
+    normal();
     el.hidden = !n;
-    state.dirty = n > 0;
+    state.dirty = n > 0 ? (hold ? 'hold' : true) : false;
     text.classList.remove('bad');
-    text.textContent = `${n} change${n === 1 ? '' : 's'}`;
+    text.textContent = fixed ?? `${n} change${n === 1 ? '' : 's'}`;
   };
   return el;
 }
@@ -5391,6 +5372,7 @@ async function paymentsGroup() {
     validate: (l) => (goodTips(l) ? null : { msg: 'Use more than 0 and up to 100 %', index: l.findIndex((p) => !(p > 0 && p <= 100 && twoDecimals(p))) }),
     save: (l) => saveKey('tip_presets', l.join(',')) });
   tipChips.hidden = !c.tipsOn;
+  tipChips.dataset.dep = 'tips_on';
   // Cash and Card must keep different names (empty = the standard name).
   const other = { cash: raw.pay_name_card ?? '', card: raw.pay_name_cash ?? '' };
   const nameRow = (m, label, tip) => textRow({ id: `pay_name_${m}`, label, tip, value: raw[`pay_name_${m}`] ?? '', placeholder: m === 'cash' ? 'Cash' : 'Card', max: PAY_NAME_MAX,
@@ -5532,18 +5514,110 @@ function quickNotesSheet(notes) {
   } });
 }
 
-// ---------- Settings: Kitchen (cards not yet in the new look) ----------
+// ---------- Settings: Kitchen ----------
 
+const KITCHEN_KEYS = [...KDS_KEYS, 'drinks_split', 'desserts_split', 'teams_on', 'teams_split', 'team_names', 'team_choice'];
+const TEAM_NAMES = [['both', 'EN + TH'], ['english', 'English'], ['thai', 'Thai']];
+const KDS_DOT = (cls) => h('span', { class: `kds-dot ${cls}` });
 async function kitchenGroup() {
+  const [raw, teams] = await Promise.all([invoke('get_settings', { keys: KITCHEN_KEYS }), call('list_teams').catch(() => [])]);
   let n = null;
   if (isAdmin()) {
     const [rc, kc, routes] = await Promise.all([call('get_receipt_settings'), call('get_kitchen_printer'), call('get_kitchen_routes')]).catch(() => [null, null, []]);
     n = [rc, kc, ...routes].filter((p) => p?.kind && p.kind !== 'none').length;
   }
-  return [
-    isAdmin() && ssec(null, [navRow({ id: 'printers', label: 'Printers', value: n == null ? null : `${n} printer${n === 1 ? '' : 's'}`, onOpen: () => openManage('g:printers') })]),
-    legacy(tagRow(kdsCard(), 'kds'), tagRow(splitCard(), 'split'), tagRow(teamsCard(), 'teams'), tagRow(teamChoiceCard(), 'team_choice')),
+  const k = kdsSettings(raw);
+  const teamsOn = raw.teams_on == null ? true : raw.teams_on !== '0';
+  // "Which team?": two or more teams, or none (off). One alone is not a choice.
+  const chosen = (raw.team_choice ?? '').split(',').map((x) => parseInt(x, 10)).filter((x) => teams.some((t) => t.id === x));
+  let choiceRow;
+  const choice = teams.length >= 2 && toggleChips(teams.map((t) => [t.id, t.name]), chosen, async (list) => {
+    if (list.length === 1) return rowState(choiceRow, 'error', 'Pick 2 or more, or none');
+    await saveWith(choiceRow, () => saveKey('team_choice', list.join(',')));
+  }, 'Which team?');
+  choiceRow = srow({ id: 'team_choice', label: 'Ask “Which team?”', hint: teams.length >= 2 ? 'Dine-in. Pick 2 or more, or none.' : 'Needs 2 or more teams',
+    tip: 'The dish prints under the chosen team for this order. Replaces Starter or main.', stacked: !!choice, ctl: choice || null });
+  const sample = srow({ id: 'sample', label: 'Sample tickets', ctl: h('button', { class: 'test', onclick: async () => {
+    rowState(sample, 'saving');
+    try {
+      const r = await call('test_teams_print', {}, { quiet: true });
+      if (r.error) rowState(sample, 'error', `Didn’t print: ${r.error}`, true); else rowState(sample, 'saved');
+    } catch (e) { rowState(sample, 'error', String(e?.message ?? e), true); }
+  } }, 'Print') });
+  const deps = [
+    navRow({ id: 'teams', label: 'Teams', value: teams.length ? teams.map((t) => t.name).join(', ') : 'None yet', onOpen: () => openSub('teams') }),
+    keySwitch(raw, 'teams_split', 'Own ticket per team', { hint: 'Off: one ticket with team headers' }),
+    segRow({ id: 'team_names', label: 'Team names', items: TEAM_NAMES, value: TEAM_NAMES.some(([v]) => v === raw.team_names) ? raw.team_names : 'both',
+      stacked: false, cls: 'seg-fold', save: (v) => saveKey('team_names', v) }),
+    choiceRow, sample,
   ];
+  const showDeps = (on) => { for (const r of deps) r.hidden = !on; };
+  for (const r of deps) r.dataset.dep = 'teams_on';
+  showDeps(teamsOn);
+  // Red comes after orange: each checks the other's saved value.
+  let slow = k.slow, late = k.late;
+  const orange = stepperRow({ id: 'kds_slow_mins', label: 'Orange after', value: k.slow, min: 1, max: 239, unit: 'min',
+    validate: (v) => (v >= late ? 'Orange must come before red' : null), save: async (v) => { await saveKey('kds_slow_mins', v); slow = v; } });
+  const red = stepperRow({ id: 'kds_late_mins', label: 'Red after', value: k.late, min: 2, max: 240, unit: 'min',
+    validate: (v) => (v <= slow ? 'Red must come after orange' : null), save: async (v) => { await saveKey('kds_late_mins', v); late = v; } });
+  orange.querySelector('.srow-label').prepend(KDS_DOT('slow'));
+  red.querySelector('.srow-label').prepend(KDS_DOT('late'));
+  return [
+    ssec('Kitchen tickets', [
+      keySwitch(raw, 'drinks_split', 'Drinks on their own ticket', { hint: 'Drinks still go at once' }),
+      keySwitch(raw, 'desserts_split', 'Desserts on their own ticket'),
+      isAdmin() && navRow({ id: 'printers', label: 'Printers', value: n == null ? null : `${n} printer${n === 1 ? '' : 's'}`, onOpen: () => openManage('g:printers') }),
+    ], 'Mark drinks and desserts in Menu.'),
+    ssec('Teams', [
+      // Switched on, the team rows come back with what is saved (Which team? reads empty while off).
+      keySwitch(raw, 'teams_on', 'Use kitchen teams', { hint: (v) => (v ? '' : 'Off: one ticket, no team headers'), after: (v) => (v ? redrawGroup('teams_on') : showDeps(false)) }),
+      deps,
+    ]),
+    ssec('Kitchen screen', [
+      orange, red,
+      stepperRow({ id: 'kds_refresh_secs', label: 'Refresh every', value: k.refresh, min: 2, max: 30, unit: 's', save: (v) => saveKey('kds_refresh_secs', v) }),
+      stepperRow({ id: 'kds_paid_hours', label: 'Keep paid orders', hint: '0 = remove at once', value: k.paid, min: 0, max: 24, unit: 'h', save: (v) => saveKey('kds_paid_hours', v) }),
+      keySwitch(raw, 'kds_beep', 'Beep for new tickets', { def: false,
+        tip: 'Browsers play sound only after one tap. If the screen says “Tap to turn on the sound”, tap it once.' }),
+    ]),
+  ];
+}
+
+/// Kitchen › Teams: names (English, Thai) in ticket order; the save bar saves the list.
+async function teamsPage() {
+  const load = async () => (await call('list_teams')).map((t) => ({ id: t.id, name: t.name, name_alt: t.name_alt ?? '', items: t.items }));
+  let saved = await load();
+  const rows = saved.map((r) => ({ ...r }));
+  const changes = () => {
+    const ids = new Set(rows.map((r) => r.id));
+    return rows.filter((r, i) => { const s = saved[i]; return !s || s.id !== r.id || s.name !== r.name || (s.name_alt ?? '') !== (r.name_alt ?? ''); }).length
+      + saved.filter((s) => !ids.has(s.id)).length;
+  };
+  const bar = saveBar({
+    onSave: async () => {
+      const bad = rows.findIndex((r) => !r.name.trim());
+      if (bad >= 0) {
+        const input = editor.querySelectorAll('.lrow')[bad]?.querySelector('input');
+        input?.classList.add('bad');
+        tapFocus(input);
+        throw new Error('Give the team a name');
+      }
+      await call('save_teams', { teams: rows.map((r) => ({ id: r.id, name: r.name.trim(), name_alt: (r.name_alt ?? '').trim() || null })) }, { quiet: true });
+      state.menu = null;
+      saved = await load();
+      rows.splice(0, rows.length, ...saved.map((r) => ({ ...r })));
+      editor.redraw();
+    },
+    onDiscard: () => { rows.splice(0, rows.length, ...saved.map((r) => ({ ...r }))); editor.redraw(); },
+  });
+  const typed = (r, key) => (e) => { r[key] = e.target.value; e.target.classList.remove('bad'); bar.update(changes()); };
+  const editor = listEditor({ rows, cls: 'teams', addLabel: 'Add team', make: () => ({ id: null, name: '', name_alt: '', items: null }), onChange: () => bar.update(changes()),
+    empty: emptyState({ icon: 'chef', title: 'No teams yet', text: 'Each team gets its own ticket header.' }),
+    render: (r) => [h('input', { value: r.name, maxlength: 40, placeholder: 'e.g. Curry', 'aria-label': 'Team name', oninput: typed(r, 'name') }),
+      h('input', { value: r.name_alt ?? '', maxlength: 40, placeholder: 'แกง', lang: 'th', class: 'alt-input', 'aria-label': 'Thai name', oninput: typed(r, 'name_alt') }),
+      h('span', { class: 'lmeta' }, r.items == null ? 'New' : `${r.items} item${r.items === 1 ? '' : 's'}`)] });
+  state.dirty = false;
+  return [h('p', { class: 'snote' }, 'Set a team per category in Menu. Drag to change the ticket order.'), h('div', { class: 'sgroup' }, editor), bar];
 }
 
 // ---------- Settings: Login & staff ----------
@@ -5558,6 +5632,7 @@ async function loginGroup() {
   if (!secs.some(([v]) => v === ui.warnSecs)) secs.push([ui.warnSecs, `${ui.warnSecs} seconds`]);
   const warn = selectRow({ id: 'auto_logout_warn_secs', label: 'Warn before', options: secs, value: ui.warnSecs, save: (v) => saveKey('auto_logout_warn_secs', v) });
   warn.hidden = !ui.autoLogout;
+  warn.dataset.dep = 'auto_logout_minutes';
   return [
     ssec('After login', [segRow({ id: 'start_screen', label: 'Start screen', items: START_SCREENS, value: ui.startScreen,
       tip: 'New takeaway opens an order at once. An empty one is dropped.', save: (v) => saveKey('start_screen', v) })]),
@@ -5575,7 +5650,8 @@ async function loginGroup() {
 // ---------- Settings: Restaurant ----------
 
 async function restaurantGroup() {
-  const rc = await call('get_receipt_settings');
+  const [rc, raw, untaxed] = await Promise.all([call('get_receipt_settings'), invoke('get_settings', { keys: ['prices_include_tax', 'default_tax_bp'] }),
+    call('untaxed_items', {}, { quiet: true }).catch(() => 0)]);
   return [
     ssec('Name & address', [
       textRow({ id: 'store_name', label: 'Restaurant name', value: state.storeName ?? '', placeholder: 'Restaurant name', save: (v) => saveKey('store_name', v),
@@ -5592,8 +5668,49 @@ async function restaurantGroup() {
         save: (v) => saveReceipt({ header: v || null }) }),
       textRow({ id: 'currency', label: 'Currency symbol', value: rc.currency ?? '£', max: 4, cls: 'short', attrs: { class: 'short-in' }, save: (v) => saveReceipt({ currency: v }) }),
     ]),
-    h('div', { class: 'legacy', 'data-row': 'tax' }, menuDefaultsCard()),
+    taxSection(raw, untaxed),
   ];
+}
+/// Tax: prices include it or not, the default rate, and items still at 0 %.
+function taxSection(raw, untaxed) {
+  let rate = Number(raw.default_tax_bp) || 0;
+  const example = (on) => {
+    if (!on) return 'Tax is added on top';
+    if (!rate) return 'The menu price is what the customer pays';
+    const net = 1000 / (1 + rate / 10000);
+    return `10.00 at ${pct(rate)} % = ${(net / 100).toFixed(2)} + ${((1000 - net) / 100).toFixed(2)} tax`;
+  };
+  const incl = switchRow({ id: 'prices_include_tax', label: 'Prices include tax', hint: example, value: raw.prices_include_tax !== '0',
+    save: (v) => saveKey('prices_include_tax', v ? '1' : '0'), after: () => { state.menu = null; } });
+  // Items still at 0 % that a rate would now apply to: one tap gives them the rate.
+  const strip = h('div', { class: 'srow-strip', role: 'status' });
+  const drawStrip = (n) => {
+    strip.hidden = !n || !rate;
+    if (strip.hidden) return;
+    setKids(strip, h('span', { class: 'grow' }, `${n} item${n === 1 ? ' is' : 's are'} at 0 %`),
+      h('button', { onclick: async (e) => {
+        const b = e.currentTarget;
+        b.disabled = true;
+        try {
+          const done = await call('apply_default_tax', {}, { quiet: true });
+          state.menu = null;
+          setKids(strip, h('span', { class: 'grow ok' }, `✓ ${done} item${done === 1 ? '' : 's'} updated`));
+          setTimeout(() => call('untaxed_items', {}, { quiet: true }).then(drawStrip).catch(() => {}), 2500);
+        } catch (err) { b.disabled = false; setKids(strip, h('span', { class: 'grow bad' }, `Not saved: ${String(err?.message ?? err)}`), b); }
+      } }, `Apply ${pct(rate)} %`));
+  };
+  drawStrip(untaxed);
+  const taxRow = textRow({ id: 'default_tax_bp', label: 'Default tax rate', tip: 'A category can have its own rate (Menu › category).',
+    value: rate ? pct(rate) : '', placeholder: '0', unit: '%', cls: 'short', attrs: { class: 'short-in', inputmode: 'decimal' },
+    validate: (v) => { const n = Number((v || '0').replace(',', '.').replace('%', '')); return Number.isFinite(n) && n >= 0 && n <= 100 && twoDecimals(n) ? null : 'Use 0 to 100 %.'; },
+    save: (v) => saveKey('default_tax_bp', Math.round(Number((v || '0').replace(',', '.').replace('%', '')) * 100)),
+    after: (v) => {
+      rate = Math.round(Number((v || '0').replace(',', '.').replace('%', '')) * 100);
+      state.menu = null;
+      setHint(incl, example(incl.input.checked));
+      call('untaxed_items', {}, { quiet: true }).then(drawStrip).catch(() => {});
+    } });
+  return h('section', { class: 'ssec', 'data-row': 'tax' }, h('h3', { class: 'ssec-title' }, 'Tax'), h('div', { class: 'sgroup' }, incl, taxRow, strip));
 }
 
 // ---------- Settings: Delivery apps ----------
@@ -5624,222 +5741,37 @@ async function deliveryGroup() {
   return [h('p', { class: 'snote' }, 'Each app gets an Orders button, a ticket heading and a report line.'), h('div', { class: 'sgroup' }, editor), bar];
 }
 
-// ---------- cards not yet in the new look (Phase 2) ----------
-
-/// Product name, version and credits: shown at the top of About.
-const creditsCard = () => h('div', { class: 'card about-credits' },
-  h('div', { class: 'about-head' },
-    h('h3', { class: 'about-name' }, 'Limehouse POS'),
-    state.version && h('span', { class: 'chip info' }, `Version ${state.version}`)),
-  h('div', { class: 'about-by' }, 'Developed by ', h('strong', {}, 'Pheeraphat Bunliang')),
-  h('div', { class: 'muted small' }, 'Designed and developed with AI-assisted programming.'),
-  h('div', { class: 'about-copy muted small' }, '© 2026 Pheeraphat Bunliang. All rights reserved.'));
-const aboutCard = () => h('div', { class: 'card stack', 'data-row': 'updates' },
-  h('h3', {}, 'Updates'),
-  state.remote
-    ? h('div', { class: 'muted' }, 'This browser uses the POS running on the main till. Updates are installed there.')
-    : [h('div', { class: 'muted' }, 'The app checks for updates every few hours while an admin is logged in on this till. Installing one takes about a minute: ' +
-      'the database is backed up, the app closes, updates and reopens. Orders, menu and settings are kept.'),
-    h('div', { class: 'row' }, h('button', { onclick: act(async () => {
-      const info = await checkForUpdate(false);
-      if (info && !info.available) toast(`You have the latest version (${info.current})`);
-    }) }, 'Check for updates'))]);
-function backupCard() {
-  const list = h('div', { class: 'backup-list' });
-  const admin = isAdmin();
-  let files = [];
-  const load = async () => {
-    files = await call('list_full_backups').catch(() => []);
-    setKids(list, files.length ? files.map((f) => h('div', { class: 'backup-row' },
-      h('div', { class: 'grow' }, h('div', {}, fmtTime(f.modified)),
-        h('div', { class: 'muted small' }, `${backupKind(f.name)} · ${f.name} · ${fileSize(f.size)}`)),
-      admin && h('div', { class: 'row backup-acts' },
-        h('button', { onclick: act(async () => restoreDialog(f, await call('inspect_backup', { name: f.name }))) }, 'Restore'),
-        state.remote && h('button', { onclick: act(() => downloadBackup(f.name)) }, 'Download'),
-        confirmBtn('Delete', 'Tap again to delete', async () => {
-          await call('delete_backups', { names: [f.name] }); toast('Backup deleted'); await load();
-        }, 'danger-outline'))))
-      : h('div', { class: 'muted' }, 'No backups yet.'));
-  };
-  load();
-  // How many full backups to keep (setting backups_kept; not set = 14).
-  const [KEEP_MIN, KEEP_MAX, KEEP_DEF] = [3, 90, 14];
-  const keep = numBox('', { inputmode: 'numeric', placeholder: String(KEEP_DEF), 'aria-label': 'Backups kept' });
-  const keepText = h('span', {}, `the last ${KEEP_DEF} are kept`);
-  invoke('get_setting', { key: 'backups_kept' }).then((v) => {
-    const n = Number(v);
-    if (v != null && Number.isInteger(n) && n >= KEEP_MIN && n <= KEEP_MAX) { keep.value = String(n); keepText.textContent = `the last ${n} are kept`; }
-  }).catch(() => {});
-  // Where the files are, to copy one to a USB stick (moving to a new PC).
-  const folder = h('div', { class: 'muted small backup-folder' });
-  if (admin) invoke('backup_folder').then((dir) => setKids(folder, state.remote ? 'Backup folder on the main till: ' : 'Backup folder: ', h('code', {}, dir))).catch(() => {});
-  const status = h('div', { class: 'muted', hidden: true });
-  const fileInput = h('input', { type: 'file', accept: '.db', hidden: true });
-  const fromFile = h('button', { onclick: () => fileInput.click() }, 'Restore everything from a file…');
-  fileInput.onchange = act(async () => {
-    const f = fileInput.files[0];
-    fileInput.value = '';
-    if (!f) return;
-    fromFile.disabled = true;
-    status.hidden = false;
-    try {
-      const r = await uploadBackup(f, (pct) => { status.textContent = `Loading ${f.name}… ${pct}%`; });
-      status.textContent = '';
-      await load();
-      restoreDialog(r.file, r.summary);
-    } finally {
-      fromFile.disabled = false;
-      status.hidden = true;
-    }
-  });
-  return h('div', { class: 'card stack', 'data-row': 'backup' },
-    h('h3', {}, 'Backup'),
-    h('p', { class: 'muted' }, 'Everything (orders, menu, customers, staff and PINs, settings) is backed up automatically once a day at startup; ', keepText,
-      '. The copies made before an update, a reset or a restore, and files loaded from elsewhere, are kept apart (the last 3 of each, and any from the last 7 days).'),
-    admin && h('div', { class: 'row' }, h('label', { class: 'field' }, 'Keep the last', keep, 'backups'),
-      h('button', { onclick: act(async () => {
-        const raw = keep.value.trim(), n = Number(raw);
-        if (raw && (!Number.isInteger(n) || n < KEEP_MIN || n > KEEP_MAX)) return toast(`Backups kept: a whole number from ${KEEP_MIN} to ${KEEP_MAX}`, true);
-        await call('set_setting', { key: 'backups_kept', value: raw });
-        keepText.textContent = `the last ${raw || KEEP_DEF} are kept`;
-        toast(`Keeping the last ${raw || KEEP_DEF} backups. Older ones are deleted at the next backup.`);
-      }) }, 'Save')),
-    admin && h('div', { class: 'muted small' }, `${KEEP_MIN} to ${KEEP_MAX} (empty = ${KEEP_DEF}). Daily backups only: safety copies and files loaded from elsewhere are kept apart. Each backup is a full copy of the database.`),
-    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: act(async () => { toast('Backup saved: ' + (await call('backup_now'))); await load(); }) }, 'Back up everything now'),
-      admin && fromFile, fileInput,
-      admin && !state.remote && h('button', { onclick: act(() => invoke('open_backup_folder')) }, 'Open backup folder'),
-      h('span', { class: 'grow' }),
-      admin && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete backups', files.map((f) => ({ id: f.name, label: fmtTime(f.modified), sub: `${f.name} · ${fileSize(f.size)}` })),
-        async (names) => `${await call('delete_backups', { names })} backup(s) deleted`, load) }, 'Delete several…')),
-    status,
-    admin && h('div', { class: 'muted small' }, h('strong', {}, 'Moving to a new PC? '),
-      state.remote ? 'Download a backup here, ' : 'Back up, open the backup folder and copy the newest backup to a USB stick, ',
-      'then on the new PC open Backup & data and use Restore everything from a file…'),
-    admin && folder,
-    list);
-}
-
-/// A small number box for the settings cards.
-const numBox = (value, attrs = {}) => h('input', { inputmode: 'decimal', value, style: 'width:70px', ...attrs });
-
-/// Settings card: kitchen screen colours, refresh, how long paid orders stay (managers too).
-function kdsCard() {
-  const card = h('div', { class: 'card stack' });
-  invoke('get_settings', { keys: KDS_KEYS }).then((raw) => {
-    const c = kdsSettings(raw);
-    const box = (v) => numBox(String(v), { inputmode: 'numeric' });
-    const slow = box(c.slow), late = box(c.late), refresh = box(c.refresh), paid = box(c.paid);
-    const dot = (cls) => h('span', { class: `kds-dot ${cls}` });
-    setKids(card,
-      h('h3', {}, 'Kitchen screen'),
-      h('div', { class: 'muted' }, 'The Kitchen screen (Manage → Kitchen screen) on a tablet: when a card changes colour, how often it refreshes, and how long a paid order with dishes still to cook stays on it.'),
-      h('div', { class: 'row' },
-        h('label', { class: 'field' }, dot('slow'), 'Orange after', slow, 'min'),
-        h('label', { class: 'field' }, dot('late'), 'Red after', late, 'min')),
-      h('label', { class: 'field' }, 'Refresh every', refresh, 'seconds (2 to 30)'),
-      h('label', { class: 'field' }, 'Keep paid orders for', paid, 'hours (0 to 24)'),
-      h('div', { class: 'muted small' }, '0 hours: a paid order leaves the screen at once, even if dishes are still to cook.'),
-      settingSwitch('kds_beep', 'Beep when a new ticket arrives', 'The kitchen screen beeps for new tickets', 'The kitchen screen is silent', false),
-      h('div', { class: 'muted small' }, 'A short beep on the kitchen screen\'s device. Browsers play sound only after a tap: if the screen shows "Tap to turn on the sound", tap it once.'),
-      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
-        const v = { slow: Number(slow.value), late: Number(late.value), refresh: Number(refresh.value), paid: Number(paid.value) };
-        const ok = (n, [lo, hi]) => Number.isInteger(n) && n >= lo && n <= hi;
-        if (!ok(v.slow, KDS_LIMITS.slow) || !ok(v.late, KDS_LIMITS.late)) return toast('Orange and red: whole minutes from 1 to 240', true);
-        if (v.late <= v.slow) return toast('Red must come after orange (more minutes)', true);
-        if (!ok(v.refresh, KDS_LIMITS.refresh)) return toast('Refresh: whole seconds from 2 to 30', true);
-        if (paid.value.trim() === '' || !ok(v.paid, KDS_LIMITS.paid)) return toast('Paid orders: whole hours from 0 to 24', true);
-        const values = { kds_slow_mins: v.slow, kds_late_mins: v.late, kds_refresh_secs: v.refresh, kds_paid_hours: v.paid };
-        for (const [key, value] of Object.entries(values)) await call('set_setting', { key, value: String(value) });
-        toast(`Kitchen screen saved: orange after ${v.slow} min, red after ${v.late} min, refresh every ${v.refresh} s`);
-      }) }, 'Save kitchen screen')));
-  }).catch((e) => setKids(card, h('div', { class: 'muted' }, String(e?.message ?? e))));
-  return card;
-}
-
-/// Settings card: whether drinks and desserts get their own tickets.
-function splitCard() {
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Own tickets for drinks and desserts'),
-    settingSwitch('drinks_split', 'Print drinks on their own DRINKS ticket', 'Drinks on their own ticket', 'Drinks print with the food'),
-    settingSwitch('desserts_split', 'Print desserts on their own DESSERTS ticket', 'Desserts on their own ticket', 'Desserts print with the food'),
-    h('div', { class: 'muted' }, 'Which items are drinks or desserts: Menu → tick "Drink" or "Dessert" on the item, or tap a category and tick "Drinks" / "Desserts" for all of it. ' +
-      'Off = they print on the normal ticket with the rest. Drinks still go to the kitchen straight away.'));
-}
-
-/// Reloads the "Which team makes this?" card on screen (after the teams are saved).
-let reloadTeamChoice = null;
-/// Settings card: "Which team makes this?" — the teams a dish can be moved
-/// to when it is ordered (setting team_choice: team ids, empty = off).
-function teamChoiceCard() {
-  const card = h('div', { class: 'card stack' });
-  // The saved list itself (team_choice reads empty while kitchen teams are switched off).
-  const load = () => Promise.all([call('list_teams'), call('get_setting', { key: 'team_choice' })]).then(([teams, raw]) => {
-    const chosen = (raw ?? '').split(',').map((x) => parseInt(x, 10)).filter((x) => !Number.isNaN(x));
-    const boxes = teams.map((t) => ({ t, box: h('input', { type: 'checkbox', checked: chosen.includes(t.id) }) }));
-    setKids(card,
-      h('h3', {}, 'Which team makes this?'),
-      h('div', { class: 'muted' }, 'Tick the teams staff can choose between. On a dine-in order, tapping a dish of one of these teams asks "Which team makes this?": ' +
-        'the dish then prints under that team (and on its printer) for this order only. Dishes of other teams are added straight away. ' +
-        'This replaces "Starter or Main course?"; a dish stays a starter or a main as the menu says. Only while kitchen teams are on.'),
-      teams.length ? h('div', { class: 'row' }, boxes.map((x) => h('label', { class: 'check' }, x.box, ` ${x.t.name}`)))
-        : h('div', { class: 'muted' }, 'Add teams above first.'),
-      h('div', { class: 'muted small' }, 'Tick two or more, or none to switch it off. A dish not yet sent can also be moved later: tap ✎ on it, then Team.'),
-      h('div', {}, h('button', { class: 'primary', onclick: act(async () => {
-        const ids = boxes.filter((x) => x.box.checked).map((x) => x.t.id);
-        if (ids.length === 1) return toast('Tick at least two teams, or none to switch it off', true);
-        await call('set_setting', { key: 'team_choice', value: ids.join(',') });
-        toast(ids.length ? `Staff choose between ${boxes.filter((x) => x.box.checked).map((x) => x.t.name).join(', ')}` : 'Team choice off');
-      }) }, 'Save')));
-  }).catch((e) => toast(String(e?.message ?? e), true));
-  load();
-  reloadTeamChoice = () => { if (card.isConnected) load(); };
-  return card;
-}
-
-/// An on/off switch for setting `key` ("1" / "0"; not set = `def`).
-function settingSwitch(key, label, onMsg, offMsg, def = true) {
-  const box = h('input', { type: 'checkbox', checked: def });
-  invoke('get_setting', { key }).then((v) => (box.checked = v == null ? def : v !== '0')).catch(() => {});
-  box.onchange = act(async () => {
-    await call('set_setting', { key, value: box.checked ? '1' : '0' });
-    toast(box.checked ? onMsg : offMsg);
-  });
-  return h('label', { class: 'switch', 'data-key': key }, box, h('span', {}, ''), label);
-}
-
-/// Tick several things and delete them in one go (admins only). `items`:
-/// [{ id, label, sub }]; `del(ids)` deletes and returns a message.
+/// Pick several things and delete them in one go (admins only), in a sheet:
+/// a switch per thing, then Delete N and a second tap. `items`: [{ id, label, sub }];
+/// `del(ids)` deletes and returns a message.
 function bulkDelete(title, items, del, done) {
   if (!items.length) return toast('Nothing to delete here', true);
   const picked = new Set();
-  const list = h('div', { class: 'stack bulk-list' });
-  const all = h('input', { type: 'checkbox' });
-  const btn = h('button', { class: 'danger' });
   let sure = false;
-  const draw = () => {
-    setKids(list, items.map((it) => {
-      const box = h('input', { type: 'checkbox', checked: picked.has(it.id) });
-      box.onchange = () => { if (box.checked) picked.add(it.id); else picked.delete(it.id); sure = false; drawBtn(); };
-      return h('label', { class: `bulk-row ${picked.has(it.id) ? 'on' : ''}` }, box, h('span', { class: 'grow' }, it.label), it.sub && h('span', { class: 'muted small' }, it.sub));
-    }));
-    all.checked = picked.size === items.length;
-    drawBtn();
-  };
   const drawBtn = () => {
-    btn.textContent = !picked.size ? 'Tick what to delete' : sure ? `Tap again: delete ${picked.size} for good` : `Delete ${picked.size}`;
-    btn.disabled = !picked.size;
+    s.save.textContent = !picked.size ? 'Pick what to delete' : sure ? `Tap again: delete ${picked.size}` : `Delete ${picked.size}`;
+    s.save.disabled = !picked.size;
   };
-  all.onchange = () => { picked.clear(); if (all.checked) items.forEach((it) => picked.add(it.id)); sure = false; draw(); };
-  btn.onclick = act(async () => {
-    if (!sure) { sure = true; drawBtn(); return; }
+  const rows = items.map((it) => switchRow({ label: it.label, hint: it.sub ?? '', value: false, onChange: (v) => {
+    if (v) picked.add(it.id); else picked.delete(it.id);
+    sure = false;
+    all.input.checked = picked.size === items.length;
+    drawBtn();
+  } }));
+  const all = switchRow({ label: 'All', hint: `${items.length}`, value: false, onChange: (v) => {
+    picked.clear();
+    if (v) items.forEach((it) => picked.add(it.id));
+    for (const r of rows) r.input.checked = v;
+    sure = false;
+    drawBtn();
+  } });
+  const s = sheet({ title, danger: true, saveLabel: 'Delete', body: [ssec(null, [all]), ssec(null, rows)], onSave: async () => {
+    if (!sure) { sure = true; drawBtn(); return false; }
     const msg = await del([...picked]);
-    closeModal();
     toast(msg);
-    await done?.();
-  });
-  showModal(h('div', { class: 'row' }, h('h3', { class: 'grow' }, title), h('label', { class: 'check' }, all, ' All')),
-    list, h('div', { class: 'row' }, btn, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Close')));
-  draw();
+    setTimeout(() => done?.());
+  } });
+  drawBtn();
 }
 
 /// Delete several of one kind through `delete_many`; the message says what happened.
@@ -5865,6 +5797,204 @@ function confirmBtn(label, sure, fn, cls = 'danger') {
     await fn();
   });
   return b;
+}
+
+// ---------- Settings: Backup & data ----------
+
+const KEEP_LIMITS = [3, 90, 14]; // backups_kept: min, max, not set
+const listBackups = () => call('list_full_backups', {}, { quiet: true }).catch(() => []);
+const listMenuBackups = () => call('list_menu_backups', {}, { quiet: true }).catch(() => []).then((l) => [...l].sort((a, b) => b.saved_at - a.saved_at));
+/// One full backup: when, kind · size, [Restore] and ⋯ (Download in a browser, Delete).
+function backupRow(f) {
+  const row = srow({ id: `b:${f.name}`, label: friendlyTime(f.modified), hint: `${backupKind(f.name)} · ${fileSize(f.size)}`, cls: 'brow', ctl: [
+    h('button', { class: 'test', onclick: async () => {
+      rowState(row, 'saving');
+      try { const sum = await call('inspect_backup', { name: f.name }, { quiet: true }); rowState(row, 'idle'); restoreSheet(f, sum); } catch (e) { rowState(row, 'error', String(e?.message ?? e), true); }
+    } }, 'Restore'),
+    moreMenu(friendlyTime(f.modified), () => [
+      state.remote && h('button', { onclick: act(() => downloadBackup(f.name)) }, 'Download'),
+      deleteItem(async () => { await call('delete_backups', { names: [f.name] }, { quiet: true }); toast('Backup deleted'); }),
+    ]),
+  ] });
+  return row;
+}
+/// One menu backup: when, N items, [Restore] (a confirm sheet) and ⋯ Delete.
+function menuBackupRow(f) {
+  return srow({ id: `m:${f.name}`, label: friendlyTime(f.saved_at), hint: `${f.items} items`, cls: 'brow', ctl: [
+    h('button', { class: 'test', onclick: () => menuReplaceSheet(`Restore the menu from ${friendlyTime(f.saved_at)}?`, `${f.items} items`, () => call('restore_menu_backup', { name: f.name }, { quiet: true })) }, 'Restore'),
+    moreMenu(friendlyTime(f.saved_at), () => [deleteItem(async () => { await call('delete_menu_backups', { names: [f.name] }, { quiet: true }); toast('Menu backup deleted'); })]),
+  ] });
+}
+/// Delete in a ⋯ menu: the first tap asks, the second deletes, then the page is drawn again.
+const deleteItem = (fn) => {
+  const b = confirmBtn('Delete', 'Tap again to delete', async () => { closeInfoPop(); await fn(); redrawGroup(); }, 'ghost danger');
+  b.dataset.keep = '1';
+  return b;
+};
+/// Replace the menu (from a menu backup or a file): one confirm sheet.
+function menuReplaceSheet(title, facts, run) {
+  sheet({ title, danger: true, saveLabel: 'Replace menu', body: [h('p', { class: 'snote' }, facts),
+    h('div', { class: 'warn-box' }, 'The menu here is replaced. Past orders do not change.')], onSave: async () => {
+    const n = await run();
+    state.menu = null;
+    toast(`Menu restored: ${n.items} items, ${n.categories} categories, ${n.option_groups} option groups`);
+    redrawGroup();
+  } });
+}
+/// A hidden file picker: `pick(file)` when one is chosen.
+const filePicker = (accept, pick) => {
+  const input = h('input', { type: 'file', accept, hidden: true });
+  input.addEventListener('change', () => { const f = input.files[0]; input.value = ''; if (f) pick(f); });
+  return input;
+};
+async function dataGroup() {
+  const [files, menus, raw, dir] = await Promise.all([listBackups(), listMenuBackups(), invoke('get_setting', { key: 'backups_kept' }).catch(() => null),
+    invoke('backup_folder').catch(() => null)]);
+  const [KMIN, KMAX, KDEF] = KEEP_LIMITS;
+  const kept = Number(raw);
+  const last = files[0];
+  const backupBtn = h('button', { class: 'primary', onclick: async () => {
+    const row = backupBtn.closest('.srow');
+    backupBtn.disabled = true;
+    rowState(row, 'saving');
+    try { toast(`Backup saved: ${await call('backup_now', {}, { quiet: true })}`); await redrawGroup('backup'); } catch (e) { backupBtn.disabled = false; rowState(row, 'error', String(e?.message ?? e)); }
+  } }, 'Back up now');
+  // Restore from a file: the upload's progress in the row's hint, then the restore sheet.
+  const fromFile = navRow({ id: 'fromfile', label: 'Restore from a file…', onOpen: () => fullPick.click() });
+  const fullPick = filePicker('.db', async (f) => {
+    try {
+      const r = await uploadBackup(f, (n) => setHint(fromFile, `Loading ${f.name}… ${n} %`));
+      setHint(fromFile, '');
+      restoreSheet(r.file, r.summary);
+    } catch (e) { setHint(fromFile, ''); rowState(fromFile, 'error', String(e?.message ?? e), true); }
+  });
+  const menuPick = filePicker('.json,application/json', async (f) => {
+    let menu;
+    try { menu = JSON.parse(await f.text()); } catch { menu = null; }
+    if (menu?.format !== 'pos-menu') return rowState(menuFile, 'error', 'This file is not a POS menu backup', true);
+    menuReplaceSheet(`Replace the menu with ${f.name}?`, `${menu.items.length} items, ${menu.categories.length} categories`, () => call('import_menu', { menu }, { quiet: true }));
+  });
+  const menuFile = navRow({ id: 'menufile', label: 'Load a menu file…', onOpen: () => menuPick.click() });
+  const menuBtn = h('button', { class: 'test', onclick: async () => {
+    const row = menuBtn.closest('.srow');
+    rowState(row, 'saving');
+    try {
+      const r = await call('backup_menu', {}, { quiet: true });
+      toast(`Menu saved (${r.file.items} items)`);
+      if (state.remote) {
+        // In a browser, also give the user the file.
+        const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(r.menu, null, 2)], { type: 'application/json' })), download: r.file.name });
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }
+      await redrawGroup('menu');
+    } catch (e) { rowState(row, 'error', String(e?.message ?? e)); }
+  } }, 'Back up');
+  return [
+    ssec('Full backup', [
+      statusRow({ id: 'backup', icon: 'database', title: 'Last backup', meta: `${last ? friendlyTime(last.modified) : 'None yet'} · daily at start`, action: backupBtn }),
+      stepperRow({ id: 'backups_kept', label: 'Keep', hint: 'Daily copies only', value: Number.isInteger(kept) && kept >= KMIN && kept <= KMAX ? kept : KDEF,
+        min: KMIN, max: KMAX, unit: 'backups', save: (v) => saveKey('backups_kept', v) }),
+      files.slice(0, 3).map(backupRow),
+      files.length > 3 && navRow({ id: 'allbackups', label: 'All backups', value: String(files.length), onOpen: () => openSub('backups') }),
+      fromFile, fullPick,
+      dir && srow({ id: 'folder', label: 'Backup folder', hint: dir, cls: 'path-row',
+        tip: 'Moving to a new PC? Copy the newest backup to a USB stick, then use Restore from a file there.',
+        ctl: !state.remote && h('button', { class: 'test', onclick: act(() => invoke('open_backup_folder')) }, 'Open') }),
+    ]),
+    ssec('Menu only', [
+      srow({ id: 'menu', label: 'Back up the menu', ctl: menuBtn }),
+      menus.slice(0, 3).map(menuBackupRow),
+      menus.length > 3 && navRow({ id: 'allmenus', label: 'All menu backups', value: String(menus.length), onOpen: () => openSub('menus') }),
+      menuFile, menuPick,
+    ]),
+    ssec('Danger zone', [navRow({ id: 'reset', label: 'Reset data…', cls: 'danger', onOpen: resetSheet })]),
+  ];
+}
+/// Backup & data › All backups (or All menu backups): every one, and Select… to delete several.
+async function backupsPage(kind) {
+  const full = kind === 'full';
+  const list = full ? await listBackups() : await listMenuBackups();
+  const select = () => (full
+    ? bulkDelete('Delete backups', list.map((f) => ({ id: f.name, label: friendlyTime(f.modified), sub: `${backupKind(f.name)} · ${fileSize(f.size)}` })),
+      async (names) => `${await call('delete_backups', { names })} backup(s) deleted`, () => redrawGroup())
+    : bulkDelete('Delete menu backups', list.map((f) => ({ id: f.name, label: friendlyTime(f.saved_at), sub: `${f.items} items` })),
+      async (names) => `${await call('delete_menu_backups', { names })} menu backup(s) deleted`, () => redrawGroup()));
+  if (!list.length) return [h('div', { class: 'sgroup' }, emptyState({ icon: 'database', title: 'No backups yet', text: full ? 'One is made every day at start.' : 'Back up the menu first.' }))];
+  return [h('div', { class: 'sbar' }, h('span', { class: 'grow muted' }, `${list.length} backup${list.length === 1 ? '' : 's'}`), h('button', { onclick: select }, 'Select…')),
+    h('div', { class: 'sgroup' }, list.map(full ? backupRow : menuBackupRow))];
+}
+/// Danger zone: delete chosen data (switches), with the PIN and RESET typed. A full backup is made first.
+function resetSheet() {
+  const f = { sales: false, when: 'all', date: today(), customers: false, menu: false, floor: false, staff: false, settings: false };
+  const date = h('input', { type: 'date', value: f.date, hidden: true, 'aria-label': 'Before this date' });
+  date.addEventListener('change', () => { f.date = date.value; });
+  const whenRow = srow({ label: 'Which sales', stacked: true, cls: 'when-row', ctl: [sseg([['all', 'All'], ['before', 'Before a date']], 'all', (v) => { f.when = v; date.hidden = v !== 'before'; }, 'Which sales'), date] });
+  whenRow.hidden = true;
+  const sw = (key, label, hint) => switchRow({ label, hint, value: false, onChange: (v) => { f[key] = v; if (key === 'sales') whenRow.hidden = !v; check(); } });
+  const pin = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'off', 'aria-label': 'Your PIN' });
+  const word = h('input', { placeholder: 'RESET', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', 'aria-label': 'Type RESET' });
+  const any = () => f.sales || f.customers || f.menu || f.floor || f.staff || f.settings;
+  const s = sheet({ title: 'Reset data', danger: true, saveLabel: 'Delete selected', body: [
+    ssec('Delete', [sw('sales', 'Sales history', 'Orders, payments, day closes'), whenRow, sw('customers', 'Customers'), sw('menu', 'Menu'),
+      sw('floor', 'Floor plan'), sw('staff', 'Staff', 'Everyone except you'), sw('settings', 'Settings')]),
+    h('div', { class: 'warn-box' }, 'A full backup is saved first.'),
+    ssec('Confirm', [srow({ label: 'Your PIN', cls: 'text-row', ctl: pin }), srow({ label: 'Type RESET', cls: 'text-row', ctl: word })]),
+  ], onSave: async () => {
+    const options = {
+      sales: f.sales ? (f.when === 'all' ? { when: 'all' } : { when: 'before', date: f.date }) : null,
+      customers: f.customers, menu: f.menu, floor_plan: f.floor, staff: f.staff, settings: f.settings,
+    };
+    const r = await call('reset_data', { options, pin: pin.value, confirm: word.value.trim() }, { quiet: true });
+    const n = r.report;
+    toast(`Deleted: ${n.orders} orders, ${n.customers} customers, ${n.items} items, ${n.tables} tables, ${n.staff} staff. A full backup was saved first.`);
+    Object.assign(state, { menu: null, cats: null });
+    setTimeout(() => start().catch((e) => toast(String(e?.message ?? e), true)));
+  } });
+  const NAMES = [['sales', 'sales history'], ['customers', 'customers'], ['menu', 'menu'], ['floor', 'floor plan'], ['staff', 'staff'], ['settings', 'settings']];
+  function check() {
+    const picked = NAMES.filter(([k]) => f[k]).map(([, n]) => n);
+    s.save.textContent = !picked.length ? 'Delete selected' : picked.length <= 2 ? `Delete ${picked.join(' & ')}` : `Delete ${picked.length} kinds`;
+    s.save.disabled = !(any() && word.value.trim() === 'RESET' && /^\d{4,8}$/.test(pin.value));
+  }
+  pin.addEventListener('input', check);
+  word.addEventListener('input', check);
+  check();
+}
+
+// ---------- Settings: About ----------
+
+/// Product name, version and credits (word for word), then Updates (admins on the main till).
+function creditsCard() {
+  return h('div', { class: 'about-credits sgroup' },
+    h('img', { class: 'about-logo', src: 'icon.png', alt: '' }),
+    h('div', { class: 'about-text' },
+      h('div', { class: 'about-head' }, h('h3', { class: 'about-name' }, 'Limehouse POS'), state.version && h('span', { class: 'chip info' }, `Version ${state.version}`)),
+      h('div', { class: 'about-by' }, 'Developed by ', h('strong', {}, 'Pheeraphat Bunliang')),
+      h('div', { class: 'muted small' }, 'Designed and developed with AI-assisted programming.'),
+      h('div', { class: 'about-copy muted small' }, '© 2026 Pheeraphat Bunliang. All rights reserved.')));
+}
+function aboutGroup() {
+  if (!isAdmin()) return [creditsCard()];
+  if (state.remote) return [creditsCard(), ssec('Updates', [srow({ id: 'updates', label: 'Updates', hint: 'Installed on the main till' })])];
+  const btn = h('button', { class: 'test' }, 'Check now');
+  const row = srow({ id: 'updates', label: 'Updates', hint: 'Checked every few hours', ctl: btn,
+    tip: 'Installing takes about a minute. A backup is made first. Orders, menu and settings are kept.' });
+  const drawReady = (v) => {
+    setHint(row, `Version ${v} is ready`);
+    setKids(row.querySelector('.srow-ctl'), h('button', { class: 'primary', onclick: installUpdate }, 'Install'));
+  };
+  btn.onclick = async () => {
+    btn.disabled = true;
+    rowState(row, 'saving');
+    const info = await checkForUpdate(true);
+    btn.disabled = false;
+    if (!info) return rowState(row, 'error', 'Could not check. Try again later.', true);
+    rowState(row, 'saved');
+    if (info.available) drawReady(info.available); else setHint(row, `Up to date · ${info.current}`);
+  };
+  if (state.update?.available) drawReady(state.update.available);
+  return [creditsCard(), ssec('Updates', [row])];
 }
 
 // ---------- full backups: restore, load from a file, download ----------
@@ -5909,143 +6039,36 @@ async function downloadBackup(name) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
-/// Show what a backup holds, then RESTORE typed and the admin's PIN replace
-/// all data with it. `f`: the backup file (name, modified); `s`: inspect_backup.
-function restoreDialog(f, s) {
-  const word = h('input', { placeholder: 'Type RESTORE', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', style: 'width:170px' });
-  const go = h('button', { class: 'danger solid', disabled: true }, 'Restore…');
-  word.oninput = () => (go.disabled = word.value.trim() !== 'RESTORE');
-  const fact = (k, v) => [h('span', { class: 'muted' }, k), h('strong', {}, String(v))];
+/// Show what a backup holds, then RESTORE typed and the admin's PIN (the keypad,
+/// after the sheet) replace all data with it. `f`: the file (name, modified); `s`: inspect_backup.
+function restoreSheet(f, s) {
   const when = s.last_used_at ?? f.modified;
-  go.onclick = act(async () => {
-    let r;
-    const ok = await pinDialog({
-      title: 'Enter your PIN to restore', hint: 'All data on this till will be replaced by the backup.', okLabel: 'Restore now', okClass: 'danger solid paybig',
-      submit: async (pin) => {
-        try { r = await invoke('restore_backup', { name: f.name, pin, confirm: word.value }); } catch (e) { return String(e?.message ?? e); }
-      },
-    });
-    if (!ok) return;
+  const word = h('input', { placeholder: 'RESTORE', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', 'aria-label': 'Type RESTORE' });
+  const pin = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'off', 'aria-label': 'Your PIN' });
+  const fact = (k, v) => h('div', {}, h('span', { class: 'muted' }, k), h('strong', {}, String(v)));
+  const sh = sheet({ title: 'Restore this backup?', danger: true, saveLabel: 'Restore now', body: [
+    h('div', { class: 'restore-facts' },
+      fact('Restaurant', s.store_name ?? '(no name)'), fact('Last used', friendlyTime(when)),
+      fact('Orders', s.open_orders ? `${s.orders} (${s.open_orders} open)` : s.orders), fact('Menu items', s.menu_items),
+      fact('Customers', s.customers), fact('Staff', s.staff)),
+    h('p', { class: 'snote' }, `${backupKind(f.name)} · ${fileSize(f.size ?? 0)}`, s.schema_version < s.app_schema_version ? ' · older version: brought up to date' : ''),
+    h('div', { class: 'warn-box' }, 'Everything here is replaced. A safety copy is saved first. All devices log out.'),
+    ssec('Confirm', [srow({ label: 'Type RESTORE', cls: 'text-row', ctl: word }), srow({ label: 'Your PIN', cls: 'text-row', ctl: pin })]),
+  ], onSave: async () => {
+    const r = await invoke('restore_backup', { name: f.name, pin: pin.value, confirm: word.value.trim() });
     const n = r.summary;
-    const msg = `Restored backup from ${fmtTime(when)}: ${n.orders} orders, ${n.menu_items} menu items, ${n.customers} customers, ${n.staff} staff. ` +
+    const msg = `Restored backup from ${friendlyTime(when)}: ${n.orders} orders, ${n.menu_items} menu items, ${n.customers} customers, ${n.staff} staff. ` +
       'Log in with a PIN from the backup.';
     // Reload like every other till and tablet will, and say what happened after.
     try { sessionStorage.setItem(FLASH_KEY, msg); } catch {}
     forgetSession();
     location.reload();
-  });
-  showModal(h('h3', {}, 'Restore this backup?'),
-    h('div', { class: 'restore-facts' },
-      fact('Restaurant', s.store_name ?? '(no name)'), fact('Last used', fmtTime(when)),
-      fact('Orders', s.open_orders ? `${s.orders} (${s.open_orders} open)` : s.orders), fact('Menu items', s.menu_items),
-      fact('Customers', s.customers), fact('Staff', s.staff)),
-    h('div', { class: 'muted small' }, `${backupKind(f.name)} · ${f.name}`,
-      s.schema_version < s.app_schema_version ? ' · from an older version of the app: it is brought up to date' : ''),
-    h('div', { class: 'warn-box' }, h('strong', {}, 'Everything on this till is replaced: '),
-      'orders, menu, customers, staff and PINs, and settings all come from the backup. ',
-      'A safety copy of the current data is saved first ("Before a restore" in the list), so you can go back. ',
-      'Every till, tablet and kitchen screen is logged out: log in with a PIN from the backup.'),
-    h('div', { class: 'row' }, word, go, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Cancel')));
-  word.focus();
-}
-
-/// Menu only: save, list, restore, and restore from a file (another till).
-function menuBackupCard() {
-  const list = h('div', { class: 'stack' });
-  let menuFiles = [];
-  const restored = async (n) => {
-    state.menu = null;
-    toast(`Menu restored: ${n.items} items, ${n.categories} categories, ${n.option_groups} option groups`);
-  };
-  const load = async () => {
-    const files = await call('list_menu_backups');
-    menuFiles = files;
-    setKids(list, files.length
-      ? h('table', {}, files.slice(0, 10).map((f) => h('tr', {},
-        h('td', {}, fmtTime(f.saved_at)), h('td', { class: 'muted' }, `${f.items} items`),
-        h('td', { class: 'num' }, confirmBtn('Restore', 'Tap again: replace the menu', async () => restored(await call('restore_menu_backup', { name: f.name })), ''),
-          isAdmin() && confirmBtn('Delete', 'Tap again to delete', async () => { await call('delete_menu_backups', { names: [f.name] }); toast('Menu backup deleted'); await load(); }, 'danger-outline')))))
-      : h('div', { class: 'muted' }, 'No menu backups yet.'));
-  };
-  const file = h('input', { type: 'file', accept: '.json,application/json', hidden: true });
-  const picked = h('div');
-  file.onchange = act(async () => {
-    const f = file.files[0];
-    file.value = '';
-    if (!f) return;
-    let menu;
-    try { menu = JSON.parse(await f.text()); } catch { return toast('This file is not a POS menu backup', true); }
-    if (menu?.format !== 'pos-menu') return toast('This file is not a POS menu backup', true);
-    setKids(picked, h('div', { class: 'row card' },
-      h('span', { class: 'grow' }, `${f.name}: ${menu.items.length} items, ${menu.categories.length} categories`),
-      confirmBtn('Replace menu with this file', 'Tap again to replace the menu', async () => {
-        restored(await call('import_menu', { menu }));
-        setKids(picked);
-      }, 'primary'),
-      h('button', { onclick: () => setKids(picked) }, 'Cancel')));
-  });
-  const save = act(async () => {
-    const r = await call('backup_menu');
-    toast(`Menu saved (${r.file.items} items)`);
-    if (state.remote) {
-      // In a browser, also give the user the file.
-      const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(r.menu, null, 2)], { type: 'application/json' })), download: r.file.name });
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    }
-    await load();
-  });
-  load().catch(() => {});
-  return h('div', { class: 'card stack' },
-    h('h3', {}, 'Menu backup'),
-    h('p', { class: 'muted' }, 'Save just the menu (categories, items, choices, options and prices), then restore it later or load it on another till. ' +
-      'Restoring replaces the current menu; past orders are not changed.'),
-    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: save }, 'Back up menu'),
-      h('button', { onclick: () => file.click() }, 'Restore from a file…'), file, h('span', { class: 'grow' }),
-      isAdmin() && h('button', { class: 'danger-outline', onclick: () => bulkDelete('Delete menu backups', menuFiles.map((f) => ({ id: f.name, label: fmtTime(f.saved_at), sub: `${f.items} items` })),
-        async (names) => `${await call('delete_menu_backups', { names })} menu backup(s) deleted`, load) }, 'Delete several…')),
-    picked, list);
-}
-
-/// Danger zone: delete chosen data (admin only, PIN + RESET, full backup first).
-function resetCard() {
-  const box = (label, hint) => {
-    const input = h('input', { type: 'checkbox' });
-    return { input, el: h('label', { class: 'check' }, input, h('span', {}, h('strong', {}, label), hint && h('span', { class: 'muted' }, ` · ${hint}`))) };
-  };
-  const sales = box('Sales history', 'orders, payments, day closes');
-  const salesWhen = h('select', {}, h('option', { value: 'all' }, 'All sales, including open orders'), h('option', { value: 'before' }, 'Only sales before a date'));
-  const salesDate = h('input', { type: 'date', value: today(), hidden: true });
-  salesWhen.onchange = () => (salesDate.hidden = salesWhen.value !== 'before');
-  const salesOpts = h('div', { class: 'row', style: 'padding-left:28px', hidden: true }, salesWhen, salesDate);
-  sales.input.onchange = () => (salesOpts.hidden = !sales.input.checked);
-  const customers = box('Customers', 'saved names, phones, addresses');
-  const menu = box('Menu', 'categories, items, options, stock');
-  const floor = box('Floor plan', 'floors and tables');
-  const staff = box('Staff', 'everyone except you');
-  const settings = box('Settings', 'restaurant name, printers, platforms, display, local server');
-  const pin = h('input', { type: 'password', inputmode: 'numeric', placeholder: 'Your PIN', style: 'width:140px' });
-  const confirm = h('input', { placeholder: 'Type RESET', style: 'width:140px' });
-  const go = act(async () => {
-    const options = {
-      sales: sales.input.checked ? (salesWhen.value === 'all' ? { when: 'all' } : { when: 'before', date: salesDate.value }) : null,
-      customers: customers.input.checked, menu: menu.input.checked, floor_plan: floor.input.checked,
-      staff: staff.input.checked, settings: settings.input.checked,
-    };
-    if (!options.sales && !Object.entries(options).some(([k, v]) => k !== 'sales' && v)) return toast('Tick what you want to delete', true);
-    const r = await call('reset_data', { options, pin: pin.value, confirm: confirm.value });
-    pin.value = confirm.value = '';
-    const n = r.report;
-    toast(`Deleted: ${n.orders} orders, ${n.customers} customers, ${n.items} items, ${n.tables} tables, ${n.staff} staff. A full backup was saved first.`);
-    Object.assign(state, { menu: null, cats: null });
-    await start();
-  });
-  return h('div', { class: 'card stack danger-zone' },
-    h('h3', {}, 'Danger zone · Reset data'),
-    h('p', { class: 'muted' }, 'Tick only what you want to DELETE. Everything left unticked is kept. ' +
-      'A full backup is saved automatically first, so a mistake can be undone from the backups folder.'),
-    sales.el, salesOpts, customers.el, menu.el, floor.el, staff.el, settings.el,
-    h('div', { class: 'row' }, pin, confirm, h('button', { class: 'danger solid', onclick: go }, 'Delete selected data')));
+    return false;
+  } });
+  const check = () => { sh.save.disabled = !(word.value.trim() === 'RESTORE' && /^\d{4,8}$/.test(pin.value)); };
+  word.addEventListener('input', check);
+  pin.addEventListener('input', check);
+  check();
 }
 
 // ---------- full screen ----------

@@ -129,7 +129,7 @@ fn kitchen_tickets_per_round() {
     let (burger, size, extras) = burger_with_options(&mut pos, &admin);
     let floor = pos.create_floor(&admin, "Ground").unwrap();
     let t = pos
-        .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: true, id: None, name: "T3".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+        .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: Some(true), id: None, name: "T3".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
     let o = pos.open_order(&admin, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t[0].id), channel_id: None, details: Default::default() }).unwrap();
     pos.add_item(&admin, o.id, burger.id, 2, Some("no onions"), None, &[id(&size, "Large"), id(&extras, "Cheese")]).unwrap();

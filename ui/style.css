@@ -262,7 +262,9 @@ body.locked main { padding: 0; }
 .lock-stack { display: flex; flex-direction: column; align-items: center; gap: 16px; }
 button.quit { min-width: 180px; background: transparent; border: 1px solid var(--line-2); color: var(--muted); }
 button.quit:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
-.lock-main { display: grid; place-items: center; padding: 24px; background: var(--bg); }
+.lock-main { display: grid; place-items: center; padding: 24px; background: var(--bg); position: relative; }
+.lock-theme { display: none; position: absolute; top: 10px; right: 10px; color: var(--muted); }
+@media (max-width: 900px) { .lock-main .lock-theme { display: inline-flex; } }
 .lock-card { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow-md); padding: 32px; display: flex; flex-direction: column; align-items: center; gap: 18px; width: min(380px, 100%); }
 .lock-card.stack { align-items: stretch; }
 .pindots { display: flex; gap: 14px; min-height: 18px; }
@@ -463,7 +465,8 @@ button.small-btn { min-height: 36px; padding: 0 10px; font-size: 13px; margin-le
 
 /* ---------- dialogs ---------- */
 #modal { position: fixed; inset: 0; background: rgba(16, 24, 40, .45); display: flex; align-items: center; justify-content: center; z-index: 20; padding: 16px; }
-.dialog { width: min(480px, 100%); max-height: calc(100vh - 32px); overflow: auto; border-radius: 18px; padding: 22px; box-shadow: var(--shadow-lg); border: 0; }
+/* max-height 100%: the room #modal leaves, above the on-screen keyboard when it is open. */
+.dialog { width: min(480px, 100%); max-height: 100%; overflow: auto; scroll-padding-block: 12px; border-radius: 18px; padding: 22px; box-shadow: var(--shadow-lg); border: 0; }
 .dialog h3 { margin: 0; font-size: 20px; }
 .big { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .huge { font-size: 64px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--go); line-height: 1.1; }
@@ -805,12 +808,19 @@ td.short, strong.short { color: var(--danger); }
 .kds-done { margin: 10px; min-height: 52px; font-size: 18px; }
 .kds-item { justify-content: flex-start; }
 
-/* Finish & Pay: everything on one screen */
-.dialog.pay-wide { width: min(940px, 100%); padding: 0; overflow: hidden; }
-.pay-one { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px 22px; padding: 0 20px 20px; }
-.pay-head { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; margin: 0 -20px; padding: 14px 14px 14px 20px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+/* Finish & Pay: everything on one screen. The header (close) and the footer
+   (the total and Take) never scroll away; only the part between them scrolls
+   on a short screen, a phone or with many dishes. */
+.dialog.pay-wide { width: min(940px, 100%); padding: 0; overflow: hidden; gap: 0; display: flex; flex-direction: column; }
+.pay-head { flex: none; display: flex; align-items: center; gap: 14px; padding: 14px 14px 14px 20px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .pay-head h3 { font-size: 21px; }
-.pay-total { display: flex; align-items: baseline; gap: 8px; }
+.pay-head .grow { min-width: 0; }
+.pay-head h3, .pay-head .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pay-total { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+.pay-one { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 18px 22px; padding: 18px 20px 14px; }
+.pay-foot { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 22px; align-items: stretch; padding: 12px 20px 18px; border-top: 1px solid var(--line); background: var(--surface); }
+.pay-foot .pay-sum { margin: 0; justify-content: center; }
+.pay-sum.in-body { display: none; }
 .pay-right { padding-left: 22px; border-left: 1px solid var(--line); margin-left: -1px; }
 .pay-left, .pay-right { gap: 10px; }
 .pay-label { font-size: 12.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin-top: 2px; }
@@ -825,7 +835,7 @@ td.short, strong.short { color: var(--danger); }
 .pay-field strong { text-align: right; font-size: 28px; font-variant-numeric: tabular-nums; }
 .pay-field small { grid-column: 1 / -1; text-align: right; font-size: 14px; font-weight: 700; color: var(--go); }
 .pay-field.focus { border: 2px solid var(--brand); box-shadow: var(--focus); }
-.pay-sum { margin-top: auto; border-radius: var(--radius); background: var(--surface-2); border: 1px solid var(--line); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+.pay-sum { margin-top: auto; border-radius: var(--radius); background: var(--surface-2); border: 1px solid var(--line); padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; }
 .pay-sum .grand { font-size: 22px; }
 .pay-sum .grand strong { font-size: 26px; font-variant-numeric: tabular-nums; }
 .row.quick button { flex: 1; min-height: 46px; white-space: nowrap; }
@@ -834,33 +844,49 @@ td.short, strong.short { color: var(--danger); }
 .pay-hint { padding: 12px; background: var(--surface-2); border-radius: var(--radius-sm); }
 .pay-ok { min-height: 76px; font-size: 21px; }
 .pay-right .keypad button { min-height: 52px; }
-/* Finish & Pay fits on a 600px-high screen (1024 x 600) without scrolling. */
-@media (max-height: 660px) and (min-width: 761px) {
-  .pay-head { padding-block: 8px; }
-  .pay-left, .pay-right { gap: 8px; }
-  .seg.methods button { min-height: 50px; }
-  .pay-field { min-height: 56px; padding: 4px 14px; }
-  .pay-field strong { font-size: 24px; }
-  .row.quick button { min-height: 42px; }
-  .pay-right .keypad button { min-height: 44px; font-size: 20px; }
-  .pay-ok { min-height: 56px; font-size: 19px; }
-}
-/* Many dishes: the dish list shrinks to the space left (it scrolls), so the
-   total under it stays in view, part payments and tip included. */
+/* Many dishes: the dish list shrinks to the space left (it scrolls), so
+   what is under it stays in view, part payments and tip included. */
 @media (min-width: 761px) {
-  .pay-one { max-height: calc(100vh - 32px); grid-template-rows: auto minmax(0, 1fr); }
+  .pay-right .row.quick { flex-wrap: nowrap; gap: 6px; }
+  .pay-right .row.quick button { flex: 1 1 auto; min-width: 0; padding: 0 8px; }
   .pay-left > * { flex-shrink: 0; }
   .pay-left > .dish-pick { flex-shrink: 1; min-height: 96px; }
   .pay-left > .pay-parts { flex-shrink: 1; min-height: 52px; overflow: auto; }
 }
-@media (min-width: 761px) and (max-height: 640px) {
+/* Finish & Pay fits on a 600px-high screen (1024 x 600) without scrolling. */
+@media (max-height: 660px) and (min-width: 761px) {
+  .pay-head { padding-block: 6px; gap: 12px; }
+  .pay-head h3 { font-size: 18px; }
+  .pay-head .big { font-size: 22px; }
+  .pay-head .icon-btn { min-height: 40px; height: 40px; width: 40px; min-width: 40px; }
+  .pay-one { padding: 10px 20px 8px; gap: 10px 22px; }
+  .pay-left, .pay-right { gap: 6px; }
+  .pay-label { margin-top: 0; }
+  .seg button { min-height: 46px; }
+  .seg.methods button { min-height: 46px; flex-direction: row; gap: 8px; }
+  .pay-field { min-height: 52px; padding: 3px 14px; }
+  .pay-field strong { font-size: 24px; line-height: 1.15; }
+  .pay-field small { line-height: 1.1; }
+  .row.quick button { min-height: 42px; }
+  .pay-right .keypad { gap: 5px; }
+  .pay-right .keypad button { min-height: 42px; font-size: 20px; }
+  .pay-foot { padding: 8px 20px 10px; }
+  .pay-sum { padding: 6px 14px; }
+  .pay-sum .grand { font-size: 19px; }
+  .pay-sum .grand strong { font-size: 22px; }
+  .pay-ok { min-height: 54px; font-size: 19px; }
   .pay-left > .dish-pick { min-height: 64px; }
 }
+/* Phones: one column; the total is in the scrolling part and the footer is just Take. */
 @media (max-width: 760px) {
-  .pay-one { grid-template-columns: 1fr; padding: 0 14px 14px; }
-  .pay-head { margin: 0 -14px; padding-left: 14px; }
+  .pay-one { grid-template-columns: 1fr; grid-template-rows: none; padding: 14px; gap: 14px; }
+  .pay-head { padding: 8px 8px 8px 14px; gap: 10px; }
+  .pay-head h3 { font-size: 18px; }
   .pay-right { padding-left: 0; border-left: 0; margin-left: 0; }
-  .dialog.pay-wide { overflow: auto; }
+  .pay-foot { grid-template-columns: 1fr; padding: 10px 14px 14px; }
+  .pay-sum.in-body { display: flex; }
+  .pay-sum.in-foot { display: none; }
+  .pay-ok { min-height: 60px; font-size: 19px; }
 }
 .pay-field small.bad { color: var(--danger); }
 .dish-choices { gap: 6px; }
@@ -1059,14 +1085,10 @@ body.big-buttons .new-tile { min-height: 112px; font-size: 19px; }
   .ticket-head { padding: 8px 12px 6px; }
 }
 @media (max-height: 660px) and (min-width: 901px) {
-  .tools button { flex-direction: row; min-height: 40px; gap: 4px; }
-  .tools button span:last-child { font-size: 12px; }
-}
-/* Finish & Pay on a 600px-high screen: method icons beside the label, tighter cash field. */
-@media (max-height: 660px) and (min-width: 761px) {
-  .seg.methods button { flex-direction: row; gap: 8px; }
-  .pay-field strong { line-height: 1.15; }
-  .pay-field small { line-height: 1.1; }
+  /* Icon over the label, as on taller screens (beside it, "Customer" did not fit), just tighter. */
+  .tools button { flex-direction: column; min-height: 40px; gap: 0; padding: 2px; }
+  .tools button span:last-child { font-size: 12px; line-height: 1.15; white-space: nowrap; }
+  .tools .icon svg { width: 17px; height: 17px; }
 }
 .pay-one .seg button { white-space: nowrap; }
 
@@ -1140,15 +1162,31 @@ body { flex-direction: column; }
 #bar .who { padding-left: 10px; }
 /* The tabs say where you are; the page title only shows on phones. */
 @media (min-width: 901px) { #title { display: none; } }
-@media (max-width: 1320px) { #bar .who-text, #mode { display: none; } }
+/* Narrower screens drop words, never the clock, the business day or who is
+   logged in: the name stays (cut short if long), the role goes. */
+#bar .who-text strong { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1320px) {
+  #mode, #bar .who-text small { display: none; }
+  #bar .who-text strong { max-width: 110px; }
+  #bar .who { gap: 8px; }
+}
 @media (max-width: 1180px) and (min-width: 901px) {
-  #clock, #help .help-label { display: none; }
+  #help .help-label { display: none; }
   #help { padding: 0; }
   #nav button { padding: 0 12px 0 10px; font-size: 14.5px; }
+  #clock { font-size: 16px; }
 }
-@media (max-width: 1040px) and (min-width: 901px) {
-  #bizday { display: none; }
+@media (max-width: 1100px) and (min-width: 901px) {
+  #bar { gap: 8px; }
+  #nav { margin: 0 2px; }
   #nav button { padding: 0 10px; gap: 6px; }
+  #bar .who-text strong { max-width: 84px; }
+  #bar .avatar { width: 34px; height: 34px; }
+}
+/* 901-1000 px: the page tabs are icons with their names as tooltips. */
+@media (max-width: 1000px) and (min-width: 901px) {
+  #nav button { padding: 0 11px; }
+  #nav button .nav-label { display: none; }
 }
 @media (max-height: 820px) and (min-width: 901px) {
   #bar { min-height: 56px; padding: 6px 14px; }
@@ -1170,7 +1208,12 @@ body { flex-direction: column; }
   main.fill:has(.order.show-ticket) { padding-bottom: 8px; }
   #logout { min-width: 40px; }
 }
-body.kb-open #nav { display: none; }
+@media (max-width: 900px) { body.kb-open #nav { display: none; } }
+/* Typing in the card under the dishes (customer details…) with the on-screen
+   keyboard open: the tools and the money make room, and the card scrolls. */
+body.kb-open .ticket:has(.ticket-extra :focus) > :is(.tools, .ticket-foot) { display: none; }
+body.kb-open .ticket:has(.ticket-extra :focus) > .lines { flex: 0 1 auto; min-height: 0; max-height: 25%; }
+body.kb-open .ticket:has(.ticket-extra :focus) > .ticket-extra { flex: 1 1 auto; min-height: 0; overflow-y: auto; scroll-padding-block: 8px; }
 
 /* ---------- order screen ---------- */
 @media (min-width: 901px) {
@@ -1249,7 +1292,14 @@ body.big-buttons .menu .cats button { min-height: 54px; font-size: 16.5px; }
   .price-input, .price-locked, .edit-total .line-total { min-height: 50px; }
 }
 /* Phones: room for the page title; the editor keeps Save in view at the bottom. */
-@media (max-width: 600px) { #bizday { display: none; } }
+/* Phones: the business day stays, as a small chip beside the page name. */
+@media (max-width: 600px) {
+  #bizday { font-size: 12px; padding: 2px 7px; flex: none; }
+  #bar { gap: 6px; }
+}
+@media (max-width: 330px) { #bizday { display: none; } }
+/* A field brought into view (the on-screen keyboard's Next) stops above the sticky Save row. */
+.dialog.line-editor { scroll-padding-bottom: 96px; }
 .dialog.line-editor .edit-actions { position: sticky; bottom: -22px; margin-bottom: -22px; padding-bottom: 18px; background: var(--surface); z-index: 1; }
 @media (max-height: 700px) { .dialog.line-editor .edit-actions { bottom: -16px; margin-bottom: -16px; padding-bottom: 12px; } }
 @media (max-width: 560px) { .dialog.line-editor .edit-actions { bottom: -18px; margin-bottom: -18px; } }
@@ -1321,11 +1371,13 @@ body.big-buttons .line-editor .quick-notes button, body.big-buttons .line-editor
 }
 .plan-tools button { min-height: 44px; }
 .plan-tools .primary { min-width: 130px; }
+/* Save stays in view while the page scrolls (e.g. the on-screen keyboard is open over the shape's card). */
+.plan-tools { position: sticky; top: 0; z-index: 6; }
 .shape-ico { display: inline-block; width: 16px; height: 16px; border: 2px solid currentColor; border-radius: 4px; opacity: .8; }
 .shape-ico.rd { border-radius: 50%; }
 .shape-ico.area { width: 22px; height: 13px; border-style: dashed; border-radius: 3px; }
 .plan-editor { grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; }
-.plan-side { position: sticky; top: 0; }
+.plan-side { position: sticky; top: 76px; }
 .plan-empty { align-items: center; text-align: center; padding: 28px 20px; gap: 10px; }
 .plan-empty .icon { color: var(--hover-line); }
 .plan-card { gap: 12px; }

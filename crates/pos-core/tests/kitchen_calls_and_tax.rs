@@ -33,7 +33,7 @@ fn setup() -> (Pos, Session, Menu, i64) {
     assert!(wings.starter);
     let floor = pos.create_floor(&admin, "Ground").unwrap();
     let t = pos
-        .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: true, id: None, name: "T1".into(), shape: TableShape::Rect, x: 10, y: 10, w: 80, h: 80 }])
+        .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: Some(true), id: None, name: "T1".into(), shape: TableShape::Rect, x: 10, y: 10, w: 80, h: 80 }])
         .unwrap();
     (pos, admin, Menu { soup, wings, burger, cola }, t[0].id)
 }

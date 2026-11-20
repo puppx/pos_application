@@ -126,6 +126,8 @@ function applyTheme() {
     b.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
     b.setAttribute('aria-label', b.title);
   }
+  // E.g. the "Light or dark" card in Screen & devices shows the new choice.
+  document.dispatchEvent(new Event('themechange'));
 }
 function setTheme(p) {
   try { if (p === 'auto') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, p); } catch {}
@@ -407,7 +409,8 @@ function lockScreen(...kids) {
       clock, date,
       h('div', { class: 'lock-foot' }, h('span', { class: 'grow' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`),
         h('button', { class: 'ghost icon-btn theme-btn', onclick: toggleTheme }))),
-    h('div', { class: 'lock-main' }, ...kids)));
+    // On small screens the side (and its theme button) is hidden: one in the corner instead.
+    h('div', { class: 'lock-main' }, h('button', { class: 'ghost icon-btn theme-btn lock-theme', onclick: toggleTheme }), ...kids)));
   applyTheme();
 }
 
@@ -689,9 +692,10 @@ function renderShell() {
   document.getElementById('brand').title = state.storeName || 'POS';
   const navOn = inManage(state.view) ? 'settings' : state.view;
   document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , need, rail]) => rail && canSee(need)).map(([id, label]) =>
-    h('button', { class: !state.orderId && id === navOn ? 'on' : '', onclick: () => go(id), title: label }, icon(id), h('span', {}, label))));
+    h('button', { class: !state.orderId && id === navOn ? 'on' : '', onclick: () => go(id), title: label, 'aria-label': label }, icon(id), h('span', { class: 'nav-label' }, label))));
   const name = VIEWS.find(([id]) => id === state.view)?.[1];
   drawTitle(state.orderId ? 'Order' : name, !state.orderId && inManage(state.view) ? 'Manage' : null);
+  document.getElementById('who').title = `${state.session.name} · ${ROLE_LABEL[state.session.role] ?? 'Staff'}`;
   document.getElementById('who').replaceChildren(h('span', { class: 'avatar' }, initials(state.session.name)),
     h('span', { class: 'who-text' }, h('strong', {}, state.session.name), h('small', {}, ROLE_LABEL[state.session.role] ?? 'Staff')));
   document.getElementById('mode').hidden = !state.remote;
@@ -1151,7 +1155,8 @@ async function renderOrder() {
   const phoneBar = h('button', { class: 'phone-bar', onclick: () => { layout.classList.toggle('show-ticket'); draw(); } });
   // Dine-in: starters go first and the rest waits for "Call mains", unless ticked.
   const allCourses = h('input', { type: 'checkbox' });
-  const extra = h('div');
+  // Customer details, service charge, tax: a card under the dishes.
+  const extra = h('div', { class: 'ticket-extra' });
   let editing = null;
 
   // `course`: true = starter, false = main, null = as on the menu.
@@ -1351,7 +1356,8 @@ async function renderOrder() {
     if (!p.attempted && needPrinter) return toast('No kitchen printer is set up (Manage → Kitchen printer)', true);
     toast(p.attempted ? `${msg} · ticket printed` : msg);
   }
-  async function setLine(it, changes) {
+  // `pin`: a manager's PIN already typed for this change (the price, in the dish pop-up).
+  async function setLine(it, changes, pin = null) {
     // Fewer of a discounted dish: the discount shrinks with it (the same share off),
     // so − never gives more off or asks for a manager PIN.
     if (changes.qty > 0 && changes.qty < it.qty && it.discount_cents && !('discount_cents' in changes)) {
@@ -1359,30 +1365,43 @@ async function renderOrder() {
     }
     const args = { orderId, itemId: it.id, update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...changes } };
     try {
-      order = await invoke('update_item', args);
+      order = await invoke('update_item', pin ? { ...args, pin } : args);
     } catch (e) {
       const msg = String(e?.message ?? e);
       // Over the staff discount limit (Settings → Orders → Discounts): a manager approves with their PIN.
       if (!/needs a manager/i.test(msg)) {
-        if (msg === 'please log in') start();
+        if (msg === 'please log in') { forgetSession(); start(); }
         else if (isDeadOrder(msg)) leaveDeadOrder();
         // The dish is gone (removed or moved on another till): show the order as it is now.
         else if (msg === 'not found') { order = await call('get_order', { id: orderId }); draw(); toast(`${it.name} was changed on another till`, true); }
         else toast(msg, true);
         const err = new Error(msg); err.handled = true; throw err;
       }
+      // Over the discount limit, or more of a dish whose price was made cheaper (orders.rs update_item_approved).
+      const what = /changed price/i.test(msg) ? 'more' : 'discount';
       const ok = await pinDialog({
-        title: 'Manager PIN', hint: `${it.name}: ${msg}. A manager or admin enters their PIN to approve it.`, okLabel: 'Approve discount',
+        title: 'Manager PIN',
+        hint: what === 'more'
+          ? `${it.name}: ${it.qty} → ${changes.qty ?? it.qty} at ${money(it.unit_price_cents)} each, a price changed by a manager. A manager or admin enters their PIN to approve more of it.`
+          : `${it.name}: ${msg}. A manager or admin enters their PIN to approve it.`,
+        okLabel: what === 'more' ? `Approve ${changes.qty ?? it.qty} at ${money(it.unit_price_cents)}` : 'Approve discount',
         submit: async (pin) => {
           try { order = await invoke('update_item', { ...args, pin }); } catch (e2) {
             const m = String(e2?.message ?? e2);
+            if (m === 'please log in') { setTimeout(() => { forgetSession(); start(); }); return 'Logged out: log in again'; }
             if (isDeadOrder(m)) { setTimeout(leaveDeadOrder); return 'This order was closed on another till'; }
             return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
           }
         },
       });
-      if (!ok) { const err = new Error('Discount not approved'); err.handled = true; throw err; }
-      toast('Discount approved');
+      if (!ok) {
+        const err = new Error(what === 'more' ? `Not changed: ${it.name} stays at ${it.qty}` : 'Discount not approved');
+        err.handled = true;
+        err.notApproved = true;
+        toast(err.message, true);
+        throw err;
+      }
+      toast(what === 'more' ? 'Approved' : 'Discount approved');
     }
     // The dish now belongs to another bill (its order was joined onto it on another till).
     if (order.id !== orderId) { leaveDeadOrder(); return; }
@@ -1503,43 +1522,74 @@ async function renderOrder() {
     })();
 
     // Price first (it may need a manager's PIN), then quantity, note and discount.
+    // One message at the end says what was saved and what was not.
     const save = act(async () => {
       const p = priceNow();
       if (priceOk && p == null) return toast('Price: enter an amount like 12 or 12.50', true);
       const newPrice = priceOk ? p : it.unit_price_cents;
-      let cents = 0;
-      try { cents = disc.value.trim() ? parseDiscount(disc.value, newPrice * qty) : 0; } catch { return toast('Discount: an amount like 2.50 or a percentage like 10%', true); }
+      const discFor = (each) => (disc.value.trim() ? parseDiscount(disc.value, each * qty) : 0);
+      try { discFor(newPrice); } catch { return toast('Discount: an amount like 2.50 or a percentage like 10%', true); }
       const newNote = note.value.trim() || null;
       closeModal();
+      const said = [];
+      let priceFailed = false;
+      let pin = null;
+      // The same answers as call() gives: logged out, or the order closed on another till.
+      const gone = (msg) => {
+        if (msg === 'please log in') { forgetSession(); start(); return true; }
+        if (isDeadOrder(msg, { orderId })) { leaveDeadOrder(); return true; }
+        return false;
+      };
       if (newPrice !== it.unit_price_cents) {
         const args = { orderId, itemId: it.id, priceCents: newPrice };
         try {
           order = await invoke('set_item_price', args);
+          said.push(`${it.name}: ${money(newPrice)} each`);
         } catch (e) {
           const msg = String(e?.message ?? e);
-          if (!/needs a manager/i.test(msg)) { toast(msg, true); return; }
-          const ok = await pinDialog({
-            title: 'Manager PIN', hint: `${it.name}: ${money(it.unit_price_cents)} → ${money(newPrice)}. A manager or admin enters their PIN to approve the new price.`, okLabel: 'Approve price',
-            submit: async (pin) => {
-              try { order = await invoke('set_item_price', { ...args, pin }); } catch (e2) {
-                const m = String(e2?.message ?? e2);
-                return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
-              }
-            },
-          });
-          if (!ok) { draw(); return toast('Price not changed', true); }
+          if (gone(msg)) return;
+          if (msg === 'not found') {
+            order = await call('get_order', { id: orderId });
+            draw();
+            return toast(`${it.name} was changed on another till: nothing saved`, true);
+          }
+          if (/needs a manager/i.test(msg)) {
+            const ok = await pinDialog({
+              title: 'Manager PIN', hint: `${it.name}: ${money(it.unit_price_cents)} → ${money(newPrice)}. A manager or admin enters their PIN to approve the new price.`, okLabel: 'Approve price',
+              submit: async (typed) => {
+                try { order = await invoke('set_item_price', { ...args, pin: typed }); pin = typed; } catch (e2) {
+                  const m = String(e2?.message ?? e2);
+                  if (m === 'please log in' || isDeadOrder(m, { orderId })) { setTimeout(() => gone(m)); return m === 'please log in' ? 'Logged out: log in again' : 'This order was closed on another till'; }
+                  return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
+                }
+              },
+            });
+            if (!state.session || state.orderId !== orderId) return;
+            if (ok) said.push(`${it.name}: ${money(newPrice)} each`);
+            else { priceFailed = true; said.push('price not changed (no manager PIN)'); }
+          } else { priceFailed = true; said.push(`price not changed: ${msg}`); }
         }
         draw();
-        toast(`${it.name}: ${money(newPrice)} each`);
       }
+      // The discount as typed, on the price the dish has now (a percentage follows it).
       const now = order.items.find((i) => i.id === it.id) ?? it;
+      const cents = discFor(now.unit_price_cents);
       if (qty !== now.qty || cents !== now.discount_cents || newNote !== (now.note ?? null)) {
-        await setLine(now, { qty, note: newNote, discount_cents: cents });
-        if (sent && qty < it.qty) toast(`${it.name} −${it.qty - qty} · CANCELLED ticket sent to the kitchen`);
-        else if (sent && newNote !== (it.note ?? null)) toast('Note changed · CHANGED ticket sent to the kitchen');
-        else if (cents !== it.discount_cents) toast(cents ? `${it.name}: −${money(cents)} discount` : `${it.name}: discount removed`);
-        else if (newNote !== (it.note ?? null)) toast(newNote ? `Note saved: “${newNote}”` : 'Note removed');
+        try {
+          await setLine(now, { qty, note: newNote, discount_cents: cents }, pin);
+        } catch (e) {
+          if (!state.session || state.orderId !== orderId) return;
+          // setLine has shown its own error; add what did or did not happen to the price.
+          if (said.length) toast(`${said.join(' · ')} · ${e?.message ?? e}`, true);
+          return;
+        }
+        if (sent && qty < it.qty) said.push(`${it.name} −${it.qty - qty} · CANCELLED ticket sent to the kitchen`);
+        else if (qty !== now.qty) said.push(`${it.name} × ${qty}`);
+        if (sent && newNote !== (it.note ?? null)) said.push('note changed · CHANGED ticket sent to the kitchen');
+        else if (newNote !== (now.note ?? null)) said.push(newNote ? `note saved: “${newNote}”` : 'note removed');
+        if (cents !== now.discount_cents) said.push(cents ? `−${money(cents)} discount` : 'discount removed');
       }
+      if (said.length) toast(said.join(' · ').replace(/^./, (c) => c.toUpperCase()), priceFailed);
     });
     for (const el of [price, note, disc]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(e); });
     const remove = h('button', { class: 'danger', onclick: act(async () => {
@@ -2104,65 +2154,74 @@ async function payDialog(order, refresh, pay) {
     const okLabel = d <= 0 ? (mode === 'dishes' ? 'Tap the dishes this person pays for' : 'Enter an amount')
       : method === 'cash' ? (c > tg ? `${takeCash} ${money(tg)} · change ${money(c - tg)}` : `${takeCash} ${money(tg)}`)
       : method === 'card' ? `${payName('card')} payment taken · ${money(tg)}` : `Paid by ${order.channel_name} · ${money(tg)}`;
-    showModal(h('div', { class: 'pay-one' },
+    // One clear total; the amount and the tip are listed above it only when there is a tip.
+    const sum = (where) => h('div', { class: `pay-sum ${where}` },
+      t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'To pay now'), h('strong', {}, money(d))),
+      t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'Tip'), h('strong', {}, money(t))),
+      h('div', { class: 'row grand' }, h('span', { style: 'flex:1' }, t > 0 ? 'Total to take' : 'To pay now'), h('strong', {}, money(tg))));
+    // Each tap draws the dialog again: keep where it was scrolled to (phones).
+    const scrolled = document.querySelector('#modal .pay-one')?.scrollTop ?? 0;
+    // The header (close) and the footer (the total and Take) stay in view;
+    // only the part between them scrolls when the screen is short.
+    showModal(
       h('div', { class: 'pay-head' },
         h('div', { class: 'grow' }, h('h3', {}, orderTitle(order)),
           h('div', { class: 'muted small' }, [`Order #${order.id}`, orderTitle(order) !== TYPE[order.order_type] && TYPE[order.order_type]].filter(Boolean).join(' · '))),
         h('div', { class: 'pay-total' }, h('span', { class: 'muted' }, 'Total'), h('span', { class: 'big' }, money(order.total_cents))),
         h('button', { class: 'icon-btn ghost', title: 'Close (Esc)', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
-      h('div', { class: 'pay-left stack' },
-        order.paid_cents > 0 && h('div', { class: 'pay-parts' },
-          order.payments.map((p) => h('div', { class: 'row pay-part' },
-            h('span', { style: 'flex:1' }, `✓ ${payName(p.method, order.channel_name)} ${money(p.amount_cents)}`,
-              p.tip_cents ? h('span', { class: 'muted' }, ` + tip ${money(p.tip_cents)}`) : ''),
-            h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(async () => {
-              order = await call('remove_payment', { orderId: order.id, paymentId: p.id });
-              mode = 'all'; even.done = 0; draw();
-              reload();
-            }) }, 'undo'))),
-          h('div', { class: 'row' }, h('strong', { style: 'flex:1' }, 'Left to pay'), h('span', { class: 'big' }, money(left())))),
-        h('div', { class: 'pay-label' }, 'Pay'),
-        seg([['all', 'Everything', money(left())], ['even', 'Split evenly'], ['amount', 'Amount'], ['dishes', 'Dishes']], mode, (v) => {
-          mode = v;
-          if (v === 'amount') focus = 'amount';
-          else if (focus === 'amount') focus = 'cash';
-        }),
-        mode === 'even' && h('div', { class: 'row split-n' }, seg(Array.from({ length: cfg.splitMax - 1 }, (_, i) => i + 2).map((n) => [n, `÷ ${n}`]), even.n, (n) => { even = { n, done: 0 }; }),
-          h('span', { class: 'muted' }, `Person ${even.done + 1} of ${even.n}: ${money(evenAmount())}`)),
-        mode === 'amount' && field('amount', 'Amount to pay now', typed.amount || '0.00', `of ${money(left())} left`),
-        mode === 'dishes' && h('div', { class: 'stack dish-pick' }, bill().map((it) => {
-          const q = pick.get(it.id) ?? 0;
-          const max = it.qty - it.paid_qty;
-          const set = (v) => { v = Math.max(0, Math.min(max, v)); if (v) pick.set(it.id, v); else pick.delete(it.id); draw(); };
-          return h('div', { class: `row dish-row ${q ? 'on' : ''}`, onclick: () => set(q < max ? q + 1 : 0) },
-            h('span', { style: 'flex:1' }, it.name, max < it.qty ? h('span', { class: 'muted' }, ` (${it.paid_qty} paid)`) : ''),
-            h('div', { class: 'stepper', onclick: (e) => e.stopPropagation() },
-              h('button', { onclick: () => set(q - 1) }, '−'), h('span', {}, `${q}/${max}`), h('button', { onclick: () => set(q + 1) }, '+')));
-        })),
-        cfg.tipsOn && h('div', { class: 'pay-label' }, 'Tip'),
-        cfg.tipsOn && seg([[0, 'No tip'], ...cfg.tips.map((p) => [Math.round(p * 100), `${p}%`]), ['other', 'Other']], tipMode, (v) => {
-          tipMode = v;
-          if (v === 'other') focus = 'tip'; else if (focus === 'tip') focus = 'cash';
-        }),
-        cfg.tipsOn && tipMode === 'other' && field('tip', 'Tip', typed.tip || '0.00'),
-        // One clear total; the amount and the tip are listed above it only when there is a tip.
-        h('div', { class: 'pay-sum' },
-          t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'To pay now'), h('strong', {}, money(d))),
-          t > 0 && h('div', { class: 'row' }, h('span', { style: 'flex:1' }, 'Tip'), h('strong', {}, money(t))),
-          h('div', { class: 'row grand' }, h('span', { style: 'flex:1' }, t > 0 ? 'Total to take' : 'To pay now'), h('strong', {}, money(tg))))),
-      h('div', { class: 'pay-right stack' },
-        h('div', { class: 'pay-label' }, 'Payment method'),
-        h('div', { class: 'seg methods' }, methods.map(([v, label]) => h('button', { class: method === v ? 'on' : '', onclick: () => { method = v; if (v === 'cash') focus = 'cash'; draw(); } },
-          icon({ cash: 'cash', card: 'card' }[v] ?? 'bike', 26), label))),
-        method === 'cash' && field('cash', `${payName('cash')} received`, typed.cash || `${money(tg)} (exact)`,
-          c == null ? 'Enter an amount like 20 or 12.50' : c >= tg ? `Change ${money(c - tg)}` : `Short by ${money(tg - c)}`, c == null || c < tg),
-        method === 'cash' && h('div', { class: 'row quick' }, h('button', { onclick: () => { typed.cash = ''; if (!cfg.exactPays || due() > 0) focus = 'cash'; draw(); if (cfg.exactPays) take(); } }, cfg.exactPays ? 'Pay exact' : 'Exact'),
-          quick.map((x) => h('button', { onclick: () => { typed.cash = String(x / 100); focus = 'cash'; draw(); } }, money(x)))),
-        method !== 'cash' && !keypadOn && h('div', { class: 'muted pay-hint' }, method === 'card'
-          ? `Take ${money(tg)} on the card machine, then confirm below.` : `${order.channel_name} has collected the payment.`),
-        keypadOn && h('div', { class: 'keypad' }, ['7', '8', '9', '4', '5', '6', '1', '2', '3', '.', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))),
-        h('button', { class: 'primary paybig pay-ok', disabled: d <= 0 || !enough, onclick: take }, okLabel))));
+      h('div', { class: 'pay-one' },
+        h('div', { class: 'pay-left stack' },
+          order.paid_cents > 0 && h('div', { class: 'pay-parts' },
+            order.payments.map((p) => h('div', { class: 'row pay-part' },
+              h('span', { style: 'flex:1' }, `✓ ${payName(p.method, order.channel_name)} ${money(p.amount_cents)}`,
+                p.tip_cents ? h('span', { class: 'muted' }, ` + tip ${money(p.tip_cents)}`) : ''),
+              h('button', { class: 'link-btn', title: 'Take this payment back (a mistake)', onclick: act(async () => {
+                order = await call('remove_payment', { orderId: order.id, paymentId: p.id });
+                mode = 'all'; even.done = 0; draw();
+                reload();
+              }) }, 'undo'))),
+            h('div', { class: 'row' }, h('strong', { style: 'flex:1' }, 'Left to pay'), h('span', { class: 'big' }, money(left())))),
+          h('div', { class: 'pay-label' }, 'Pay'),
+          seg([['all', 'Everything', money(left())], ['even', 'Split evenly'], ['amount', 'Amount'], ['dishes', 'Dishes']], mode, (v) => {
+            mode = v;
+            if (v === 'amount') focus = 'amount';
+            else if (focus === 'amount') focus = 'cash';
+          }),
+          mode === 'even' && h('div', { class: 'row split-n' }, seg(Array.from({ length: cfg.splitMax - 1 }, (_, i) => i + 2).map((n) => [n, `÷ ${n}`]), even.n, (n) => { even = { n, done: 0 }; }),
+            h('span', { class: 'muted' }, `Person ${even.done + 1} of ${even.n}: ${money(evenAmount())}`)),
+          mode === 'amount' && field('amount', 'Amount to pay now', typed.amount || '0.00', `of ${money(left())} left`),
+          mode === 'dishes' && h('div', { class: 'stack dish-pick' }, bill().map((it) => {
+            const q = pick.get(it.id) ?? 0;
+            const max = it.qty - it.paid_qty;
+            const set = (v) => { v = Math.max(0, Math.min(max, v)); if (v) pick.set(it.id, v); else pick.delete(it.id); draw(); };
+            return h('div', { class: `row dish-row ${q ? 'on' : ''}`, onclick: () => set(q < max ? q + 1 : 0) },
+              h('span', { style: 'flex:1' }, it.name, max < it.qty ? h('span', { class: 'muted' }, ` (${it.paid_qty} paid)`) : ''),
+              h('div', { class: 'stepper', onclick: (e) => e.stopPropagation() },
+                h('button', { onclick: () => set(q - 1) }, '−'), h('span', {}, `${q}/${max}`), h('button', { onclick: () => set(q + 1) }, '+')));
+          })),
+          cfg.tipsOn && h('div', { class: 'pay-label' }, 'Tip'),
+          cfg.tipsOn && seg([[0, 'No tip'], ...cfg.tips.map((p) => [Math.round(p * 100), `${p}%`]), ['other', 'Other']], tipMode, (v) => {
+            tipMode = v;
+            if (v === 'other') focus = 'tip'; else if (focus === 'tip') focus = 'cash';
+          }),
+          cfg.tipsOn && tipMode === 'other' && field('tip', 'Tip', typed.tip || '0.00'),
+          sum('in-body')),
+        h('div', { class: 'pay-right stack' },
+          h('div', { class: 'pay-label' }, 'Payment method'),
+          h('div', { class: 'seg methods' }, methods.map(([v, label]) => h('button', { class: method === v ? 'on' : '', onclick: () => { method = v; if (v === 'cash') focus = 'cash'; draw(); } },
+            icon({ cash: 'cash', card: 'card' }[v] ?? 'bike', 26), label))),
+          method === 'cash' && field('cash', `${payName('cash')} received`, typed.cash || `${money(tg)} (exact)`,
+            c == null ? 'Enter an amount like 20 or 12.50' : c >= tg ? `Change ${money(c - tg)}` : `Short by ${money(tg - c)}`, c == null || c < tg),
+          method === 'cash' && h('div', { class: 'row quick' }, h('button', { onclick: () => { typed.cash = ''; if (!cfg.exactPays || due() > 0) focus = 'cash'; draw(); if (cfg.exactPays) take(); } }, cfg.exactPays ? 'Pay exact' : 'Exact'),
+            quick.map((x) => h('button', { onclick: () => { typed.cash = String(x / 100); focus = 'cash'; draw(); } }, money(x)))),
+          method !== 'cash' && !keypadOn && h('div', { class: 'muted pay-hint' }, method === 'card'
+            ? `Take ${money(tg)} on the card machine, then confirm below.` : `${order.channel_name} has collected the payment.`),
+          keypadOn && h('div', { class: 'keypad' }, ['7', '8', '9', '4', '5', '6', '1', '2', '3', '.', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))))),
+      h('div', { class: 'pay-foot' }, sum('in-foot'),
+        h('button', { class: 'primary paybig pay-ok', disabled: d <= 0 || !enough, onclick: take }, okLabel)));
     document.querySelector('#modal .dialog')?.classList.add('pay-wide');
+    const body = document.querySelector('#modal .pay-one');
+    if (body) body.scrollTop = scrolled;
     setKeys((e) => {
       if (/^[0-9.]$/.test(e.key)) key(e.key);
       else if (e.key === 'Backspace') key('⌫');
@@ -4373,6 +4432,9 @@ function themeCard() {
   const box = h('div');
   const draw = () => setKids(box, segmented([['light', 'Light'], ['dark', 'Dark'], ['auto', 'Same as this device']], themePref(), (v) => { setTheme(v); draw(); }));
   draw();
+  // The moon / sun button at the top changes it too: follow it while the card is on screen.
+  const follow = () => { if (box.isConnected) draw(); else document.removeEventListener('themechange', follow); };
+  document.addEventListener('themechange', follow);
   return h('div', { class: 'card stack' }, h('h3', {}, 'Light or dark'), box,
     h('div', { class: 'muted small' }, 'Saved on this device only, so a till and a tablet can differ.'));
 }
@@ -4684,8 +4746,8 @@ const PAGE_WORDS = {
 };
 const SETTING_WORDS = {
   shop: 'restaurant name service charge tax vat rate prices included',
-  bills: 'receipt printer bill cash drawer footer header address tips payments split card cash names',
-  kitchen: 'kitchen printer tickets copies font size large bold thai kitchen screen starters mains',
+  bills: 'receipt printer bill cash drawer footer header address tips payments split card cash names currency symbol money pound baht euro dollar language thai english slow send speed cheap image graphics picture raster mode test page',
+  kitchen: 'kitchen printer tickets copies font size large bold thai english language kitchen screen starters mains slow send speed cheap image graphics picture raster mode test page routes bar',
   tickets: 'drinks desserts bar tickets own printer',
   orders: 'order types takeaway delivery collection discounts cancel cancelling quick notes courses starter',
   teams: 'kitchen teams station curry rice grill',

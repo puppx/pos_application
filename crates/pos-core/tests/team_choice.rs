@@ -35,7 +35,7 @@ fn setup() -> Kit {
     let steak = item(&mut pos, "Steak", false, main);
     let floor = pos.create_floor(&s, "Ground").unwrap();
     let layout: Vec<TableLayout> =
-        ["1", "2", "3"].iter().map(|n| TableLayout { is_table: true, id: None, name: (*n).into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }).collect();
+        ["1", "2", "3"].iter().map(|n| TableLayout { is_table: Some(true), id: None, name: (*n).into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }).collect();
     let tables = pos.save_floor_layout(&s, floor.id, &layout).unwrap().into_iter().map(|t| t.id).collect();
     let dir = tempfile::tempdir().unwrap();
     pos.set_kitchen_printer(&s, &PrinterConfig {

@@ -937,7 +937,18 @@ pub(crate) fn render_escpos_in(lines: &[Line], width: usize, bold: bool, app_fon
             if t.chars().any(char::is_alphanumeric) {
                 let inner = t.trim_matches(c).trim();
                 let short = c.to_string().repeat(3);
-                b.extend(crate::raster::escpos_line_in(&format!("{short} {inner} {short}"), l.size, true, dots, mode));
+                let ruled = format!("{short} {inner} {short}");
+                // Too long for the paper with its rules ("=== SET: …" with "===" alone
+                // on the next line): the words alone, smaller if they still do not fit.
+                let fits = |s: &str, size| crate::raster::fits_line(s, size, dots);
+                let (text, size) = if fits(&ruled, l.size) {
+                    (ruled, l.size)
+                } else if fits(inner, l.size) {
+                    (inner.to_string(), l.size)
+                } else {
+                    (inner.to_string(), Size::Normal)
+                };
+                b.extend(crate::raster::escpos_line_in(&text, size, true, dots, mode));
                 continue;
             }
         }
@@ -2792,5 +2803,32 @@ mod tests {
         let o = pos.open_order(&s, &new).unwrap();
         pos.cancel_order_confirmed(&s, o.id, "", Some("2222")).unwrap();
         assert_eq!(last(&pos), (sam.id, format!("{} (PIN of Sam #{}, staff)", o.id, sam.id), sam.id));
+    }
+
+    #[test]
+    fn a_long_set_heading_in_the_app_font_drops_its_rules_rather_than_wrap() {
+        // "=== SET: QA LUNCH SET" with "===" alone on the next line, at 80 mm.
+        for (width, mode) in [42, 32].into_iter().flat_map(|w| ImageMode::TEST_ORDER.map(|m| (w, m))) {
+            let dots = width * crate::raster::DOTS_PER_CHAR;
+            let print = |name: &str| {
+                let line = Line::new(Size::Tall, true, true, titled_rule(&format!("SET: {name}"), '=', width));
+                render_escpos_in(&[line], width, true, true, mode)
+            };
+            let has = |b: &[u8], text: &str, size| {
+                let img = crate::raster::escpos_line_in(text, size, true, dots, mode);
+                b.windows(img.len()).any(|w| w == img.as_slice())
+            };
+            // Short: its rules stay, on one line.
+            assert!(has(&print("Pad"), "=== SET: Pad ===", Size::Tall), "{width} {mode:?}");
+            // Long: the words alone, on one line.
+            let b = print("QA LUNCH SET");
+            assert!(!has(&b, "=== SET: QA LUNCH SET ===", Size::Tall), "{width} {mode:?}");
+            assert!(has(&b, "SET: QA LUNCH SET", Size::Tall), "{width} {mode:?}");
+            assert_eq!(crate::raster::line_images("SET: QA LUNCH SET", Size::Tall, true, dots).len(), 1, "{width}");
+            // Too long even alone: smaller (and wrapped only if it must be).
+            let name = "THE BIG SUNDAY SHARING PLATTER";
+            assert!(!crate::raster::fits_line(&format!("SET: {name}"), Size::Tall, dots));
+            assert!(has(&print(name), &format!("SET: {name}"), Size::Normal), "{width} {mode:?}");
+        }
     }
 }

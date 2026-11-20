@@ -1759,6 +1759,12 @@ body.kb-open #modal.sheet-host .sheet { max-height: 100%; }
 .bar-tools .icon-btn { min-height: 44px; min-width: 44px; }
 /* The order's tax and service charge cards, and the manager PIN dialog's Cancel: 44 px on a short till too. */
 .ticket-extra .card button, .pin-keep { min-height: 44px; }
+/* The tax, service charge and customer card takes its room from the dish list, never
+   from the foot: on a short till it scrolls inside itself, so Send and Finish & Pay stay on screen. */
+.ticket > .ticket-extra { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+@media (min-width: 901px) and (max-height: 660px) {
+  .ticket > .ticket-extra > .card { margin: 6px 10px; padding: 10px 12px; gap: 8px; }
+}
 .kds-bar button { min-height: 44px; }
 .lrow .swatch::-webkit-color-swatch-wrapper { padding: 0; }
 .lrow .swatch::-webkit-color-swatch { border: 0; border-radius: 50%; }

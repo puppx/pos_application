@@ -343,6 +343,12 @@ fn draw(text: &str, scale: f32, dots: usize, indent: usize, center: bool) -> Bit
     bmp
 }
 
+/// True when `text` fits on one line `dots` wide in the app's font.
+pub(crate) fn fits_line(text: &str, size: Size, dots: usize) -> bool {
+    let scale = px(size) / face().units_per_em() as f32;
+    shape(text.trim(), scale).width() <= dots as f32
+}
+
 /// Images for one laid-out line, wrapped to the paper. Leading spaces in
 /// `text` become the indent of every wrapped piece.
 pub(crate) fn line_images(text: &str, size: Size, center: bool, dots: usize) -> Vec<Bitmap> {

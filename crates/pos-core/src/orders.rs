@@ -14,6 +14,8 @@ use crate::variants::resolve_variant;
 use crate::{Permission, Pos, PosError, Result, Session};
 
 const MAX_QTY: i64 = 1_000;
+/// The most one line may be priced at, each (100000.00).
+const MAX_LINE_PRICE: i64 = 10_000_000;
 /// The hidden menu entry behind dishes typed on an order ("open items").
 pub const OPEN_ITEM_SKU: &str = "__open_item__";
 pub(crate) const MAX_ITEMS: i64 = 300;
@@ -344,11 +346,14 @@ pub(crate) fn require_open(conn: &Connection, id: i64) -> Result<()> {
 }
 
 fn check_table(conn: &Connection, table_id: i64) -> Result<()> {
-    let ok: bool = conn
-        .prepare_cached("SELECT EXISTS (SELECT 1 FROM dining_tables WHERE id = ?1 AND active = 1)")?
-        .query_row([table_id], |r| r.get(0))?;
-    if !ok {
-        return invalid("that table does not exist");
+    let is_table: Option<bool> = conn
+        .prepare_cached("SELECT is_table FROM dining_tables WHERE id = ?1 AND active = 1")?
+        .query_row([table_id], |r| r.get(0))
+        .optional()?;
+    match is_table {
+        None => return invalid("that table does not exist"),
+        Some(false) => return invalid("that is not a table: it is only on the plan to show where something is"),
+        Some(true) => {}
     }
     Ok(())
 }
@@ -1209,6 +1214,59 @@ impl Pos {
         if upd.discount_cents != cur.discount_cents && upd.qty > 0 {
             audit_tx(&tx, s.user_id, "order.discount", &format!("order {order_id} {} {}", cur.name, upd.discount_cents))?;
         }
+        tx.commit()?;
+        self.get_order(s, order_id)
+    }
+
+    /// Change what one line of an open order costs each (e.g. a dish made
+    /// bigger, or a price agreed with the customer). Managers and admins may;
+    /// staff need `approver`, a manager's or admin's PIN typed on the till.
+    /// Not on a dish inside a set (its set has the price), and not once part
+    /// of the bill is paid. A discount bigger than the new line is cut to it.
+    pub fn set_item_price(&mut self, s: &Session, approver: Option<&Session>, item_id: i64, price_cents: i64) -> Result<Order> {
+        s.require(Permission::Sell)?;
+        if !(0..=MAX_LINE_PRICE).contains(&price_cents) {
+            return invalid("enter a price from 0 to 100000");
+        }
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let cur: OrderItem = tx
+            .prepare_cached(&format!("SELECT {ITEM_COLS} FROM order_items WHERE id = ?1"))?
+            .query_row([item_id], item_from_row)
+            .optional()?
+            .ok_or(PosError::NotFound)?;
+        let order_id: i64 = tx.query_row("SELECT order_id FROM order_items WHERE id = ?1", [item_id], |r| r.get(0))?;
+        require_open(&tx, order_id)?;
+        if cur.parent_id.is_some() {
+            return invalid("change the price of the set itself");
+        }
+        let paid: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = ?1)", [order_id], |r| r.get(0))?;
+        if paid {
+            return invalid("part of this bill is paid: take the payment back first to change a price");
+        }
+        if price_cents == cur.unit_price_cents {
+            tx.commit()?;
+            return self.get_order(s, order_id);
+        }
+        let by = if s.role.can(Permission::AnyDiscount) {
+            s
+        } else {
+            match approver {
+                None => return invalid("changing a price needs a manager PIN"),
+                Some(a) if !a.role.can(Permission::AnyDiscount) => return invalid("changing a price needs a manager's or admin's PIN"),
+                Some(a) => a,
+            }
+        };
+        let discount = cur.discount_cents.min(price_cents * cur.qty);
+        tx.execute(
+            "UPDATE order_items SET unit_price_cents = ?2, discount_cents = ?3 WHERE id = ?1",
+            params![item_id, price_cents, discount],
+        )?;
+        audit_tx(
+            &tx,
+            by.user_id,
+            "order.price",
+            &format!("order {order_id} {} {} -> {} by {}", cur.name, cur.unit_price_cents, price_cents, s.name),
+        )?;
         tx.commit()?;
         self.get_order(s, order_id)
     }

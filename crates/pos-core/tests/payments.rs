@@ -23,7 +23,7 @@ fn setup() -> Kit {
     let beer = item(&mut pos, "Beer", 500);
     let floor = pos.create_floor(&admin, "Ground").unwrap();
     let t = pos
-        .save_floor_layout(&admin, floor.id, &[TableLayout { id: None, name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+        .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: true, id: None, name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
     Kit { pos, admin, table: t[0].id, curry, beer }
 }
@@ -152,9 +152,9 @@ fn move_dishes_and_join_tables() {
     let floor = k.pos.list_floors(&k.admin).unwrap()[0].id;
     let tables = k.pos
         .save_floor_layout(&k.admin, floor, &[
-            TableLayout { id: Some(k.table), name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 },
-            TableLayout { id: None, name: "2".into(), shape: TableShape::Rect, x: 100, y: 0, w: 80, h: 80 },
-            TableLayout { id: None, name: "3".into(), shape: TableShape::Rect, x: 200, y: 0, w: 80, h: 80 },
+            TableLayout { is_table: true, id: Some(k.table), name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 },
+            TableLayout { is_table: true, id: None, name: "2".into(), shape: TableShape::Rect, x: 100, y: 0, w: 80, h: 80 },
+            TableLayout { is_table: true, id: None, name: "3".into(), shape: TableShape::Rect, x: 200, y: 0, w: 80, h: 80 },
         ])
         .unwrap();
     let (t2, t3) = (tables[1].id, tables[2].id);

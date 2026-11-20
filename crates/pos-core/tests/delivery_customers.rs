@@ -77,7 +77,7 @@ fn platform_orders_need_no_customer_details() {
     assert!(pos.open_order(&s, &direct).is_err());
     // Dine-in cannot be a platform order; unknown platforms are refused.
     let floor = pos.create_floor(&admin, "G").unwrap();
-    let t = pos.save_floor_layout(&admin, floor.id, &[TableLayout { id: None, name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 50, h: 50 }]).unwrap();
+    let t = pos.save_floor_layout(&admin, floor.id, &[TableLayout { is_table: true, id: None, name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 50, h: 50 }]).unwrap();
     assert!(pos.open_order(&s, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t[0].id), channel_id: Some(uber.id), details: Default::default() }).is_err());
     assert!(pos.open_order(&s, &NewOrder { order_type: OrderType::Collection, table_id: None, channel_id: Some(999), details: Default::default() }).is_err());
 
@@ -190,7 +190,7 @@ fn upgrades_a_v0_1_0_database() {
     assert_eq!(pos.setting("store_name").unwrap().as_deref(), Some("Old Shop"));
     let conn = rusqlite::Connection::open(&path).unwrap();
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 27);
+    assert_eq!(version, 28);
     let (name, channel): (String, Option<i64>) = conn
         .query_row("SELECT customer_name, channel_id FROM orders WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();
@@ -230,6 +230,7 @@ fn old_paid_orders_get_their_payment_on_upgrade() {
              ALTER TABLE products DROP COLUMN sold_out;
              ALTER TABLE order_items DROP COLUMN kitchen_done_at;
              ALTER TABLE order_items DROP COLUMN team_id;
+             ALTER TABLE dining_tables DROP COLUMN is_table;
              PRAGMA user_version = 17;",
         )
         .unwrap();

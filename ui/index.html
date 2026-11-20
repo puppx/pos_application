@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0b1220">
+  <meta name="theme-color" content="#ffffff">
   <title>POS</title>
   <link rel="icon" type="image/png" href="icon.png">
   <link rel="apple-touch-icon" href="icon.png">
@@ -11,23 +11,25 @@
 </head>
 <body class="locked">
   <!-- All business rules live in Rust; this page only draws and calls commands. -->
-  <aside id="rail" hidden>
-    <div id="brand" class="brand-mark"></div>
-    <nav id="nav"></nav>
-    <button id="logout" title="Log out"></button>
-  </aside>
   <div class="frame">
+    <!-- One bar: logo, the main pages, the tools, who is logged in. On phones the pages sit along the bottom. -->
     <header id="bar" hidden>
-      <button id="rail-toggle" class="ghost icon-btn" title="Show or hide the menu bar"></button>
+      <div id="brand" class="brand-mark"></div>
+      <nav id="nav" aria-label="Main pages"></nav>
       <div id="title" class="title"></div>
       <span id="bizday" class="chip" title="Business day (changes at End of day)"></span>
       <span id="mode" class="chip info" hidden>Browser terminal</span>
       <span class="spacer"></span>
       <span id="update" hidden></span>
       <span id="clock" class="clock"></span>
-      <button id="keyboard" class="ghost icon-btn" title="On-screen keyboard"></button>
-      <button id="fullscreen" class="ghost icon-btn" title="Full screen (F11)"></button>
+      <div class="bar-tools">
+        <button id="help" class="ghost icon-btn" title="How does this screen work?" aria-label="Help for this screen"></button>
+        <button id="theme" class="ghost icon-btn theme-btn"></button>
+        <button id="keyboard" class="ghost icon-btn" title="On-screen keyboard"></button>
+        <button id="fullscreen" class="ghost icon-btn" title="Full screen (F11)"></button>
+      </div>
       <div id="who" class="who"></div>
+      <button id="logout" class="logout-btn" title="Log out"><span class="logout-label">Log out</span></button>
     </header>
     <main id="app"></main>
   </div>

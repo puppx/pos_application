@@ -13,7 +13,7 @@ fn setup() -> (Pos, Session, Product, i64) {
         .unwrap();
     let floor = pos.create_floor(&admin, "Ground").unwrap();
     let t = pos
-        .save_floor_layout(&admin, floor.id, &[TableLayout { id: None, name: "T1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+        .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: true, id: None, name: "T1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
     (pos, admin, steak, t[0].id)
 }
@@ -70,8 +70,8 @@ fn a_dish_joined_onto_another_bill_is_not_changed_from_the_old_order() {
     let floor = pos.list_floors(&s).unwrap()[0].id;
     let tables = pos
         .save_floor_layout(&s, floor, &[
-            TableLayout { id: Some(t1), name: "T1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 },
-            TableLayout { id: None, name: "T2".into(), shape: TableShape::Rect, x: 100, y: 0, w: 80, h: 80 },
+            TableLayout { is_table: true, id: Some(t1), name: "T1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 },
+            TableLayout { is_table: true, id: None, name: "T2".into(), shape: TableShape::Rect, x: 100, y: 0, w: 80, h: 80 },
         ])
         .unwrap();
     let t2 = tables.iter().find(|t| t.name == "T2").unwrap().id;

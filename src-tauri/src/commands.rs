@@ -751,6 +751,18 @@ commands! {
         Ok(order)
     }
 
+    /// Change one line's price each. `pin`: a manager's or admin's PIN when
+    /// staff change it (it only approves; nobody is logged in or out).
+    fn set_item_price(app, t, item_id: i64, price_cents: i64, pin: Option<String>, order_id: Option<i64>) -> Order {
+        app.with_session(t, |pos, s| {
+            if let Some(o) = order_id {
+                pos.check_item_on_order(o, item_id)?;
+            }
+            let approver = pin.as_deref().map(|p| pos.pin_owner_for(p, Some(s.user_id))).transpose()?;
+            pos.set_item_price(s, approver.as_ref(), item_id, price_cents)
+        })
+    }
+
     fn reprint_kitchen(app, t, order_id: i64) -> PrintOutcome {
         let job = app.with_session(t, |pos, s| pos.kitchen_reprint_job(s, order_id))?;
         Ok(print(job))

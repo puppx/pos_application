@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     pos.create_user(&admin, "Sam", Role::Staff, "2222")?;
     pos.set_setting(&admin, "store_name", "Demo Bistro")?;
 
-    let t = |name: &str, shape, x, y, w, h| TableLayout { id: None, name: name.into(), shape, x, y, w, h };
+    let t = |name: &str, shape, x, y, w, h| TableLayout { is_table: true, id: None, name: name.into(), shape, x, y, w, h };
     let ground = pos.create_floor(&admin, "Ground")?;
     pos.save_floor_layout(&admin, ground.id, &[
         t("1", TableShape::Rect, 60, 60, 110, 110),

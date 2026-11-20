@@ -37,7 +37,7 @@ fn setup() -> Kit {
     let cola = item(&mut pos, "Cola", drinks, false, None);
     let floor = pos.create_floor(&s, "Ground").unwrap();
     let t = pos
-        .save_floor_layout(&s, floor.id, &[TableLayout { id: None, name: "4".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+        .save_floor_layout(&s, floor.id, &[TableLayout { is_table: true, id: None, name: "4".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
     pos.set_kitchen_printer(&s, &PrinterConfig {
         target: PrinterTarget::File { path: std::env::temp_dir().join("pos-teams-unused.bin").display().to_string() },

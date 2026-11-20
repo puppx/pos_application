@@ -14,7 +14,7 @@ fn setup() -> (Pos, Session, Product, i64) {
         .unwrap();
     let floor = pos.create_floor(&admin, "Ground").unwrap();
     let t = pos
-        .save_floor_layout(&admin, floor.id, &[TableLayout { id: None, name: "T1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
+        .save_floor_layout(&admin, floor.id, &[TableLayout { is_table: true, id: None, name: "T1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }])
         .unwrap();
     (pos, admin, steak, t[0].id)
 }

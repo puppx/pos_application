@@ -46,6 +46,9 @@ pub struct DiningTable {
     pub y: i64,
     pub w: i64,
     pub h: i64,
+    /// False for a shape that only shows where something is (a bar, a window):
+    /// it never takes an order and is not counted as a table.
+    pub is_table: bool,
 }
 
 /// One table as drawn in the floor-plan editor. `id` is `None` for new tables.
@@ -59,6 +62,13 @@ pub struct TableLayout {
     pub y: i64,
     pub w: i64,
     pub h: i64,
+    /// See `DiningTable::is_table`; a table unless the editor says otherwise.
+    #[serde(default = "yes")]
+    pub is_table: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// A table plus its open order, if any, for the live floor view.
@@ -87,6 +97,7 @@ fn table_from_row(r: &Row) -> rusqlite::Result<DiningTable> {
         y: r.get(5)?,
         w: r.get(6)?,
         h: r.get(7)?,
+        is_table: r.get("is_table")?,
     })
 }
 
@@ -195,7 +206,7 @@ impl Pos {
     pub fn list_tables(&self, s: &Session, floor_id: i64) -> Result<Vec<DiningTable>> {
         s.require(Permission::Sell)?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, floor_id, name, shape, x, y, w, h FROM dining_tables
+            "SELECT id, floor_id, name, shape, x, y, w, h, is_table FROM dining_tables
              WHERE floor_id = ?1 AND active = 1 ORDER BY id",
         )?;
         let rows = stmt.query_map([floor_id], table_from_row)?;
@@ -209,7 +220,7 @@ impl Pos {
         let mut stmt = self.conn.prepare_cached(
             "SELECT t.id, t.floor_id, t.name, t.shape, t.x, t.y, t.w, t.h, o.id, o.opened_at,
                     COALESCE(i.total, 0) + (COALESCE(i.net, 0) * COALESCE(o.service_bp, 0) + 5000) / 10000,
-                    COALESCE(i.items, 0), COALESCE(i.unsent, 0), COALESCE(i.held, 0)
+                    COALESCE(i.items, 0), COALESCE(i.unsent, 0), COALESCE(i.held, 0), t.is_table AS is_table
              FROM dining_tables t
              LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'
              LEFT JOIN (
@@ -284,6 +295,10 @@ impl Pos {
             }
         }
         for (id, name, busy) in &existing {
+            // A table with an open bill stays a table until the bill is closed.
+            if *busy && tables.iter().any(|t| t.id == Some(*id) && !t.is_table) {
+                return invalid(format!("table {name} has an open order: it stays a table until that order is paid or moved"));
+            }
             if !keep.contains(id) {
                 if *busy {
                     return invalid(format!("table {name} has an open order and cannot be removed"));
@@ -299,15 +314,15 @@ impl Pos {
         )?;
         {
             let mut upd = tx.prepare(
-                "UPDATE dining_tables SET name = ?2, shape = ?3, x = ?4, y = ?5, w = ?6, h = ?7 WHERE id = ?1",
+                "UPDATE dining_tables SET name = ?2, shape = ?3, x = ?4, y = ?5, w = ?6, h = ?7, is_table = ?8 WHERE id = ?1",
             )?;
             let mut ins = tx.prepare(
-                "INSERT INTO dining_tables (floor_id, name, shape, x, y, w, h) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO dining_tables (floor_id, name, shape, x, y, w, h, is_table) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for (t, name) in &cleaned {
                 match t.id {
-                    Some(id) => upd.execute(params![id, name, t.shape.as_str(), t.x, t.y, t.w, t.h])?,
-                    None => ins.execute(params![floor_id, name, t.shape.as_str(), t.x, t.y, t.w, t.h])?,
+                    Some(id) => upd.execute(params![id, name, t.shape.as_str(), t.x, t.y, t.w, t.h, t.is_table])?,
+                    None => ins.execute(params![floor_id, name, t.shape.as_str(), t.x, t.y, t.w, t.h, t.is_table])?,
                 };
             }
         }

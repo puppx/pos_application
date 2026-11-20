@@ -295,7 +295,7 @@ fn a_bill_changed_after_printing_gets_a_final_receipt_at_payment() {
     let printer = PrinterConfig { target: PrinterTarget::File { path: dir.path().join("r.bin").display().to_string() }, copy_delay_secs: 0, app_font: false, ..Default::default() };
     pos.set_receipt_settings(&admin, &ReceiptSettings { printer, staff_copy: true, ..Default::default() }).unwrap();
     let floor = pos.create_floor(&admin, "Ground").unwrap();
-    let table = |name: &str| TableLayout { id: None, name: name.into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 };
+    let table = |name: &str| TableLayout { is_table: true, id: None, name: name.into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 };
     let tables = pos.save_floor_layout(&admin, floor.id, &[table("1"), table("2")]).unwrap();
     let (t1, t2) = (tables[0].id, tables[1].id);
     let dine_in = |t: i64| NewOrder { order_type: OrderType::DineIn, table_id: Some(t), channel_id: None, details: Default::default() };

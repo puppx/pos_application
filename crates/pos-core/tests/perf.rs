@@ -41,6 +41,7 @@ fn busy_restaurant() {
         let floor = pos.create_floor(&admin, &format!("Floor {f}")).unwrap();
         let layout: Vec<TableLayout> = (0..30)
             .map(|i| TableLayout {
+                is_table: true,
                 id: None,
                 name: format!("T{}", f * 100 + i),
                 shape: TableShape::Rect,

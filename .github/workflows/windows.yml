@@ -1,11 +1,31 @@
 name: Windows build
 
-# Every push / PR: run tests and build the installers (a check only: the
-# installers are not kept, so no Actions artifact storage is used).
+# Push to main / pull request: only `cargo test -p pos-core` on Linux (cheap:
+# Windows runners cost twice as many Actions minutes, and the repository may
+# become private, where minutes are limited).
+#
+# Full Windows build (tests + installers + offline installer): only on
+# Actions > Windows build > Run workflow, or when a v* tag is pushed. Without
+# "Publish a release" ticked, a manual run is a check only: the installers are
+# not kept, so no Actions artifact storage is used.
 #
 # To publish a release: Actions > Windows build > Run workflow, tick
 # "Publish a release". The release is tagged v<version from tauri.conf.json>.
-# Pushing a tag such as v0.2.0 does the same.
+# Pushing a tag such as v0.2.0 does the same. A release is published to:
+#   1. GitHub Releases (installers + latest.json with GitHub download links),
+#      as before. This is the fallback update source while the repo is public.
+#   2. Cloudflare R2 (public bucket, R2_PUBLIC_URL below), when the secrets
+#      R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID and R2_BUCKET are
+#      set: installers go to v<version>/, then latest.json (pointing at those
+#      copies) goes to the bucket root LAST, then both are downloaded back from
+#      the public URL and checked. Only the newest 3 v*/ folders are kept.
+#      Installed apps check R2 first (see plugins.updater.endpoints in
+#      src-tauri/tauri.conf.json), so R2 keeps updates working once the
+#      repository is private. Without the secrets R2 is skipped with a
+#      warning, unless R2 already serves a latest.json: then the run fails,
+#      because apps would keep finding that older version on R2.
+# Installers are published as PuppxPOS_<version>_... (DIST_NAME below); the
+# build keeps productName "POS" so existing installs update in place.
 
 on:
   push:
@@ -22,9 +42,53 @@ on:
 permissions:
   contents: write # needed to publish releases
 
+# A newer push to main (or to the same pull request) cancels the test run it
+# replaces. Manual runs and tag builds are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+
+env:
+  # Name the installers are published under (PuppxPOS_<version>_x64-setup.exe
+  # and so on). Cosmetic: the build itself keeps productName "POS" in
+  # tauri.conf.json, which fixes the install folder, the Apps & features entry
+  # and the shortcuts of existing installs (changing it would install a second
+  # copy next to the old one). Installed apps find the files through
+  # latest.json, which is written below with these names.
+  DIST_NAME: PuppxPOS
+  # Public URL of the R2 bucket. Must match the first updater endpoint in
+  # src-tauri/tauri.conf.json (checked below).
+  R2_PUBLIC_URL: https://pub-b63dc99b79b64fe2b2644bcf0ec1391b.r2.dev
+
 jobs:
+  test:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check versions match
+        run: |
+          app=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][^"]*)".*/\1/')
+          crate=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]*)".*/\1/')
+          echo "tauri.conf.json=$app Cargo.toml=$crate"
+          if [ "$app" != "$crate" ]; then
+            echo "::error::Version mismatch: tauri.conf.json has $app, Cargo.toml has $crate"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test core
+        run: cargo test -p pos-core
+
   build:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -93,26 +157,40 @@ jobs:
           exe=$(ls target/release/bundle/nsis/*-setup.exe)
           node -e '
             const fs = require("fs"), path = require("path");
-            const [exe, version, repo] = process.argv.slice(1);
+            const [exe, version, repo, distName] = process.argv.slice(1);
             const signature = fs.readFileSync(exe + ".sig", "utf8").trim();
-            const url = `https://github.com/${repo}/releases/download/v${version}/${path.basename(exe)}`;
+            // The name "Collect installers" below gives the file (POS_... -> PuppxPOS_...).
+            const built = path.basename(exe);
+            if (!distName) { console.error("DIST_NAME is not set"); process.exit(1); }
+            if (!built.startsWith("POS_")) { console.error(`unexpected installer name ${built}`); process.exit(1); }
+            const published = distName + built.slice(3);
+            const url = `https://github.com/${repo}/releases/download/v${version}/${published}`;
             const target = { signature, url };
             fs.writeFileSync("latest.json", JSON.stringify({
-              version, notes: `POS v${version}`, pub_date: new Date().toISOString(),
+              version, notes: `${distName} v${version}`, pub_date: new Date().toISOString(),
               platforms: { "windows-x86_64": target, "windows-x86_64-nsis": target },
             }, null, 2));
-          ' "$exe" "$VERSION" "$GITHUB_REPOSITORY"
+          ' "$exe" "$VERSION" "$GITHUB_REPOSITORY" "$DIST_NAME"
           cat latest.json
 
       # Keep the normal installers before the offline build below writes
-      # its own setup .exe to the same folder.
+      # its own setup .exe to the same folder. They are renamed from POS_* to
+      # $DIST_NAME_* (the name latest.json above points at).
       - name: Collect installers
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/bundle/nsis/*-setup.exe dist/
-          cp target/release/bundle/nsis/*-setup.exe.sig dist/ 2>/dev/null || true
-          cp target/release/bundle/msi/*.msi dist/
+          shopt -s nullglob
+          for f in target/release/bundle/nsis/*-setup.exe target/release/bundle/nsis/*-setup.exe.sig target/release/bundle/msi/*.msi; do
+            name=$(basename "$f")
+            case "$name" in
+              POS_*) cp "$f" "dist/${DIST_NAME}_${name#POS_}" ;;
+              *) echo "::error::Unexpected installer name $name (expected POS_...)"; exit 1 ;;
+            esac
+          done
+          if ! compgen -G "dist/*-setup.exe" > /dev/null || ! compgen -G "dist/*.msi" > /dev/null; then
+            echo "::error::No setup .exe or .msi was built"; exit 1
+          fi
           [ -f latest.json ] && cp latest.json dist/ || true
           ls -la dist
 
@@ -120,7 +198,7 @@ jobs:
       # it installs on PCs with no internet (the normal installer downloads
       # WebView2 during setup when Windows does not have it). Bigger, so it
       # is an extra download; updates keep using the normal installer.
-      # Built for releases and manual runs, not for every push.
+      # Built for releases and manual runs (this job only runs for those).
       - name: Build offline installer (WebView2 included)
         if: github.event_name == 'workflow_dispatch' || steps.ver.outputs.release == 'true'
         shell: bash
@@ -129,7 +207,7 @@ jobs:
         run: |
           npx --yes @tauri-apps/cli@2 build --bundles nsis --config \
             '{"bundle":{"createUpdaterArtifacts":false,"windows":{"webviewInstallMode":{"type":"offlineInstaller","silent":true}}}}'
-          cp target/release/bundle/nsis/*-setup.exe "dist/POS_${VERSION}_x64-offline-setup.exe"
+          cp target/release/bundle/nsis/*-setup.exe "dist/${DIST_NAME}_${VERSION}_x64-offline-setup.exe"
           ls -la dist
 
       - name: Publish release
@@ -138,7 +216,7 @@ jobs:
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: POS v${{ steps.ver.outputs.version }}
+          name: ${{ env.DIST_NAME }} v${{ steps.ver.outputs.version }}
           fail_on_unmatched_files: false
           files: |
             dist/*.exe
@@ -146,9 +224,9 @@ jobs:
             dist/*.msi
             dist/latest.json
           body: |
-            **New install:** download `POS_${{ steps.ver.outputs.version }}_x64-setup.exe` below and run it.
+            **New install:** download `${{ env.DIST_NAME }}_${{ steps.ver.outputs.version }}_x64-setup.exe` below and run it.
 
-            **No internet on the PC?** Download `POS_${{ steps.ver.outputs.version }}_x64-offline-setup.exe`
+            **No internet on the PC?** Download `${{ env.DIST_NAME }}_${{ steps.ver.outputs.version }}_x64-offline-setup.exe`
             instead (bigger: it includes Microsoft WebView2, which the normal
             installer downloads during setup if Windows does not have it).
             Copy it to the PC with a USB stick and run it.
@@ -159,3 +237,218 @@ jobs:
 
             Windows may show "Windows protected your PC" because the installer is
             not code-signed yet: click **More info → Run anyway**.
+
+      # ---------- Update hosting on Cloudflare R2 ----------
+      # Installed apps ask R2 first. The updater only moves on to the GitHub
+      # endpoint when R2 fails (no answer, an error status such as 404, or
+      # JSON that is not a manifest); a valid but OLD latest.json on R2 stops
+      # it there ("up to date"). So once R2 has a latest.json, every release
+      # must replace it.
+      - name: R2 - check setup
+        id: r2
+        if: steps.ver.outputs.release == 'true'
+        shell: bash
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          SIGNED: ${{ steps.build.outputs.signed }}
+        run: |
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          # The apps must be asking this bucket, or publishing to it is pointless.
+          if ! grep -qF "\"$R2_PUBLIC_URL/latest.json\"" src-tauri/tauri.conf.json; then
+            echo "::error::src-tauri/tauri.conf.json has no updater endpoint $R2_PUBLIC_URL/latest.json: update R2_PUBLIC_URL in the workflow or the config"
+            exit 1
+          fi
+          missing=""
+          for v in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ "$SIGNED" != "true" ]; then
+            echo "::warning::Unsigned build (no TAURI_SIGNING_PRIVATE_KEY): no latest.json, so nothing is published to R2"
+            exit 0
+          fi
+          if [ -n "$missing" ]; then
+            # Is R2 already live? Then skipping it would leave installed apps
+            # on the version in that latest.json, silently.
+            code=$(curl -s -o r2-probe.json -w '%{http_code}' -H 'Cache-Control: no-cache' "$R2_PUBLIC_URL/latest.json" || true)
+            if [ "$code" = "200" ]; then
+              live=$(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version) } catch { console.log("?") }' r2-probe.json)
+              echo "::error::R2 secrets missing:$missing. But $R2_PUBLIC_URL/latest.json is live (version $live): installed apps check R2 first and would stay on $live. Add the secrets and run the release again. (The GitHub release was published.)"
+              exit 1
+            fi
+            echo "::warning::R2 secrets missing:$missing. Skipping the R2 upload (R2 has no latest.json yet, HTTP $code, so apps fall back to GitHub Releases). Updates will stop working when the repository is made private."
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      # Order matters: installers first and checked, latest.json last, so an
+      # app never sees a manifest that points at files not there yet.
+      - name: R2 - upload installers, then latest.json, and verify
+        if: steps.r2.outputs.enabled == 'true'
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REGION: auto
+          # Newer AWS CLIs send checksums R2 does not accept.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          AWS_EC2_METADATA_DISABLED: "true"
+          AWS_PAGER: ""
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          # Git Bash would otherwise rewrite arguments that look like paths
+          # (such as "/") before they reach aws.exe.
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          set -euo pipefail
+          aws --version
+          cd dist
+          shopt -s nullglob
+          setup=""; offline=""; msi=""
+          for f in *-setup.exe; do
+            case "$f" in
+              *-offline-setup.exe) offline="$f" ;;
+              *) [ -z "$setup" ] || { echo "::error::More than one setup .exe in dist"; exit 1; }; setup="$f" ;;
+            esac
+          done
+          for f in *.msi; do msi="$f"; done
+          for f in "$setup" "$setup.sig" "$msi" "$offline" latest.json; do
+            if [ -z "$f" ] || [ ! -f "$f" ]; then
+              echo "::error::Missing file for R2 in dist/: '$f'"; ls -la; exit 1
+            fi
+          done
+          prefix="v$VERSION"
+          base="$R2_PUBLIC_URL/$prefix"
+
+          # R2 manifest: the GitHub one with the download links moved to R2.
+          node -e '
+            const fs = require("fs");
+            const [setup, base] = process.argv.slice(1);
+            const m = JSON.parse(fs.readFileSync("latest.json", "utf8"));
+            const sig = fs.readFileSync(setup + ".sig", "utf8").trim();
+            const targets = ["windows-x86_64", "windows-x86_64-nsis"];
+            for (const t of targets) {
+              const p = m.platforms && m.platforms[t];
+              if (!p || p.signature !== sig || !p.url.endsWith("/" + setup)) {
+                console.error(`latest.json entry ${t} does not match ${setup}`); process.exit(1);
+              }
+              p.url = `${base}/${setup}`;
+            }
+            fs.writeFileSync("latest-r2.json", JSON.stringify(m, null, 2));
+          ' "$setup" "$base"
+          cat latest-r2.json; echo
+
+          s3() { aws s3 "$@" --endpoint-url "$R2_ENDPOINT" --no-progress; }
+          sha() { sha256sum "$1" | cut -d' ' -f1; }
+          # Download a public URL (bypassing caches) and compare it with a local file.
+          check() {
+            local url="$1" file="$2" got want
+            rm -f ../r2-check.bin
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -H 'Cache-Control: no-cache' -o ../r2-check.bin "$url" \
+              || { echo "::error::Could not download $url"; return 1; }
+            got=$(sha ../r2-check.bin); want=$(sha "$file")
+            rm -f ../r2-check.bin
+            if [ "$got" != "$want" ]; then
+              echo "::error::$url sha256 $got does not match the built $file ($want)"; return 1
+            fi
+            echo "OK $url sha256 $got"
+          }
+
+          # Refuse to point latest.json back at an older version (for example
+          # when an old release is run again).
+          live="none"
+          code=$(curl -s -o ../r2-live.json -w '%{http_code}' -H 'Cache-Control: no-cache' "$R2_PUBLIC_URL/latest.json" || true)
+          if [ "$code" = "200" ]; then
+            live=$(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version) } catch { console.log("unreadable") }' ../r2-live.json)
+          fi
+          echo "R2 latest.json now: $live (HTTP $code)"
+          newer=$(node -e '
+            const [live, mine] = process.argv.slice(1);
+            const p = v => (v.match(/^(\d+)\.(\d+)\.(\d+)/) || []).slice(1).map(Number);
+            const a = p(live), b = p(mine);
+            let r = false;
+            if (a.length === 3) for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) { r = a[i] > b[i]; break; } }
+            console.log(r);
+          ' "$live" "$VERSION")
+          if [ "$newer" = "true" ]; then
+            echo "::error::R2 already announces $live, newer than $VERSION: not replacing latest.json"
+            exit 1
+          fi
+
+          # 1. Installers (same file names as on GitHub Releases).
+          for f in "$setup" "$setup.sig" "$msi" "$offline"; do
+            s3 cp "$f" "s3://$R2_BUCKET/$prefix/$f" --cache-control no-cache
+          done
+          # 2. Check them from the public URL before announcing them.
+          for f in "$setup" "$setup.sig" "$msi" "$offline"; do
+            check "$base/$f" "$f"
+          done
+          # 3. The manifest: a copy kept with the version (handy to roll back:
+          #    copy it to the root), then the root latest.json the apps read.
+          s3 cp latest-r2.json "s3://$R2_BUCKET/$prefix/latest.json" --cache-control no-cache --content-type application/json
+          s3 cp latest-r2.json "s3://$R2_BUCKET/latest.json" --cache-control no-cache --content-type application/json
+          # 4. Check what the apps will now see.
+          ok=false
+          for _ in 1 2 3 4 5 6; do
+            if check "$R2_PUBLIC_URL/latest.json" latest-r2.json; then ok=true; break; fi
+            sleep 10
+          done
+          if [ "$ok" != "true" ]; then
+            echo "::error::$R2_PUBLIC_URL/latest.json is not the manifest just uploaded"; exit 1
+          fi
+          {
+            echo "### Published to R2 (v$VERSION)"
+            echo "- Update manifest: $R2_PUBLIC_URL/latest.json"
+            echo "- Installer: $base/$setup"
+            echo "- Offline installer: $base/$offline"
+            echo "- MSI: $base/$msi"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Offline installers are big and the free tier is 10 GB: keep the newest
+      # 3 version folders (never the one just published, never latest.json).
+      # A failure here does not fail the release.
+      - name: R2 - remove old versions
+        if: steps.r2.outputs.enabled == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          AWS_EC2_METADATA_DISABLED: "true"
+          AWS_PAGER: ""
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          set -euo pipefail
+          folders=$(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix v --delimiter / \
+            --query 'CommonPrefixes[].Prefix' --output text --endpoint-url "$R2_ENDPOINT" | tr -d '\r')
+          echo "Version folders on R2: $folders"
+          # $folders is split into one argument per folder on purpose.
+          # shellcheck disable=SC2086
+          old=$(node -e '
+            const [keep, current, ...all] = process.argv.slice(1);
+            const p = f => f.match(/^v(\d+)\.(\d+)\.(\d+)\/$/);
+            const cmp = (x, y) => { const a = p(x), b = p(y);
+              for (let i = 1; i <= 3; i++) if (+a[i] !== +b[i]) return +b[i] - +a[i];
+              return 0; };
+            const versions = all.filter(f => p(f)).sort(cmp);
+            console.log(versions.slice(+keep).filter(f => f !== `v${current}/`).join(" "));
+          ' 3 "$VERSION" $folders)
+          if [ -z "$old" ]; then echo "Nothing to remove"; exit 0; fi
+          for f in $old; do
+            case "$f" in v[0-9]*/) ;; *) echo "::error::Refusing to remove '$f'"; exit 1 ;; esac
+            [ "$f" != "v$VERSION/" ] || continue
+            echo "Removing $f"
+            aws s3 rm "s3://$R2_BUCKET/$f" --recursive --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          done

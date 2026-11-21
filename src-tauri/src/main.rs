@@ -194,7 +194,7 @@ fn quit_app(handle: AppHandle) {
 #[derive(Serialize)]
 struct UpdateInfo {
     current: String,
-    /// Newer version on GitHub Releases, if any.
+    /// Newer version on the update server, if any.
     available: Option<String>,
     notes: Option<String>,
 }
@@ -203,12 +203,24 @@ fn update_error(e: tauri_plugin_updater::Error) -> PosError {
     PosError::Internal(format!("update failed: {e}"))
 }
 
-/// Ask GitHub Releases whether a newer, correctly signed version exists
+/// How long each update server may take to answer the check. Without it a
+/// server that never answers (a blocked R2 on the shop's network) would hang
+/// the check before the updater moves on to the next one (GitHub).
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The updater with that timeout on the check. It does not limit the
+/// download: `check()` hands back the update with `timeout: None`, so the
+/// installer download (a few MB, maybe on slow Wi-Fi) still has no time limit.
+fn updater(handle: &AppHandle) -> Result<tauri_plugin_updater::Updater> {
+    handle.updater_builder().timeout(UPDATE_CHECK_TIMEOUT).build().map_err(update_error)
+}
+
+/// Ask the update server (R2, then GitHub Releases) whether a newer, correctly signed version exists
 /// (admins only; for anyone else the UI shows nothing about updates).
 #[tauri::command]
 async fn check_update(app: Cmd<'_>, handle: AppHandle) -> Result<UpdateInfo> {
     require_updates(&app, LOCAL)?;
-    let update = handle.updater().map_err(update_error)?.check().await.map_err(update_error)?;
+    let update = updater(&handle)?.check().await.map_err(update_error)?;
     Ok(UpdateInfo {
         current: handle.package_info().version.to_string(),
         available: update.as_ref().map(|u| u.version.clone()),
@@ -227,9 +239,7 @@ async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
         pos.backup_unchecked(unique_backup_path(&app.backup_dir, "pos-before-update-").0)?;
         pos.optimize()
     })?;
-    let update = handle
-        .updater()
-        .map_err(update_error)?
+    let update = updater(&handle)?
         .check()
         .await
         .map_err(update_error)?

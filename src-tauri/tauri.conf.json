@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "POS",
-  "version": "0.13.8",
+  "version": "0.13.9",
   "identifier": "com.puppx.pos",
   "build": {
     "frontendDist": "../ui"
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "POS",
+        "title": "PuppxPOS",
         "width": 1280,
         "height": 800,
         "minWidth": 1024,
@@ -51,6 +51,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM5MTFCRUM5Q0U1Q0YyMDgKUldRSThsek95YjRSeVZ1TitsWktpbzdaT0dSM3dSdWRsREZURTRQWVhjL3JGbWRFenRjaTBzT1IK",
       "endpoints": [
+        "https://pub-b63dc99b79b64fe2b2644bcf0ec1391b.r2.dev/latest.json",
         "https://github.com/puppx/pos_application/releases/latest/download/latest.json"
       ],
       "windows": {

@@ -404,7 +404,7 @@ async function start() {
   state.plan = { w: st.plan_width, h: st.plan_height };
   state.version = st.version;
   state.remote = st.remote;
-  document.title = st.store_name || 'POS';
+  document.title = st.store_name || 'PuppxPOS';
   if (st.needs_setup) return renderSetup();
   if (!st.session) return renderLogin();
   await loadUiSettings();
@@ -427,7 +427,7 @@ function lockScreen(...kids) {
   screen(h('div', { class: 'lock' },
     h('div', { class: 'lock-side' },
       h('div', { class: 'brand-mark' }, logoImg()),
-      h('div', { class: 'lock-store' }, state.storeName || 'POS'),
+      h('div', { class: 'lock-store' }, state.storeName || 'PuppxPOS'),
       clock, date,
       h('div', { class: 'lock-foot' }, h('span', { class: 'grow' }, state.remote ? 'Connected to the main till' : `Version ${state.version ?? ''}`),
         h('button', { class: 'ghost icon-btn theme-btn', onclick: toggleTheme }))),
@@ -636,7 +636,7 @@ function go(view) {
 // ---------- automatic updates ----------
 
 let updateTimer;
-/// Check GitHub Releases for a newer signed version; show it in the header.
+/// Check the update server for a newer signed version; show it in the header.
 /// Admins only (the server refuses everyone else). Silent when offline.
 /// Returns the check result (or null on failure).
 async function checkForUpdate(quiet = true) {
@@ -698,7 +698,7 @@ function renderShell() {
   }
   document.getElementById('bar').hidden = false;
   setKids(document.getElementById('brand'), logoImg());
-  document.getElementById('brand').title = state.storeName || 'POS';
+  document.getElementById('brand').title = state.storeName || 'PuppxPOS';
   const navOn = inManage(state.view) ? 'settings' : state.view;
   document.getElementById('nav').replaceChildren(...VIEWS.filter(([, , need, rail]) => rail && canSee(need)).map(([id, label]) =>
     h('button', { class: !state.orderId && id === navOn ? 'on' : '', onclick: () => go(id), title: label, 'aria-label': label }, icon(id), h('span', { class: 'nav-label' }, label))));
@@ -776,7 +776,7 @@ function showHelp() {
 
 /// Top bar title: "Restaurant / Manage › Reports". `crumb` ("Manage") is left out on phones.
 function drawTitle(title, crumb = null) {
-  setKids(document.getElementById('title'), h('span', {}, state.storeName || 'POS'), h('span', { class: 'sep' }, '/'),
+  setKids(document.getElementById('title'), h('span', {}, state.storeName || 'PuppxPOS'), h('span', { class: 'sep' }, '/'),
     crumb && h('span', { class: 'crumb' }, `${crumb} ›`), h('span', { class: 'page-name' }, title));
 }
 
@@ -5980,8 +5980,8 @@ async function restaurantGroup() {
       textRow({ id: 'store_name', label: 'Restaurant name', value: state.storeName ?? '', placeholder: 'Restaurant name', save: (v) => saveKey('store_name', v),
         after: (v) => {
           state.storeName = v;
-          document.title = v || 'POS';
-          document.getElementById('brand').title = v || 'POS';
+          document.title = v || 'PuppxPOS';
+          document.getElementById('brand').title = v || 'PuppxPOS';
           const bills = document.querySelector('[data-row="shop_name"] input');
           if (bills) bills.placeholder = v || 'Restaurant name';
         } }),
@@ -6293,7 +6293,7 @@ function creditsCard() {
   return h('div', { class: 'about-credits sgroup' },
     h('img', { class: 'about-logo', src: 'icon.png', alt: '' }),
     h('div', { class: 'about-text' },
-      h('div', { class: 'about-head' }, h('h3', { class: 'about-name' }, 'Limehouse POS'), state.version && h('span', { class: 'chip info' }, `Version ${state.version}`)),
+      h('div', { class: 'about-head' }, h('h3', { class: 'about-name' }, 'PuppxPOS'), state.version && h('span', { class: 'chip info' }, `Version ${state.version}`)),
       h('div', { class: 'about-by' }, 'Developed by ', h('strong', {}, 'Pheeraphat Bunliang')),
       h('div', { class: 'muted small' }, 'Designed and developed with AI-assisted programming.'),
       h('div', { class: 'about-copy muted small' }, '© 2026 Pheeraphat Bunliang. All rights reserved.')));

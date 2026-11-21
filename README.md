@@ -441,12 +441,16 @@ Good to know:
 
 ## Install and update
 
-1. Open **Releases** on this repository's GitHub page.
-2. Download `POS_x.y.z_x64-setup.exe` from the newest release and run it.
+1. Get the newest installer: `PuppxPOS_x.y.z_x64-setup.exe` from
+   `https://pub-b63dc99b79b64fe2b2644bcf0ec1391b.r2.dev/vx.y.z/` (the newest version is
+   in `https://pub-b63dc99b79b64fe2b2644bcf0ec1391b.r2.dev/latest.json`; each release run
+   lists the links in its summary), or from **Releases** on this repository's GitHub page
+   while the repository is public. Releases up to 0.13.8 named the files `POS_x.y.z_...`.
+2. Run it.
    Because the installer is not code-signed yet, Windows may say "Windows protected
    your PC": click **More info → Run anyway**.
 
-**PC without internet?** Use `POS_x.y.z_x64-offline-setup.exe` instead. The app
+**PC without internet?** Use `PuppxPOS_x.y.z_x64-offline-setup.exe` instead. The app
 draws its screens with Microsoft WebView2, which Windows 10/11 usually already
 have; when it is missing, the normal installer downloads it during setup, so it
 needs internet. The offline installer includes WebView2 (it is bigger, about
@@ -454,7 +458,7 @@ needs internet. The offline installer includes WebView2 (it is bigger, about
 run it. Once installed, the POS itself never needs internet (only automatic
 updates do).
 
-**Automatic updates (v0.5.0 and later):** the app checks GitHub Releases when it starts
+**Automatic updates (v0.5.0 and later):** the app checks for a new version when it starts
 and every 6 hours. When a new version is out, a bar appears at the top:
 *Update x.y.z available*. An admin taps **Install update**: the database is backed up
 (`backups\pos-before-update-*.db`), the app closes, updates and reopens. Orders, menu
@@ -464,8 +468,15 @@ see and install updates (the app checks while an admin is logged in); managers a
 staff see the version and credits only, and the till refuses the update commands for them.
 
 Updates are signed: the app only installs files signed with the project's private key,
-so a tampered download is refused. Updates need the repository to be **public**
-(the app downloads releases without logging in to GitHub).
+so a tampered download is refused.
+
+Where updates come from: the app reads `latest.json` from the public Cloudflare R2
+bucket (`https://pub-b63dc99b79b64fe2b2644bcf0ec1391b.r2.dev/latest.json`) and, only if
+that fails (no answer, an error such as 404, or a reply that is not an update manifest),
+from GitHub Releases (`plugins.updater.endpoints` in `src-tauri/tauri.conf.json`). GitHub
+only works while the repository is public; R2 keeps working after it is made private.
+Versions up to 0.13.8 only know GitHub: before making the repository private, every
+till must have updated to a release newer than 0.13.8, or it has to be updated by hand once.
 
 Versions before 0.5.0 cannot update themselves: install 0.5.0 once by hand.
 
@@ -480,7 +491,26 @@ Versions before 0.5.0 cannot update themselves: install 0.5.0 once by hand.
    (or push a tag such as `v0.2.0`).
 
 The **Windows build** workflow tests, builds the installers and publishes the
-release, tagged `v` + the app version.
+release, tagged `v` + the app version, to GitHub Releases and to Cloudflare R2: the
+installers go to `v<version>/` in the bucket and are checked by downloading them back,
+then `latest.json` (pointing at them) is replaced at the bucket root and checked too.
+Only the newest 3 version folders are kept on R2. The installers are published as
+`PuppxPOS_<version>_x64-setup.exe`, `PuppxPOS_<version>_x64-offline-setup.exe` and
+`PuppxPOS_<version>_x64_en-US.msi`. The build itself keeps `productName` "POS", which
+sets the install folder, the Apps & features entry and the shortcut names of
+existing installs; changing it would install a second copy beside the old one.
+
+Pushes to `main` and pull requests only run `cargo test -p pos-core` on Linux (Actions
+minutes are limited on private repositories and Windows minutes count double). The
+Windows build runs only when started by hand or for a `v*` tag; started by hand
+without **Publish a release** it is a check that keeps nothing.
+
+**One-time setup for R2:** add the repository secrets `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY` (an R2 API token with Object Read & Write on the bucket),
+`R2_ACCOUNT_ID` and `R2_BUCKET`, and turn on the bucket's public r2.dev URL. Without the
+secrets a release skips R2 with a warning, until R2 has a `latest.json`: from then on
+a release without them fails, because the tills would keep finding the older version
+on R2 and never look at GitHub.
 
 **One-time setup for automatic updates:** add the update-signing private key as a
 repository secret named `TAURI_SIGNING_PRIVATE_KEY` (Manage → Secrets and variables →
@@ -488,8 +518,7 @@ Actions → New repository secret). The matching public key is in
 `src-tauri/tauri.conf.json`. Releases built without the secret still have installers,
 but no `latest.json`, so installed apps won't see them as updates. **Keep a backup of the
 private key**: if it is lost, installed apps cannot accept new updates until they are
-reinstalled with a new key. Every push to `main` also builds installers you can download from the
-run's *Artifacts* section without making a release.
+reinstalled with a new key.
 
 ### On a Windows PC
 

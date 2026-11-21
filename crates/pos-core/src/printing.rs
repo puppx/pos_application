@@ -336,7 +336,7 @@ impl PrintJob {
     pub fn send(&self) -> Result<()> {
         if self.is_one_connection() {
             let _turn = Ticket::new(&self.target, self.urgent).wait();
-            send_whole(open(&self.target), &self.target, &self.parts, self.gap, self.is_paced())?;
+            send_whole(open_or_busy(&self.target), &self.target, &self.parts, self.gap, self.is_paced())?;
             for m in &self.more {
                 m.send()?;
             }
@@ -425,7 +425,9 @@ impl PrintJob {
         // Busy: take a place in the printer's line now (so jobs keep the
         // order they were sent in) and wait for it on the thread.
         let place = match Turn::try_take(&target) {
-            Some(turn) => Place::Now(turn, open(&target)?),
+            // One connection: a printer that resets it now is busy, not out
+            // of reach; that is tried again on the thread (see send_whole).
+            Some(turn) => Place::Now(turn, if together { open_or_busy(&target)? } else { Some(open(&target)?) }),
             None => Place::Queued(Ticket::new(&target, urgent)),
         };
         // Counted until the last byte is out: closing the app waits for it.
@@ -442,14 +444,16 @@ impl PrintJob {
                 Place::Now(turn, conn) => (turn, Ok(conn)),
                 Place::Queued(ticket) => {
                     let turn = ticket.wait();
-                    let conn = open(&target);
+                    let conn = if together { open_or_busy(&target) } else { open(&target).map(Some) };
                     (turn, conn)
                 }
             };
             let mut result = if together {
                 send_whole(conn, &target, now, gap, paced)
             } else {
-                conn.and_then(|c| write_parts(c, now, gap, true, false).map_err(printer_error))
+                // Not one connection: always opened (Some), as before.
+                conn.and_then(|c| c.ok_or_else(|| PosError::Printer("not connected".into())))
+                    .and_then(|c| write_parts(c, now, gap, true, false).map_err(printer_error))
             };
             drop(turn);
             for part in later {
@@ -528,18 +532,25 @@ const REFUSED_PAUSE: Duration = Duration::from_secs(1);
 /// A one-connection job ([`PrintJob::one_connection`]): over `conn` (or a
 /// new connection if the printer turned it away), every part `gap` apart,
 /// then ended cleanly ([`Conn::finish`]).
-fn send_whole(conn: Result<Conn>, target: &PrinterTarget, parts: &[Vec<u8>], gap: Duration, paced: bool) -> Result<()> {
+///
+/// `conn` is from [`open_or_busy`]: None (turned away while connecting) is
+/// tried again like a connection turned away just after.
+fn send_whole(conn: Result<Option<Conn>>, target: &PrinterTarget, parts: &[Vec<u8>], gap: Duration, paced: bool) -> Result<()> {
     let mut conn = conn?;
     let mut tries = 0;
-    while conn.turned_away() {
+    loop {
+        if let Some(c) = conn.take() {
+            if !c.turned_away() {
+                return write_parts(c, parts, gap, paced, true).map_err(printer_error);
+            }
+        }
         if tries == REFUSED_RETRIES {
             return Err(PosError::Printer("the printer refused the connection (busy with another one?)".into()));
         }
         tries += 1;
         std::thread::sleep(REFUSED_PAUSE);
-        conn = open(target)?;
+        conn = open_or_busy(target)?;
     }
-    write_parts(conn, parts, gap, paced, true).map_err(printer_error)
 }
 
 /// How long the whole of `len` bytes takes to send slowly (the pauses).
@@ -620,14 +631,25 @@ impl Write for Conn {
 }
 
 fn connect(host: &str, port: u16) -> Result<TcpStream> {
-    let fail = PosError::Printer;
-    let addr = (host.trim(), port)
-        .to_socket_addrs()
-        .map_err(|e| fail(e.to_string()))?
-        .next()
-        .ok_or_else(|| fail(format!("cannot resolve {host}")))?;
-    let s = TcpStream::connect_timeout(&addr, NET_TIMEOUT).map_err(|e| fail(format!("cannot reach {host}:{port} ({e})")))?;
-    s.set_write_timeout(Some(NET_TIMEOUT)).map_err(|e| fail(e.to_string()))?;
+    connect_io(host, port).map_err(|(_, message)| PosError::Printer(message))
+}
+
+/// [`connect`], keeping the error itself next to its message, so a
+/// connection the printer reset (busy) can be told from one that failed.
+fn connect_io(host: &str, port: u16) -> std::result::Result<TcpStream, (std::io::Error, String)> {
+    let plain = |e: std::io::Error| {
+        let m = e.to_string();
+        (e, m)
+    };
+    let addr = (host.trim(), port).to_socket_addrs().map_err(plain)?.next().ok_or_else(|| {
+        let m = format!("cannot resolve {host}");
+        (std::io::Error::other(m.clone()), m)
+    })?;
+    let s = TcpStream::connect_timeout(&addr, NET_TIMEOUT).map_err(|e| {
+        let m = format!("cannot reach {host}:{port} ({e})");
+        (e, m)
+    })?;
+    s.set_write_timeout(Some(NET_TIMEOUT)).map_err(plain)?;
     Ok(s)
 }
 
@@ -636,6 +658,24 @@ fn open_file(path: &str) -> Result<std::fs::File> {
 }
 
 /// Open a paced printer (network, or port / path).
+/// Open a one-connection job's printer ([`PrintJob::one_connection`]):
+/// None when the printer turned the connection away while it was being
+/// made (reset it: busy with another connection). That is tried again
+/// ([`send_whole`]), never reported as the printer being out of reach.
+fn open_or_busy(target: &PrinterTarget) -> Result<Option<Conn>> {
+    match target {
+        PrinterTarget::Network { host, port } => match connect_io(host, *port) {
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                Ok(Some(Conn::Tcp(s)))
+            }
+            Err((e, _)) if is_reset(&e) => Ok(None),
+            Err((_, message)) => Err(PosError::Printer(message)),
+        },
+        _ => open(target).map(Some),
+    }
+}
+
 fn open(target: &PrinterTarget) -> Result<Conn> {
     match target {
         PrinterTarget::Network { host, port } => {
@@ -660,7 +700,9 @@ fn send_paced(target: &PrinterTarget, bytes: &[u8], urgent: bool) -> Result<()> 
 /// Where a paced job stands when the till hands it over: sending now (the
 /// printer was free and is connected), or waiting in the printer's line.
 enum Place {
-    Now(Turn, Conn),
+    /// The connection: None when a one-connection job's printer turned it
+    /// away (see [`open_or_busy`]).
+    Now(Turn, Option<Conn>),
     Queued(Ticket),
 }
 

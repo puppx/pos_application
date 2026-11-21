@@ -68,6 +68,15 @@ fn old_printer() -> (u16, Arc<Mutex<Seen>>) {
     (port, seen)
 }
 
+/// Wait until `ok` holds for what the printer saw (at most 40 s).
+fn until(seen: &Arc<Mutex<Seen>>, what: &str, ok: impl Fn(&Seen) -> bool) {
+    let end = Instant::now() + Duration::from_secs(40);
+    while !ok(&seen.lock().unwrap()) {
+        assert!(Instant::now() < end, "the printer never saw {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Wait until the printer has taken `n` connections and is idle (or 40 s).
 fn taken(seen: &Arc<Mutex<Seen>>, n: usize) -> (Vec<Vec<u8>>, usize) {
     let end = Instant::now() + Duration::from_secs(40);
@@ -199,11 +208,13 @@ fn a_printer_busy_with_another_till_is_tried_again_and_a_lasting_refusal_is_show
     let sent = pos.send_to_kitchen(&s, o.id).unwrap();
     let job = pos.kitchen_job(&s, o.id, &sent, false).unwrap().unwrap();
     let want = job.bytes();
-    // Another till holds the printer for 1.5 s: turned away, tried again, printed.
+    // Another till holds the printer: this job is turned away (however fast
+    // the printer resets it: while connecting or just after), and printed
+    // once the other till lets go.
     let other = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    until(&seen, "the other till", |st| st.open == 1);
     job.clone().send_in_background().unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    until(&seen, "this job turned away", |st| st.reset >= 1);
     drop(other);
     let (got, reset) = taken(&seen, 2);
     assert!(reset >= 1);
@@ -212,7 +223,7 @@ fn a_printer_busy_with_another_till_is_tried_again_and_a_lasting_refusal_is_show
     // Held for good: the failure reaches the tills ("print it again").
     let after = print_failures(None).last;
     let _other = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    until(&seen, "the other till", |st| st.open == 1);
     job.send_in_background().unwrap();
     assert!(wait_for_prints(Duration::from_secs(20)));
     let here = format!("127.0.0.1:{port} ");

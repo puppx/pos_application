@@ -57,7 +57,11 @@ fn cancelling_an_order_in_the_kitchen_prints_cancelled_for_what_is_still_cooking
     assert!(text.contains("CANCELLED") && text.contains("2 x Green curry"), "{text}");
     assert!(!text.contains("Tom yum"), "done dishes are not cancelled: {text}");
     assert_eq!(k.pos.get_order(&s, o.id).unwrap().status, "cancelled");
-    assert!(k.pos.kitchen_board(&s, "all").unwrap().is_empty());
+    // The kitchen screen agrees with the ticket: the curry struck through for a while,
+    // once (the refused try added nothing), and nothing left to do.
+    let board = k.pos.kitchen_board(&s, "all").unwrap();
+    let shown: Vec<(i64, &str, bool)> = board.iter().flat_map(|o| o.items.iter().map(|i| (i.qty, i.name.as_str(), i.cancelled))).collect();
+    assert_eq!(shown, vec![(2, "Green curry", true)]);
     // Closed already: refused, no ticket.
     assert!(k.pos.cancel_order_for_kitchen(&s, o.id, "").is_err());
 

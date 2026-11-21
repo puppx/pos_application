@@ -146,6 +146,10 @@ pub struct Pos {
     terminal: Option<String>,
     /// The Activity log's first-page counts, kept between calls.
     log_counts: activity::CountCache,
+    /// Dishes recently cancelled after they were sent, shown struck through
+    /// on the kitchen screen for a short while (see `kds::CancelledDishes`).
+    /// In memory only, per instance: lost on restart.
+    kds_cancelled: kds::CancelledDishes,
 }
 
 impl Pos {
@@ -183,7 +187,7 @@ impl Pos {
         if database_id(&conn)?.is_none() {
             new_database_id(&conn)?;
         }
-        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default(), last_empty_sweep: None, terminal: None, log_counts: Default::default() })
+        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default(), last_empty_sweep: None, terminal: None, log_counts: Default::default(), kds_cancelled: Default::default() })
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {

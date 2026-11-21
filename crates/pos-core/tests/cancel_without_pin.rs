@@ -145,7 +145,10 @@ fn a_manager_cancelling_with_no_pin_still_prints_cancelled_for_what_is_cooking()
     assert!(text.contains("CANCELLED") && text.contains("2 x Green curry"), "{text}");
     assert!(!text.contains("Tom yum"), "done dishes are not cancelled: {text}");
     assert_eq!(status(&k, o.id), "cancelled");
-    assert!(k.pos.kitchen_board(&k.admin, "all").unwrap().is_empty());
+    // The kitchen screen shows the same dishes struck through for a while (nothing to do).
+    let board = k.pos.kitchen_board(&k.admin, "all").unwrap();
+    let shown: Vec<(i64, &str, bool)> = board.iter().flat_map(|o| o.items.iter().map(|i| (i.qty, i.name.as_str(), i.cancelled))).collect();
+    assert_eq!(shown, vec![(2, "Green curry", true)]);
     // Closed already: refused, no ticket.
     assert!(k.pos.cancel_order_confirmed(&quinn, o.id, "", None).is_err());
 }
@@ -188,7 +191,9 @@ fn the_cancelled_ticket_for_a_whole_order_can_be_switched_off() {
     let id = order_with_curry(&mut k, &quinn, true);
     assert!(k.pos.cancel_order_for_kitchen(&quinn, id, "").unwrap().is_none());
     assert_eq!(status(&k, id), "cancelled");
-    assert!(k.pos.kitchen_board(&k.admin, "all").unwrap().is_empty());
+    // Nothing left to cook: only dishes struck through as cancelled (the screen is not paper).
+    let board = k.pos.kitchen_board(&k.admin, "all").unwrap();
+    assert!(!board.is_empty() && board.iter().all(|o| o.items.iter().all(|i| i.cancelled)));
 
     // Taking one sent dish off still tells the kitchen.
     let id = order_with_curry(&mut k, &quinn, true);

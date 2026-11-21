@@ -944,7 +944,8 @@ const HELP = {
   users: ['Staff', ['Add each person with + Staff member: a name, a role and a PIN.', 'Tap a person to change their name, role, PIN or whether they can log in. Changes save at once.']],
   customers: ['Customers', ['Find a saved customer by phone, name or postcode.', 'Tap one to change their details or see their recent orders.']],
   shift: ['Shift & cash', ['Start the shift with the float in the drawer.', 'Record money put in or taken out, and count the drawer at the end.']],
-  kitchen: ['Kitchen screen', ['Each card is one order, oldest first.', 'Tap a dish when it is ready; tap Done when the whole order is out.']],
+  kitchen: ['Kitchen screen', ['Each card is one order, oldest first.', 'Tap a dish when it is ready; tap Done when the whole order is out.',
+    'A dish crossed out with a Cancelled tag was taken off the order after it was sent; it goes by itself after 2 minutes.']],
 };
 function showHelp() {
   const key = state.orderId ? 'order' : state.view;
@@ -4432,6 +4433,8 @@ function kdsBeep() {
 
 /// Kitchen screen: one card per order with the dishes still to cook.
 /// Tap a dish when it is done; "Done" clears the whole card. Refreshes by itself.
+/// A dish cancelled after it was sent shows struck through for two minutes
+/// (`cancelled`, a negative id): never to do, not tappable, not in "Done".
 async function renderKitchen() {
   const loadCfg = () => invoke('get_settings', { keys: KDS_KEYS }).then(kdsSettings);
   let [teams, cfg] = await Promise.all([call('list_teams').catch(() => []), loadCfg().catch(() => kdsSettings())]);
@@ -4483,24 +4486,30 @@ async function renderKitchen() {
   });
   async function refresh() {
     const orders = await call('kitchen_board', { filter });
-    const ids = orders.flatMap((o) => o.items.map((i) => i.id));
+    const ids = orders.flatMap((o) => o.items.filter((i) => !i.cancelled).map((i) => i.id));
     if (seen && cfg.beep && ids.some((id) => !seen.has(id))) kdsBeep();
     if (!seen || seen.size > 5000) seen = new Set(ids); else ids.forEach((id) => seen.add(id));
     setKids(board, orders.length ? orders.map((o) => {
       const age = mins(o.since);
-      const todo = o.items.filter((i) => !i.done).map((i) => i.id);
-      return h('div', { class: `kds-card ${age >= cfg.late ? 'late' : age >= cfg.slow ? 'slow' : ''}` },
-        h('div', { class: 'kds-head' }, h('strong', {}, o.heading), h('span', { class: 'kds-age' }, ageText(age))),
+      const todo = o.items.filter((i) => !i.done && !i.cancelled).map((i) => i.id);
+      // Only cancelled dishes: a red "Cancelled" card, no age, nothing to do.
+      const gone = o.items.every((i) => i.cancelled);
+      const tone = gone ? 'cancelled' : !todo.length ? '' : age >= cfg.late ? 'late' : age >= cfg.slow ? 'slow' : '';
+      const dish = (i) => [h('span', { class: 'kds-qty' }, `${i.qty}×`),
+        h('span', { class: 'kds-name' }, i.name, i.with_name && ` + ${i.with_name}`,
+          i.name_alt && h('small', { lang: 'th' }, i.name_alt),
+          i.set_name && h('small', {}, `set: ${i.set_name}`),
+          i.options.length > 0 && h('small', {}, i.options.join(', ')),
+          i.note && h('small', { class: 'kds-note' }, `“${i.note}”`))];
+      return h('div', { class: `kds-card ${tone}` },
+        h('div', { class: 'kds-head' }, h('strong', {}, o.heading), h('span', { class: 'kds-age' }, gone ? 'Cancelled' : ageText(age))),
         (o.customer_name || o.paid) && h('div', { class: 'kds-sub' }, [o.customer_name, o.paid ? 'PAID' : ''].filter(Boolean).join(' · ')),
-        h('div', { class: 'kds-items' }, o.items.map((i) => h('button', { class: `kds-item ${i.done ? 'done' : ''}`,
-          onclick: i.done ? act(async () => { await call('kitchen_done', { itemIds: [i.id], done: false }); await refresh(); }) : done([i.id]) },
-          h('span', { class: 'kds-qty' }, `${i.qty}×`),
-          h('span', { class: 'kds-name' }, i.name, i.with_name && ` + ${i.with_name}`,
-            i.name_alt && h('small', { lang: 'th' }, i.name_alt),
-            i.set_name && h('small', {}, `set: ${i.set_name}`),
-            i.options.length > 0 && h('small', {}, i.options.join(', ')),
-            i.note && h('small', { class: 'kds-note' }, `“${i.note}”`))))),
-        h('button', { class: 'primary kds-done', onclick: done(todo) }, `Done (${todo.length})`));
+        h('div', { class: 'kds-items' }, o.items.map((i) => i.cancelled
+          ? h('div', { class: 'kds-item cancelled', title: 'Taken off the order after it was sent' }, ...dish(i), h('span', { class: 'kds-pill' }, 'Cancelled'))
+          : h('button', { class: `kds-item ${i.done ? 'done' : ''}`,
+            onclick: i.done ? act(async () => { await call('kitchen_done', { itemIds: [i.id], done: false }); await refresh(); }) : done([i.id]) },
+            ...dish(i)))),
+        todo.length > 0 && h('button', { class: 'primary kds-done', onclick: done(todo) }, `Done (${todo.length})`));
     }) : h('div', { class: 'empty' }, icon('check', 40), h('p', {}, 'Nothing to cook right now')));
   }
   drawBar();

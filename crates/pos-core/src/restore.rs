@@ -481,6 +481,7 @@ impl Pos {
         self.conn.flush_prepared_statement_cache();
         self.throttle = Default::default();
         self.log_counts = Default::default();
+        self.kds_cancelled = Default::default();
         let detail = restore_audit_detail(&prepared.summary, by);
         let steps: [(&str, &AfterCopy); 7] = [
             // Keep WAL for a file database (in memory it stays "memory").

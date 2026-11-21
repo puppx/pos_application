@@ -491,9 +491,10 @@ Versions before 0.5.0 cannot update themselves: install 0.5.0 once by hand.
    (or push a tag such as `v0.2.0`).
 
 The **Windows build** workflow tests, builds the installers and publishes the
-release, tagged `v` + the app version, to GitHub Releases and to Cloudflare R2: the
-installers go to `v<version>/` in the bucket and are checked by downloading them back,
-then `latest.json` (pointing at them) is replaced at the bucket root and checked too.
+release, tagged `v` + the app version, to GitHub Releases and then to Cloudflare R2 (a
+separate Linux job that copies the files of that GitHub release): the installers go to
+`v<version>/` in the bucket and are checked by downloading them back, then `latest.json`
+(pointing at them, same signature) is replaced at the bucket root and checked too.
 Only the newest 3 version folders are kept on R2. The installers are published as
 `PuppxPOS_<version>_x64-setup.exe`, `PuppxPOS_<version>_x64-offline-setup.exe` and
 `PuppxPOS_<version>_x64_en-US.msi`. The build itself keeps `productName` "POS", which
@@ -505,12 +506,21 @@ minutes are limited on private repositories and Windows minutes count double). T
 Windows build runs only when started by hand or for a `v*` tag; started by hand
 without **Publish a release** it is a check that keeps nothing.
 
-**One-time setup for R2:** add the repository secrets `R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY` (an R2 API token with Object Read & Write on the bucket),
-`R2_ACCOUNT_ID` and `R2_BUCKET`, and turn on the bucket's public r2.dev URL. Without the
-secrets a release skips R2 with a warning, until R2 has a `latest.json`: from then on
-a release without them fails, because the tills would keep finding the older version
-on R2 and never look at GitHub.
+**One-time setup for R2:** add the repository secrets `R2_ACCESS_KEY_ID` and
+`R2_SECRET_ACCESS_KEY` (from an R2 API token with Object Read & Write on the bucket),
+`R2_ACCOUNT_ID` (the 32-character account ID from R2 → Account details; the S3 endpoint
+`https://<id>.r2.cloudflarestorage.com` is accepted too) and `R2_BUCKET` (only the bucket
+name), and turn on the bucket's public r2.dev URL. Spaces and line breaks pasted with a
+secret are removed; a value that is still wrong fails the run with a message naming the
+secret (the values are never printed). Without the secrets a release skips R2 with a
+warning, until R2 has a `latest.json`: from then on a release without them fails,
+because the tills would keep finding the older version on R2 and never look at GitHub.
+
+**Repeating only the R2 part** (for example after fixing a secret): **Actions → Windows
+build → Run workflow**, pick the branch whose `tauri.conf.json` has the version, tick
+**Only publish to R2** and run it. Nothing is built: the files of the existing GitHub
+release `v<version>` are copied to R2 with their signature, checked, and `latest.json`
+is replaced last. **Publish a release** is ignored on such a run.
 
 **One-time setup for automatic updates:** add the update-signing private key as a
 repository secret named `TAURI_SIGNING_PRIVATE_KEY` (Manage → Secrets and variables →

@@ -14,16 +14,22 @@ name: Windows build
 # Pushing a tag such as v0.2.0 does the same. A release is published to:
 #   1. GitHub Releases (installers + latest.json with GitHub download links),
 #      as before. This is the fallback update source while the repo is public.
-#   2. Cloudflare R2 (public bucket, R2_PUBLIC_URL below), when the secrets
-#      R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID and R2_BUCKET are
-#      set: installers go to v<version>/, then latest.json (pointing at those
-#      copies) goes to the bucket root LAST, then both are downloaded back from
-#      the public URL and checked. Only the newest 3 v*/ folders are kept.
-#      Installed apps check R2 first (see plugins.updater.endpoints in
-#      src-tauri/tauri.conf.json), so R2 keeps updates working once the
-#      repository is private. Without the secrets R2 is skipped with a
-#      warning, unless R2 already serves a latest.json: then the run fails,
-#      because apps would keep finding that older version on R2.
+#   2. Cloudflare R2 (public bucket, R2_PUBLIC_URL below), by the "r2" job on
+#      Linux, when the secrets R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+#      R2_ACCOUNT_ID and R2_BUCKET are set. It downloads the files of the
+#      GitHub release just published, uploads the installers to v<version>/,
+#      then latest.json (pointing at those copies) to the bucket root LAST,
+#      and downloads both back from the public URL to check them. Only the
+#      newest 3 v*/ folders are kept. Installed apps check R2 first (see
+#      plugins.updater.endpoints in src-tauri/tauri.conf.json), so R2 keeps
+#      updates working once the repository is private. Without the secrets R2
+#      is skipped with a warning, unless R2 already serves a latest.json: then
+#      the run fails, because apps would keep finding that older version on R2.
+#
+# To repeat only the R2 part (for example after fixing an R2 secret): Run
+# workflow, tick "Only publish to R2" (r2_only). Nothing is built: the files
+# of the existing GitHub release v<version from tauri.conf.json> on the chosen
+# branch are copied to R2, with the same signature.
 # Installers are published as PuppxPOS_<version>_... (DIST_NAME below); the
 # build keeps productName "POS" so existing installs update in place.
 
@@ -36,6 +42,10 @@ on:
     inputs:
       release:
         description: "Publish a release (tag v<app version>) with the installers"
+        type: boolean
+        default: false
+      r2_only:
+        description: "Only publish to R2: no build; copy the existing GitHub release v<app version> to R2"
         type: boolean
         default: false
 
@@ -86,9 +96,13 @@ jobs:
         run: cargo test -p pos-core
 
   build:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && !inputs.r2_only) || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     timeout-minutes: 120
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      release: ${{ steps.ver.outputs.release }}
+      signed: ${{ steps.build.outputs.signed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -238,22 +252,62 @@ jobs:
             Windows may show "Windows protected your PC" because the installer is
             not code-signed yet: click **More info → Run anyway**.
 
-      # ---------- Update hosting on Cloudflare R2 ----------
-      # Installed apps ask R2 first. The updater only moves on to the GitHub
-      # endpoint when R2 fails (no answer, an error status such as 404, or
-      # JSON that is not a manifest); a valid but OLD latest.json on R2 stops
-      # it there ("up to date"). So once R2 has a latest.json, every release
-      # must replace it.
+  # ---------- Update hosting on Cloudflare R2 ----------
+  # Runs after a release (on Linux: cheaper, and no Git Bash path quirks), or
+  # alone with Run workflow > "Only publish to R2" (r2_only) to repeat just this
+  # part for the GitHub release v<version from tauri.conf.json>. Both take the
+  # files from that GitHub release, so R2 serves exactly the bytes and
+  # signature published there, and nothing is rebuilt.
+  #
+  # Installed apps ask R2 first. The updater only moves on to the GitHub
+  # endpoint when R2 fails (no answer, an error status such as 404, or JSON
+  # that is not a manifest); a valid but OLD latest.json on R2 stops it there
+  # ("up to date"). So once R2 has a latest.json, every release must replace it.
+  r2:
+    needs: build
+    if: >-
+      !cancelled() && (
+        (needs.build.result == 'success' && needs.build.outputs.release == 'true') ||
+        (github.event_name == 'workflow_dispatch' && inputs.r2_only)
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AWS_DEFAULT_REGION: auto
+      AWS_REGION: auto
+      # Newer AWS CLIs send checksums R2 does not accept.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_PAGER: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out version
+        id: ver
+        env:
+          BUILT_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          app=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][^"]*)".*/\1/')
+          if [ -n "$BUILT_VERSION" ] && [ "$BUILT_VERSION" != "$app" ]; then
+            echo "::error::The build made $BUILT_VERSION but tauri.conf.json says $app"; exit 1
+          fi
+          echo "version=$app" >> "$GITHUB_OUTPUT"
+          echo "R2 publish for v$app"
+
+      # Checks the R2 secrets and cleans them up: stray spaces or line breaks
+      # are removed, and R2_ACCOUNT_ID may also be given as the S3 endpoint
+      # (https://<id>.r2.cloudflarestorage.com). Problems are explained without
+      # printing the values.
       - name: R2 - check setup
         id: r2
-        if: steps.ver.outputs.release == 'true'
-        shell: bash
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          SIGNED: ${{ steps.build.outputs.signed }}
+          SIGNED: ${{ needs.build.outputs.signed }}
+          R2_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.r2_only }}
         run: |
           echo "enabled=false" >> "$GITHUB_OUTPUT"
           # The apps must be asking this bucket, or publishing to it is pointless.
@@ -261,65 +315,134 @@ jobs:
             echo "::error::src-tauri/tauri.conf.json has no updater endpoint $R2_PUBLIC_URL/latest.json: update R2_PUBLIC_URL in the workflow or the config"
             exit 1
           fi
-          missing=""
-          for v in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET; do
-            [ -n "${!v}" ] || missing="$missing $v"
-          done
-          if [ "$SIGNED" != "true" ]; then
+          if [ "$SIGNED" = "false" ]; then
             echo "::warning::Unsigned build (no TAURI_SIGNING_PRIVATE_KEY): no latest.json, so nothing is published to R2"
             exit 0
           fi
+          clean() { printf '%s' "$1" | tr -d ' \t\r\n'; }
+          # What is wrong with a value, without showing it.
+          describe() {
+            local v="$1" d
+            d="length ${#v}, ${#2} after removing spaces/line breaks"
+            if [[ "$v" == *$'\n'* || "$v" == *$'\r'* ]]; then d="$d, has a line break"; fi
+            if [[ "$v" == *' '* || "$v" == *$'\t'* ]]; then d="$d, has spaces/tabs"; fi
+            if [[ "$v" == *http* ]]; then d="$d, contains \"http\""; fi
+            if [[ "$v" == *.* ]]; then d="$d, has dots"; fi
+            if [[ "$v" == */* ]]; then d="$d, has slashes"; fi
+            if [[ "$v" =~ [A-Z] ]]; then d="$d, has uppercase letters"; fi
+            if [[ "$v" == *_* ]]; then d="$d, has underscores"; fi
+            echo "$d"
+          }
+          key=$(clean "$R2_ACCESS_KEY_ID"); secret=$(clean "$R2_SECRET_ACCESS_KEY")
+          acct_in=$(clean "$R2_ACCOUNT_ID"); bucket=$(clean "$R2_BUCKET")
+          missing=""
+          [ -n "$key" ] || missing="$missing R2_ACCESS_KEY_ID"
+          [ -n "$secret" ] || missing="$missing R2_SECRET_ACCESS_KEY"
+          [ -n "$acct_in" ] || missing="$missing R2_ACCOUNT_ID"
+          [ -n "$bucket" ] || missing="$missing R2_BUCKET"
           if [ -n "$missing" ]; then
             # Is R2 already live? Then skipping it would leave installed apps
             # on the version in that latest.json, silently.
             code=$(curl -s -o r2-probe.json -w '%{http_code}' -H 'Cache-Control: no-cache' "$R2_PUBLIC_URL/latest.json" || true)
-            if [ "$code" = "200" ]; then
-              live=$(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version) } catch { console.log("?") }' r2-probe.json)
-              echo "::error::R2 secrets missing:$missing. But $R2_PUBLIC_URL/latest.json is live (version $live): installed apps check R2 first and would stay on $live. Add the secrets and run the release again. (The GitHub release was published.)"
+            if [ "$code" = "200" ] || [ "$R2_ONLY" = "true" ]; then
+              live=$(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version) } catch { console.log("none") }' r2-probe.json 2>/dev/null || echo none)
+              echo "::error::R2 secrets missing or empty:$missing. R2 latest.json: $live (HTTP $code). Installed apps check R2 first: add the secrets (Settings > Secrets and variables > Actions) and run again with \"Only publish to R2\" ticked."
               exit 1
             fi
             echo "::warning::R2 secrets missing:$missing. Skipping the R2 upload (R2 has no latest.json yet, HTTP $code, so apps fall back to GitHub Releases). Updates will stop working when the repository is made private."
             exit 0
           fi
+
+          bad=0
+          # Account ID: 32 hex characters. Also accepted: the S3 endpoint
+          # https://<id>.r2.cloudflarestorage.com (or <id>.eu.r2...), with or
+          # without https:// and a trailing slash.
+          acct=$(printf '%s' "$acct_in" | tr 'A-F' 'a-f')
+          acct=${acct#https://}; acct=${acct#http://}; acct=${acct%%/*}
+          jurisdiction=""
+          if [[ "$acct" =~ ^([0-9a-f]{32})(\.(eu|fedramp))?\.r2\.cloudflarestorage\.com$ ]]; then
+            acct=${BASH_REMATCH[1]}; jurisdiction=${BASH_REMATCH[3]}
+            echo "::notice::R2_ACCOUNT_ID holds the S3 endpoint; using the account ID from it."
+          fi
+          if ! [[ "$acct" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::R2_ACCOUNT_ID is not a Cloudflare account ID (expected 32 characters 0-9 a-f, as shown in R2 > Account details; got $(describe "$R2_ACCOUNT_ID" "$acct_in")). Fix the R2_ACCOUNT_ID secret."
+            bad=1
+          fi
+          # Bucket: R2 rules, 3-63 characters, lowercase letters, digits and
+          # hyphens, starting and ending with a letter or digit.
+          if ! [[ "$bucket" =~ ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$ ]]; then
+            echo "::error::R2_BUCKET is not a valid R2 bucket name (expected 3-63 characters: lowercase letters, digits and hyphens, not starting or ending with a hyphen; got $(describe "$R2_BUCKET" "$bucket")). Fix the R2_BUCKET secret: it is only the bucket name, not a URL."
+            bad=1
+          fi
+          # R2 API tokens: Access Key ID 32 hex characters, Secret Access Key 64.
+          # Only warned about, in case Cloudflare changes the format.
+          if ! [[ "$key" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::warning::R2_ACCESS_KEY_ID does not look like an R2 Access Key ID (32 characters 0-9 a-f; got $(describe "$R2_ACCESS_KEY_ID" "$key")). If uploads fail with an access error, fix that secret."
+          fi
+          if ! [[ "$secret" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::warning::R2_SECRET_ACCESS_KEY does not look like an R2 Secret Access Key (64 characters 0-9 a-f; got $(describe "$R2_SECRET_ACCESS_KEY" "$secret")). If uploads fail with an access error, fix that secret."
+          fi
+          [ "$bad" = 0 ] || exit 1
+
+          # The cleaned values may differ from the stored secrets, so they are
+          # masked in the log too.
+          for v in "$key" "$secret" "$acct" "$bucket"; do echo "::add-mask::$v"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "R2_BUCKET=$bucket"
+            # No trailing slash.
+            echo "R2_ENDPOINT=https://$acct${jurisdiction:+.$jurisdiction}.r2.cloudflarestorage.com"
+          } >> "$GITHUB_ENV"
+          # Path-style requests (https://<endpoint>/<bucket>/<key>): the bucket
+          # never becomes part of a host name. The CLI only reads this from its
+          # config file (there is no environment variable for it). The classic
+          # transfer client is the one long known to work with R2; newer CLIs
+          # otherwise pick the CRT client.
+          aws --version
+          aws configure set default.s3.addressing_style path
+          aws configure set default.s3.preferred_transfer_client classic
+          echo "s3.addressing_style=$(aws configure get default.s3.addressing_style) s3.preferred_transfer_client=$(aws configure get default.s3.preferred_transfer_client)"
           echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      # The files exactly as published on the GitHub release.
+      - name: Get the release files from GitHub
+        id: files
+        if: steps.r2.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir -p dist
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --dir dist --clobber \
+            --pattern '*-setup.exe' --pattern '*-setup.exe.sig' --pattern '*.msi' --pattern 'latest.json'
+          ls -la dist
+          if [ ! -f dist/latest.json ]; then
+            echo "::error::The GitHub release v$VERSION has no latest.json (built without the signing key?): nothing to publish to R2"
+            exit 1
+          fi
 
       # Order matters: installers first and checked, latest.json last, so an
       # app never sees a manifest that points at files not there yet.
       - name: R2 - upload installers, then latest.json, and verify
         if: steps.r2.outputs.enabled == 'true'
-        shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          AWS_REGION: auto
-          # Newer AWS CLIs send checksums R2 does not accept.
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-          AWS_EC2_METADATA_DISABLED: "true"
-          AWS_PAGER: ""
-          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           VERSION: ${{ steps.ver.outputs.version }}
-          # Git Bash would otherwise rewrite arguments that look like paths
-          # (such as "/") before they reach aws.exe.
-          MSYS_NO_PATHCONV: "1"
         run: |
           set -euo pipefail
-          aws --version
           cd dist
           shopt -s nullglob
           setup=""; offline=""; msi=""
           for f in *-setup.exe; do
             case "$f" in
               *-offline-setup.exe) offline="$f" ;;
-              *) [ -z "$setup" ] || { echo "::error::More than one setup .exe in dist"; exit 1; }; setup="$f" ;;
+              *) [ -z "$setup" ] || { echo "::error::More than one setup .exe in the release"; exit 1; }; setup="$f" ;;
             esac
           done
           for f in *.msi; do msi="$f"; done
           for f in "$setup" "$setup.sig" "$msi" "$offline" latest.json; do
             if [ -z "$f" ] || [ ! -f "$f" ]; then
-              echo "::error::Missing file for R2 in dist/: '$f'"; ls -la; exit 1
+              echo "::error::Missing file for R2 in the release: '$f'"; ls -la; exit 1
             fi
           done
           prefix="v$VERSION"
@@ -328,8 +451,9 @@ jobs:
           # R2 manifest: the GitHub one with the download links moved to R2.
           node -e '
             const fs = require("fs");
-            const [setup, base] = process.argv.slice(1);
+            const [setup, base, version] = process.argv.slice(1);
             const m = JSON.parse(fs.readFileSync("latest.json", "utf8"));
+            if (m.version !== version) { console.error(`latest.json is for ${m.version}, not ${version}`); process.exit(1); }
             const sig = fs.readFileSync(setup + ".sig", "utf8").trim();
             const targets = ["windows-x86_64", "windows-x86_64-nsis"];
             for (const t of targets) {
@@ -340,7 +464,7 @@ jobs:
               p.url = `${base}/${setup}`;
             }
             fs.writeFileSync("latest-r2.json", JSON.stringify(m, null, 2));
-          ' "$setup" "$base"
+          ' "$setup" "$base" "$VERSION"
           cat latest-r2.json; echo
 
           s3() { aws s3 "$@" --endpoint-url "$R2_ENDPOINT" --no-progress; }
@@ -354,7 +478,7 @@ jobs:
             got=$(sha ../r2-check.bin); want=$(sha "$file")
             rm -f ../r2-check.bin
             if [ "$got" != "$want" ]; then
-              echo "::error::$url sha256 $got does not match the built $file ($want)"; return 1
+              echo "::error::$url sha256 $got does not match the release's $file ($want)"; return 1
             fi
             echo "OK $url sha256 $got"
           }
@@ -411,24 +535,12 @@ jobs:
 
       # Offline installers are big and the free tier is 10 GB: keep the newest
       # 3 version folders (never the one just published, never latest.json).
-      # A failure here does not fail the release.
+      # A failure here does not fail the run.
       - name: R2 - remove old versions
         if: steps.r2.outputs.enabled == 'true'
         continue-on-error: true
-        shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          AWS_REGION: auto
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-          AWS_EC2_METADATA_DISABLED: "true"
-          AWS_PAGER: ""
-          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           VERSION: ${{ steps.ver.outputs.version }}
-          MSYS_NO_PATHCONV: "1"
         run: |
           set -euo pipefail
           folders=$(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix v --delimiter / \

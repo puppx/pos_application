@@ -318,6 +318,21 @@ fn summarize(conn: &Connection, schema_version: i32) -> Result<BackupSummary> {
 }
 
 impl Pos {
+    /// A backup file just written is a whole, readable POS database
+    /// (`PRAGMA quick_check`), before it counts as a backup or is copied on.
+    pub fn verify_backup_file(path: impl AsRef<Path>) -> Result<()> {
+        // Read-write (nothing is written): a read-only connection to a WAL
+        // file would leave its -wal and -shm files behind.
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let ok: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        conn.close().map_err(|(_, e)| PosError::Db(e))?;
+        if ok != "ok" || version < 1 {
+            return damaged();
+        }
+        Ok(())
+    }
+
     /// Check a full backup without changing anything (the work file is
     /// deleted again). Errors are plain messages for the user.
     pub fn check_backup(src: impl AsRef<Path>, work: impl AsRef<Path>) -> Result<BackupSummary> {
@@ -551,6 +566,74 @@ mod tests {
         // The backup file stays at its old version (only the work copy was migrated).
         let old: i32 = Connection::open(&src).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(old, 12);
+    }
+
+    #[test]
+    fn a_0_13_backup_restores_with_the_activity_columns_filled_in() {
+        let dir = tmp();
+        let src = dir.path().join("v31.db");
+        // A database from v0.13.9 (schema v31): no tickets, no audit_log.order_id.
+        let conn = Connection::open(&src).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(31) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as i32 + 1).unwrap();
+        }
+        let salt = [7u8; 16];
+        conn.execute("INSERT INTO settings (key, value) VALUES ('_pin_salt', ?1)", [&salt[..]]).unwrap();
+        let mut hash = vec![0u8; 32];
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, auth::test_params())
+            .hash_password_into(b"2468", &salt, &mut hash)
+            .unwrap();
+        conn.execute("INSERT INTO users (name, role, pin_hash) VALUES ('Old admin', 'admin', ?1)", [&hash]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (name, role, pin_hash) VALUES ('Mia', 'manager', x'01'), ('Sam', 'staff', x'02');
+             INSERT INTO audit_log (user_id, action, detail) VALUES
+                 (3, 'order.item_void', 'order 12 Tom yum x1 (PIN of Mia #2, manager)'),
+                 (2, 'order.price', 'order 14 Pad thai 900 -> 800 by Sam'),
+                 (1, 'order.delete', '#9 paid total 1200 oops'),
+                 (3, 'order.cancel', '15 (PIN of Mia #2, manager)'),
+                 (1, 'drawer.open', 'cash payment, order 16'),
+                 (1, 'order.cancel', '2 empty order(s) at day close'),
+                 (1, 'product.update', '7 Rice');",
+        )
+        .unwrap();
+        drop(conn);
+        let (mut pos, s) = live();
+        let prepared = pos.prepare_restore(&src, dir.path().join("work.db")).unwrap();
+        assert_eq!(prepared.summary.schema_version, 31);
+        pos.restore(&s, prepared).unwrap();
+        let v: i32 = pos.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let refs: Vec<(String, Option<i64>, Option<i64>)> = pos
+            .conn
+            .prepare("SELECT action, order_id, approver_id FROM audit_log WHERE action <> 'backup.restore' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let want = |a: &str, o: Option<i64>, p: Option<i64>| (a.to_string(), o, p);
+        assert_eq!(
+            refs,
+            [
+                want("order.item_void", Some(12), Some(2)),
+                want("order.price", Some(14), Some(2)),
+                want("order.delete", Some(9), None),
+                want("order.cancel", Some(15), Some(2)),
+                want("drawer.open", Some(16), None),
+                want("order.cancel", None, None),
+                want("product.update", None, None),
+            ]
+        );
+        // The new tables are there and work after the restore.
+        let admin = pos.login_as(None, "2468", &mut Default::default()).unwrap();
+        let t = pos
+            .create_ticket(&admin, &crate::NewTicket { category: "till".into(), urgency: None, body: "after restore".into(), order_id: None, screen: None, screen_label: None, device: None })
+            .unwrap();
+        assert_eq!(t.messages.len(), 1);
+        let terminal: Option<String> = pos.conn.query_row("SELECT terminal FROM audit_log WHERE action = 'ticket.create'", [], |r| r.get(0)).unwrap();
+        assert_eq!(terminal, None);
     }
 
     #[test]

@@ -23,6 +23,7 @@
       <span id="update" hidden></span>
       <span id="clock" class="clock"></span>
       <div class="bar-tools">
+        <button id="tickets" class="ghost icon-btn" title="Tickets" aria-label="Tickets" hidden></button>
         <button id="help" class="ghost icon-btn" title="How does this screen work?" aria-label="Help for this screen"></button>
         <button id="theme" class="ghost icon-btn theme-btn"></button>
         <button id="keyboard" class="ghost icon-btn" title="On-screen keyboard"></button>
@@ -31,6 +32,8 @@
       <div id="who" class="who"></div>
       <button id="logout" class="logout-btn" title="Log out"><span class="logout-label">Log out</span></button>
     </header>
+    <!-- Urgent ticket alert (managers and admins): under the bar, never over the page. -->
+    <div id="ubar"></div>
     <main id="app"></main>
   </div>
   <div id="modal" hidden></div>

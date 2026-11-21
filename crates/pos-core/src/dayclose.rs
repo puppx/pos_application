@@ -143,7 +143,7 @@ impl DayClose {
 }
 
 impl Pos {
-    fn business_date(&self) -> Result<NaiveDate> {
+    pub(crate) fn business_date(&self) -> Result<NaiveDate> {
         let raw: Option<String> = self
             .conn
             .prepare_cached("SELECT value FROM settings WHERE key = ?1")?

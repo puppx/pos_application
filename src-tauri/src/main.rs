@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_updater::UpdaterExt;
 
-use commands::{auto_backup, dispatch, require_updates, unique_backup_path, with_device_settings, App, LOCAL};
+use commands::{auto_backup, dispatch, require_updates, unique_backup_path, with_device_settings, App, Job, LOCAL};
 
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The daily backup starts this long after the window opens, so the first
@@ -23,6 +23,24 @@ const AUTO_BACKUP_DELAY: Duration = Duration::from_secs(5);
 /// On closing or restarting, tickets still going out to a printer get this
 /// long to finish (a picture cut off half way prints the next job as junk).
 const PRINTS_FINISH: Duration = Duration::from_secs(15);
+/// The backup when the app closes gets this long (a hung disk must not keep
+/// the app from closing; a copy cut off is never taken for a backup).
+const EXIT_BACKUP_WAIT: Duration = Duration::from_secs(20);
+/// The automatic log cleanup starts this long after the window opens.
+const LOG_CLEANUP_DELAY: Duration = Duration::from_secs(60);
+/// The worker checks whether a scheduled backup is due this often.
+const WORKER_TICK: Duration = Duration::from_secs(60);
+
+/// "pos.running" in the data folder while the app runs: still there at the
+/// next start means it did not close properly (crash, power cut, killed).
+static RUN_MARKER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// The app is closing properly (or an update replaces it): no emergency backup next time.
+fn remove_run_marker() {
+    if let Some(m) = RUN_MARKER.get() {
+        let _ = std::fs::remove_file(m);
+    }
+}
 
 type Cmd<'a> = State<'a, App>;
 
@@ -121,6 +139,36 @@ fn open_backup_folder(app: Cmd<'_>) -> Result<()> {
         .map_err(|e| PosError::Validation(format!("Cannot open the folder here ({e}). Open it yourself: {}", dir.display())))?;
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// "Also copy backups to…": the admin picks a folder (USB stick, D:, a
+/// OneDrive or Google Drive folder) with the native picker, on the main till
+/// only. It must be writable; then it is saved and the copy switched on.
+/// Returns the new status, or None if the picker was cancelled.
+#[tauri::command(async)]
+fn pick_backup_copy_folder(app: Cmd<'_>, handle: AppHandle) -> Result<Option<Value>> {
+    use tauri_plugin_dialog::DialogExt;
+    with_device_settings(&app, LOCAL, |_, s| s.require(Permission::Backup))?;
+    let Some(picked) = handle.dialog().file().set_title("Also copy backups to").blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let dir = picked.into_path().map_err(|e| PosError::Validation(format!("cannot use that folder: {e}")))?;
+    if dir.starts_with(&app.backup_dir) {
+        return Err(PosError::Validation("Pick a folder outside the POS backup folder (a USB stick, D: or a cloud folder).".into()));
+    }
+    let probe = dir.join(".pos-write-test.tmp");
+    std::fs::write(&probe, b"ok").map_err(|e| PosError::Validation(format!("POS cannot save files in that folder ({e}). Pick another.")))?;
+    let _ = std::fs::remove_file(&probe);
+    with_device_settings(&app, LOCAL, |pos, s| {
+        pos.set_backup_copy_dir(s, Some(&dir.display().to_string()))?;
+        pos.set_setting(s, BACKUP_COPY_ON_KEY, "1")
+    })?;
+    {
+        let mut st = app.backup_state();
+        st.copy_error = None;
+        st.copy_error_at = None;
+    }
+    dispatch(&app, LOCAL, "backup_status", Value::Null).map(Some)
 }
 
 // ---- full screen (desktop only) ----
@@ -252,6 +300,8 @@ async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
     // (no exit handler runs), so tickets still printing finish first, and the
     // single-instance lock is let go: the installer reopens the app when done.
     pos_core::wait_for_prints(PRINTS_FINISH);
+    // Replaced on purpose: not a crash, so no emergency backup next time.
+    remove_run_marker();
     #[cfg(windows)]
     tauri_plugin_single_instance::destroy(&handle);
     update.install(bytes).map_err(update_error)?;
@@ -272,6 +322,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         // Off until an admin turns it on: the plugin itself changes nothing.
         .plugin(tauri_plugin_autostart::Builder::new().app_name(AUTOSTART_NAME).build())
         .setup(|app| {
@@ -282,6 +333,13 @@ fn main() {
             pos_core::set_print_error_log(Some(data_dir.join("print-errors.log")));
             let db = data_dir.join("pos.db");
             let mut pos = Pos::open(&db)?;
+            // Left over from the last run: it did not close properly.
+            let marker = data_dir.join("pos.running");
+            let unclean = marker.exists();
+            if let Err(e) = std::fs::write(&marker, std::process::id().to_string()) {
+                eprintln!("run marker: {e}");
+            }
+            let _ = RUN_MARKER.set(marker);
             // Orders left open with nothing on them (a table tapped, a till
             // reloaded) clutter the Orders board: cancel the old ones.
             if let Err(e) = pos.sweep_empty_orders() {
@@ -290,6 +348,14 @@ fn main() {
             let server = pos.server_settings()?;
             let fullscreen = pos.setting(START_FULLSCREEN)?.as_deref() == Some("1");
             app.manage(App::new(pos, backup_dir));
+            {
+                let state = app.state::<App>();
+                state.set_db_path(db.clone());
+                commands::mark_unchanged(&state);
+                // After a crash: check the data and take an emergency backup
+                // before anyone sells (or, if damaged, none at all).
+                commands::startup_check(&state, unclean);
+            }
             if fullscreen {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.set_fullscreen(true);
@@ -314,6 +380,26 @@ fn main() {
                 std::thread::sleep(AUTO_BACKUP_DELAY);
                 auto_backup(&handle.state::<App>(), &db, AUTO_BACKUP_EVERY);
             });
+            // The worker: day close backups and log cleanups, and every
+            // minute a look whether a scheduled backup is due.
+            let (jobs, queue) = std::sync::mpsc::channel::<Job>();
+            app.state::<App>().set_jobs(jobs);
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let app = handle.state::<App>();
+                loop {
+                    match queue.recv_timeout(WORKER_TICK) {
+                        Ok(job) => commands::run_job(&app, job),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => commands::scheduled_tick(&app),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            });
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(LOG_CLEANUP_DELAY);
+                handle.state::<App>().request(Job::LogCleanup);
+            });
             if server.auto_start {
                 let handle = app.handle().clone();
                 if let Err(e) = start(&handle, &handle.state::<ServerState>(), server.port) {
@@ -330,6 +416,7 @@ fn main() {
             get_autostart,
             set_autostart,
             open_backup_folder,
+            pick_backup_copy_folder,
             quit_app,
             check_update,
             install_update,
@@ -348,9 +435,17 @@ fn main() {
                     s.stop();
                 }
             }
-            if let Some(state) = handle.try_state::<App>() {
-                let _ = state.lock().pos.optimize();
+            if handle.try_state::<App>().is_some() {
+                // A backup if something changed (switch on), waited for a bounded time.
+                let (done, wait) = std::sync::mpsc::channel();
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let _ = done.send(commands::exit_backup(&h.state::<App>()));
+                });
+                let _ = wait.recv_timeout(EXIT_BACKUP_WAIT);
+                let _ = handle.state::<App>().lock().pos.optimize();
             }
+            remove_run_marker();
         }
     });
 }

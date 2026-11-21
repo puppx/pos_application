@@ -995,6 +995,10 @@ pub struct TicketItem {
     pub name_alt: Option<String>,
     pub options: Vec<String>,
     pub note: Option<String>,
+    /// The note on the set line itself ("no peanuts in anything"), printed
+    /// under the set's name. By course, every set's note, one per line
+    /// ("DINNER SET: no peanuts" when there are several sets).
+    pub set_note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1532,6 +1536,14 @@ impl KitchenTicket {
                     for one in name.lines() {
                         push(Line::new(small, true, true, titled_rule(&format!("SET: {one}"), '=', width)));
                     }
+                    // The set line's own note, for every dish of the set.
+                    if let Some(n) = &it.set_note {
+                        for one in n.lines() {
+                            for t in wrap(one, w, note, note_cont) {
+                                push(Line::new(size, true, false, t));
+                            }
+                        }
+                    }
                     push(gap());
                 }
                 set = it.set.as_deref();
@@ -1894,6 +1906,7 @@ impl Pos {
                 name_alt: name_alt.map(str::to_string),
                 options: i.options.iter().map(|o| names.inline(&o.name, o.name_alt.as_deref())).collect(),
                 note: i.note.clone(),
+                set_note: None,
             };
             // A set dish: what it comes with, under the dish like an option.
             if let Some(w) = &i.with_name {
@@ -1904,18 +1917,27 @@ impl Pos {
         let mut out: Vec<TicketItem> = self.by_category(&dishes, names)?.into_iter().map(|(c, i)| item(i, c, None)).collect();
         let mut parents: Vec<i64> = in_sets.iter().filter_map(|i| i.parent_id).collect();
         parents.dedup();
-        let mut stmt = self.conn.prepare_cached("SELECT name, name_alt, qty FROM order_items WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare_cached("SELECT name, name_alt, qty, note FROM order_items WHERE id = ?1")?;
         // By course: (set's name, how many) for the heading, and each dish
         // with its course and its section's place among that course's sections.
         let mut sets: Vec<(String, i64)> = Vec::new();
         let mut courses: Vec<(Course, usize, Option<String>, TicketItem)> = Vec::new();
         // Section headings under MAINS, in the order first met (one block each).
         let mut headings: Vec<String> = Vec::new();
+        // By course: each set's own note (the set line's), for under the heading.
+        let mut set_notes: Vec<(String, String)> = Vec::new();
         for parent in parents {
-            let (name, alt, qty): (String, Option<String>, i64) = stmt.query_row([parent], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let (name, alt, qty, set_note): (String, Option<String>, i64, Option<String>) =
+                stmt.query_row([parent], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            let set_note = set_note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
             let label = names.inline(&name.to_uppercase(), alt.as_deref());
             let children = in_sets.iter().filter(|i| i.parent_id == Some(parent));
             if by_course {
+                if let Some(n) = &set_note {
+                    if !set_notes.iter().any(|(l, x)| *l == label && x == n) {
+                        set_notes.push((label.clone(), n.clone()));
+                    }
+                }
                 match sets.iter_mut().find(|s| s.0 == label) {
                     Some(s) => s.1 += qty,
                     None => sets.push((label, qty)),
@@ -1944,7 +1966,9 @@ impl Pos {
             let set = if qty > 1 { format!("{qty} x {label}") } else { label };
             for i in children {
                 let section = i.section_name.as_deref().map(|n| names.inline(&n.to_uppercase(), i.section_alt.as_deref()));
-                out.push(item(i, section, Some(set.clone())));
+                let mut t = item(i, section, Some(set.clone()));
+                t.set_note = set_note.clone();
+                out.push(t);
             }
         }
         if courses.is_empty() {
@@ -1965,8 +1989,13 @@ impl Pos {
                 None => merged.push((course, own, t)),
             }
         }
+        // One set: its note as it is; several: which set each note is for.
+        let several = sets.len() > 1;
+        let set_note = (!set_notes.is_empty())
+            .then(|| set_notes.iter().map(|(l, n)| if several { format!("{l}: {n}") } else { n.clone() }).collect::<Vec<_>>().join("\n"));
         for (course, own, mut t) in merged {
             t.set = Some(heading.clone());
+            t.set_note = set_note.clone();
             t.category = Some(own.unwrap_or_else(|| course.label(names)));
             out.push(t);
         }
@@ -2118,7 +2147,13 @@ impl Pos {
         }
         let order = self.update_item_approved(s, approver, item_id, upd)?;
         let job = if upd.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) != cur.note.as_deref() {
-            let now: Vec<OrderItem> = order.items.iter().filter(|i| i.id == item_id).cloned().collect();
+            // A set's note: its dishes sent so far, under the set's name and new note.
+            let now: Vec<OrderItem> = order
+                .items
+                .iter()
+                .filter(|i| if cur.is_set { i.parent_id == Some(item_id) && i.sent_at.is_some() } else { i.id == item_id })
+                .cloned()
+                .collect();
             self.kitchen_change_job(s, order_id, "CHANGED", &now)?
         } else {
             None
@@ -2306,7 +2341,7 @@ impl Pos {
             .iter()
             .map(|i| {
                 let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-                TicketItem { team: None, set: None, category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None }
+                TicketItem { team: None, set: None, category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None, set_note: None }
             })
             .collect()
     }
@@ -2485,6 +2520,7 @@ impl Pos {
                         name_alt: dish_alt.map(str::to_string),
                         options: vec![],
                         note: None,
+                        set_note: None,
                     }],
                     footer: None,
                     brief: false,
@@ -2523,6 +2559,7 @@ impl Pos {
                     name_alt: soup_alt,
                     options: vec![],
                     note: None,
+                    set_note: None,
                 },
                 TicketItem {
                     team: None, set: None,
@@ -2532,6 +2569,7 @@ impl Pos {
                     name_alt: burger_alt,
                     options: vec![names.inline("Large", Some("ใหญ่")), names.inline("Extra cheese", Some("เพิ่มชีส"))],
                     note: Some("no onions".into()),
+                    set_note: None,
                 },
             ],
             footer: None,
@@ -2699,8 +2737,8 @@ mod tests {
             time: "19:05".into(),
             staff: "Sam".into(),
             items: vec![
-                TicketItem { team: None, set: None, category: None, qty: 2, name: "Burger".into(), name_alt: None, options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()) },
-                TicketItem { team: None, set: None, category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None },
+                TicketItem { team: None, set: None, category: None, qty: 2, name: "Burger".into(), name_alt: None, options: vec!["Large".into(), "Extra cheese".into()], note: Some("no onions".into()), set_note: None },
+                TicketItem { team: None, set: None, category: None, qty: 1, name: "Crème brûlée".into(), name_alt: None, options: vec![], note: None, set_note: None },
             ],
             footer: None,
             brief: false,
@@ -2734,7 +2772,7 @@ mod tests {
         let last = lines.last().unwrap();
         assert!(last.text == "DINE-IN T3" && last.size == Size::Big && last.center);
         let long = KitchenTicket {
-            items: vec![TicketItem { team: None, set: None, category: None, qty: 1, name: "Chicken satay with peanut sauce".into(), name_alt: None, options: vec![], note: None }],
+            items: vec![TicketItem { team: None, set: None, category: None, qty: 1, name: "Chicken satay with peanut sauce".into(), name_alt: None, options: vec![], note: None, set_note: None }],
             ..t
         };
         assert!(long.lines(42).iter().filter(|l| l.size == Size::Big).all(|l| l.text.chars().count() <= 21));
@@ -2794,7 +2832,7 @@ mod tests {
             .map(|(i, th)| {
                 let name = if th.is_ascii() || th.contains(' ') { th.to_string() } else { format!("Dish {i}") };
                 let alt = (!th.contains(' ')).then(|| th.to_string());
-                TicketItem { team: None, set: None, category: None, qty: 1, name, name_alt: alt, options: vec![th.to_string()], note: Some(th.to_string()) }
+                TicketItem { team: None, set: None, category: None, qty: 1, name, name_alt: alt, options: vec![th.to_string()], note: Some(th.to_string()), set_note: None }
             })
             .collect();
         for width in [32, 42] {

@@ -2211,3 +2211,325 @@ body.kb-open #modal.sheet-host .sheet { max-height: 100%; }
 .moves .move { display: flex; justify-content: space-between; gap: 10px; }
 .moves .move span { font-weight: 500; color: var(--muted); }
 .moves .move strong { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+/* ==========================================================================
+   Tickets ("Contact admin"): additions to ui/style.css.
+   Everything else on the ticket screens reuses existing classes:
+   .sheet, .ssec, .sgroup, .srow, .sseg, .tchip, .pill, .md, .orow, .sempty,
+   .dtile, .help-steps, #toast, .more-btn / .pop-menu.
+   Only tokens from :root are used, so dark mode comes for free.
+   ========================================================================== */
+
+/* ---------- 1. Count badge on a top-bar button (#help for staff, #tickets for answerers) ---------- */
+.bar-tools .icon-btn { position: relative; }
+.tb-badge { position: absolute; top: 3px; right: 1px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px;
+  background: var(--danger-fill); color: #fff; font-size: 12px; font-weight: 800; line-height: 20px; text-align: center;
+  box-shadow: 0 0 0 2px var(--surface); font-variant-numeric: tabular-nums; pointer-events: none; }
+.tb-badge.urgent { animation: pillpulse 1.2s ease-in-out 3; }
+/* On #help the label "Help" stays; the badge sits on the icon. */
+#help .tb-badge { right: auto; left: 22px; }
+
+/* ---------- 2. Count on a Manage side-list item / phone tile ---------- */
+.mnav-n { margin-left: auto; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px; background: var(--danger-fill); color: #fff;
+  font-size: 12.5px; font-weight: 800; line-height: 22px; text-align: center; font-variant-numeric: tabular-nums; }
+.mnav-n.soft { background: var(--fill); color: var(--ink-2); }
+.dtile .mnav-n { margin-left: auto; }
+/* Rail (icons only): the count becomes a dot on the icon. */
+@media (min-width: 1000px) and (max-width: 1365px) {
+  .manage.rail:not(.peek) .mnav-item { position: relative; }
+  .manage.rail:not(.peek) .mnav-n { position: absolute; top: 4px; right: 10px; min-width: 10px; height: 10px; padding: 0; font-size: 0; }
+}
+
+/* ---------- 3. New ticket sheet ---------- */
+.tcats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.tcats .tchip { justify-content: flex-start; gap: 8px; min-height: 48px; padding: 0 12px; font-size: 15px; background: var(--surface); }
+.tcats .tchip .icon { color: var(--muted); flex: none; }
+.tcats .tchip.on .icon { color: var(--brand); }
+.tcats .tchip.on::before { display: none; } /* the icon is enough; no ✓ */
+.tmsg-in { width: 100%; min-height: 76px; resize: none; font-size: 16px; line-height: 1.35; padding: 10px 12px; }
+.qtext { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.qtext button { min-height: 44px; padding: 0 14px; border-radius: 999px; box-shadow: none; font-size: 14.5px; font-weight: 600; background: var(--surface-2); color: var(--ink-2); }
+.qtext button::before { content: "+"; color: var(--brand-ink); font-weight: 800; }
+.tsend-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tsend-row .sseg { flex: 1 1 auto; display: flex; }
+.tsend-row .sseg button { flex: 1 1 0; }
+.sseg button.on.urgent { background: var(--danger-fill); color: #fff; }
+/* "Sent with: Sam · Bar tablet · Order #742 …": one line, tap for the list. */
+.tattach { display: flex; align-items: center; gap: 8px; min-height: 44px; width: 100%; padding: 0 4px; border: 0; background: transparent; box-shadow: none;
+  color: var(--muted); font-size: 13.5px; font-weight: 500; justify-content: flex-start; text-align: left; }
+.tattach .icon { flex: none; }
+.tattach span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tattach b { color: var(--ink-2); font-weight: 600; }
+.tattach:hover { background: transparent; color: var(--ink-2); }
+
+/* Sent confirmation inside the sheet */
+.tsent { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 22px 8px 8px; }
+.tsent .eic { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; background: var(--go-soft); color: var(--go-ink); }
+.tsent strong { font-size: 20px; }
+.tsent p { margin: 0; color: var(--muted); font-size: 15px; max-width: 360px; }
+.tsent .warn-box { text-align: left; width: 100%; max-width: 420px; margin-top: 6px; font-size: 15px; }
+.tsent .warn-box b { display: block; font-size: 17px; margin-top: 2px; }
+
+/* ---------- 4. Ticket rows (list: answerers; "My tickets": staff) — built on .orow ---------- */
+.trow { grid-template-columns: 24px minmax(0, 1fr) auto; padding-left: 8px; padding-right: 12px; min-height: 68px; }
+.trow .tcat-ic { color: var(--muted); display: grid; place-items: center; align-self: start; padding-top: 6px; }
+.trow .o-l2 { color: var(--muted); font-size: 14px; }
+.trow .tprev { font-size: 14px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.trow .tright { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.trow .tage { font-size: 13.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.trow .tage.late { color: var(--danger-ink); font-weight: 700; }
+.trow.unread .o-l1 strong, .trow.unread .tprev { color: var(--ink); font-weight: 700; }
+.udot { width: 10px; height: 10px; border-radius: 50%; background: var(--brand); flex: none; }
+.trow.is-urgent { box-shadow: inset 4px 0 0 var(--danger-fill); }
+.trow.is-urgent.on { box-shadow: inset 4px 0 0 var(--danger-fill), inset 0 0 0 0 transparent; }
+.pill.urgent { background: var(--danger-fill); color: #fff; }
+.pill.urgent::before { background: #fff; }
+.pill.prog { background: var(--brand-soft); color: var(--brand-ink); }
+.pill.wait { background: var(--warn-soft); color: var(--amber-ink); }
+
+/* ---------- 5. Ticket detail ---------- */
+.tdetail { display: flex; flex-direction: column; gap: 14px; min-height: 100%; }
+.thead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.thead h3 { font-size: 20px; margin: 0; flex: 1 1 auto; min-width: 0; }
+.thead .sseg button { padding: 0 12px; }
+.thead .sseg button.on[data-v="done"] { background: var(--go-fill); color: #fff; }
+.tctx .srow { min-height: 48px; padding-block: 4px; }
+.tctx .srow-label { font-size: 15px; font-weight: 600; }
+.tctx .srow-value { color: var(--ink-2); max-width: 340px; }
+.tctx .srow .srow-ctl button { min-height: 40px; padding: 0 12px; font-size: 14px; }
+.tctx .srow.bad .srow-value { color: var(--danger-ink); font-weight: 600; }
+.tctx-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tctx-grid .srow::before { display: none; }
+.tctx-grid .srow { border-top: 1px solid var(--line); }
+.tctx-grid .srow:nth-child(-n+2) { border-top: 0; }
+
+/* Conversation */
+.thread { display: flex; flex-direction: column; gap: 10px; }
+.tmsg { max-width: 82%; align-self: flex-start; background: var(--surface); border: 1px solid var(--line); border-radius: 4px 16px 16px 16px; padding: 8px 12px 9px; box-shadow: var(--shadow); }
+.tmsg .tby { display: flex; gap: 8px; align-items: baseline; font-size: 13px; font-weight: 700; color: var(--ink-2); }
+.tmsg .tby time { font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tmsg p { margin: 2px 0 0; font-size: 16px; line-height: 1.4; user-select: text; white-space: pre-wrap; }
+.tmsg.me { align-self: flex-end; background: var(--brand-soft); border-color: transparent; border-radius: 16px 4px 16px 16px; }
+.tmsg.me .tby { justify-content: flex-end; color: var(--brand-ink); }
+.tsys { align-self: center; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; text-align: center; }
+.tsys::before, .tsys::after { content: ""; width: 24px; border-top: 1px solid var(--line-2); }
+
+/* Reply box: stays at the bottom of the detail pane */
+.composer { position: sticky; bottom: 0; z-index: 3; margin-top: auto; background: var(--bg); padding: 8px 0 4px; display: flex; flex-direction: column; gap: 8px; }
+.composer .qtext { margin: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.composer .qtext button { flex: none; }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer-row textarea { flex: 1; min-height: 48px; height: 48px; resize: none; font-size: 16px; padding: 11px 12px; }
+.composer-row button { min-height: 48px; flex: none; }
+.composer-row .primary .icon { margin-left: -2px; }
+
+/* ---------- 6. Urgent banner (answerers, every screen but the ticket itself) ---------- */
+.urgent-bar { flex: none; display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 4px 6px 4px 16px;
+  background: var(--danger-soft); color: var(--ink); border-bottom: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); }
+.urgent-bar > .icon { color: var(--danger-ink); flex: none; }
+.urgent-bar .ub-text { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: baseline; white-space: nowrap; overflow: hidden; }
+.urgent-bar .ub-text strong { color: var(--danger-ink); }
+.urgent-bar .ub-text span { overflow: hidden; text-overflow: ellipsis; }
+.urgent-bar .ub-text small { color: var(--muted); font-size: 13.5px; }
+.urgent-bar button { min-height: 44px; flex: none; }
+.urgent-bar .open { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
+.urgent-bar .x { min-width: 44px; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--muted); }
+@media (max-width: 600px) { .urgent-bar .ub-text small { display: none; } .urgent-bar .open { padding: 0 12px; } }
+
+/* ---------- 7. Toast with one action ("Open") ---------- */
+#toast.has-act { display: flex; align-items: center; gap: 12px; padding: 6px 6px 6px 18px; }
+#toast .toast-act { min-height: 44px; padding: 0 16px; border-radius: 9px; background: color-mix(in srgb, var(--on-solid) 16%, transparent);
+  border: 0; box-shadow: none; color: var(--on-solid); flex: none; }
+
+/* ---------- 8. Help panel: the two ticket rows above "Got it" ---------- */
+.help-tickets { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.help-tickets .srow { min-height: 56px; }
+.help-tickets .srow-label .icon { color: var(--brand); margin-right: 10px; }
+
+/* ---------- 9. Phones ---------- */
+@media (max-width: 700px) {
+  .tcats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tmsg { max-width: 90%; }
+  .tctx-grid { grid-template-columns: 1fr; }
+  .tctx-grid .srow:nth-child(2) { border-top: 1px solid var(--line); }
+  .thead .sseg { flex: 1 1 100%; display: flex; }
+  .thead .sseg button { flex: 1 1 0; }
+  .composer { padding-bottom: 8px; }
+}
+@media (max-width: 999px) {
+  /* The reply box sits above the bottom page tabs */
+  .md-main .composer { bottom: calc(76px + env(safe-area-inset-bottom)); }
+}
+
+/* ==========================================================================
+   Activity log (Manage → Activity log) and the order's Activity section.
+   ========================================================================== */
+.alog-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.alog-tools .sseg { flex: 0 1 auto; }
+.alog-tools .searchbox { flex: 1 1 200px; min-height: 44px; }
+.alog-tools .searchbox input { min-height: 42px; }
+/* Filter buttons: "Everyone ▾", "All types ▾" (open a small pop-menu / phone sheet). */
+.fbtn { min-height: 44px; padding: 0 12px 0 14px; gap: 6px; border-radius: 999px; box-shadow: none; font-size: 15px; white-space: nowrap; }
+.fbtn .chev { transform: rotate(90deg); }
+.fbtn.on { background: var(--brand-soft); border-color: var(--brand); color: var(--brand-ink); }
+.fbtn.look.on { background: var(--warn-soft); border-color: var(--warn); color: var(--amber-ink); }
+.fbtn .n { font-size: 12.5px; font-weight: 800; background: var(--warn-fill); color: var(--on-warn-fill); border-radius: 999px; padding: 0 7px; line-height: 20px; }
+.alog-span { font-size: 13px; color: var(--muted); padding: 2px 4px 0; font-variant-numeric: tabular-nums; }
+
+.alog { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+/* Day header: sticky inside the scrolling list */
+.aday { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; gap: 8px; padding: 8px 14px; background: var(--surface-2);
+  border-bottom: 1px solid var(--line); font-size: 12.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.arow { display: grid; grid-template-columns: 52px 36px minmax(0, 1fr) auto; align-items: center; column-gap: 10px; min-height: 56px; padding: 6px 12px 6px 12px; border-top: 1px solid var(--line); }
+.aday + .arow { border-top: 0; }
+.arow.link { cursor: pointer; }
+.arow.link:hover { background: var(--surface-2); }
+.arow .at { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.arow .aic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--fill); color: var(--ink-2); }
+.arow .aic.g-void { background: var(--danger-soft); color: var(--danger-ink); }
+.arow .aic.g-money { background: var(--warn-soft); color: var(--amber-ink); }
+.arow .aic.g-login { background: var(--brand-soft); color: var(--brand-ink); }
+.arow .aic.g-shift { background: var(--go-soft); color: var(--go-ink); }
+.arow .aic.g-setup { background: var(--fill); color: var(--ink-2); }
+.arow .aic.g-system { background: var(--held-soft); color: var(--held-2); }
+.arow .atext { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.arow .atext strong { font-size: 15.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arow .atext small { font-size: 13.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arow .atext small b { color: var(--ink-2); font-weight: 600; }
+.arow .aend { display: flex; align-items: center; gap: 6px; }
+.arow .aend .chev { color: var(--muted); }
+.pill.pin { background: var(--warn-soft); color: var(--amber-ink); }
+.pill.pin::before { display: none; }
+.arow.look { box-shadow: inset 3px 0 0 var(--warn); }
+/* A clearing of the log: permanent, cannot be deleted. */
+.arow.cleared { background: repeating-linear-gradient(-45deg, var(--warn-soft) 0 10px, var(--surface) 10px 20px); }
+.arow.cleared .aic { background: var(--warn-fill); color: var(--on-warn-fill); }
+.arow.cleared strong { color: var(--ink); }
+/* Selecting rows to delete (admins) */
+.arow.sel { grid-template-columns: 36px 52px 36px minmax(0, 1fr) auto; }
+.arow.sel input[type=checkbox] { width: 22px; height: 22px; margin: 0 auto; }
+.arow.sel.checked { background: var(--brand-soft); }
+.arow.sel.locked input { visibility: hidden; }
+.olist-more.alog-more { width: 100%; min-height: 52px; border-radius: 0; border-top: 1px solid var(--line); }
+
+/* Danger sheet: type DELETE + PIN */
+.dsum { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 15px; padding: 12px 16px; }
+.dsum dt { color: var(--muted); }
+.dsum dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+.typed { font: 700 18px/1 Consolas, "Cascadia Mono", monospace; letter-spacing: .12em; text-transform: uppercase; width: 100%; }
+
+/* History order detail: closed by + Activity */
+.rcpt-who { display: flex; flex-direction: column; gap: 2px; font-size: 14px; color: var(--ink-2); }
+.rcpt-who b { font-weight: 700; }
+.ract { border-top: 1px dashed var(--line-2); padding-top: 10px; display: flex; flex-direction: column; gap: 0; }
+.ract h4 { margin: 0 0 4px; font-size: 12.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+.ract h4 button { min-height: 36px; font-size: 13px; text-transform: none; letter-spacing: 0; padding: 0 10px; }
+.ract .arow { grid-template-columns: 46px 28px minmax(0, 1fr) auto; min-height: 44px; padding: 4px 0; border-top: 0; }
+.ract .arow .aic { width: 28px; height: 28px; border-radius: 8px; }
+.ract .arow .atext strong { font-size: 14.5px; }
+
+@media (max-width: 700px) {
+  .alog-tools .sseg { flex: 1 1 100%; display: flex; }
+  .alog-tools .sseg button { flex: 1 1 0; padding: 0 6px; }
+  .alog-tools .searchbox { flex-basis: 100%; order: 9; }
+  .arow { grid-template-columns: 36px minmax(0, 1fr) auto; padding: 8px 12px; }
+  .arow .at { grid-column: 3; grid-row: 1; justify-self: end; align-self: start; font-size: 13px; }
+  .arow .aic { grid-column: 1; grid-row: 1 / span 2; }
+  .arow .atext { grid-column: 2; grid-row: 1 / span 2; }
+  .arow .aend { grid-column: 3; grid-row: 2; justify-self: end; }
+  .arow .atext strong { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+}
+/* The detail pane with a reply box: no gap under the sticky box. */
+.md-main:has(.composer) { padding-bottom: 0; }
+.sheet-foot .tattach { flex: 1 1 0; min-width: 0; }
+@media (max-width: 700px) { .sheet-foot .tattach { flex: 1 1 100%; order: 2; } }
+/* Phones (page tabs along the bottom): no #tickets button in the top bar (the title needs the room);
+   the count sits on the Manage tab instead. */
+#nav button { position: relative; }
+.nav-n { position: absolute; top: 4px; left: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--danger-fill); color: #fff;
+  font-size: 11.5px; font-weight: 800; line-height: 18px; box-shadow: 0 0 0 2px var(--rail); }
+@media (min-width: 901px) { .nav-n { display: none; } }
+@media (max-width: 900px) { #tickets { display: none; } }
+/* Ticket header: ⋯ next to the title; the status control wraps under it on phones. */
+.thead h3 { order: 0; } .thead .sseg { order: 1; } .thead .more-btn { order: 2; }
+@media (max-width: 700px) { .thead .more-btn { order: 1; } .thead .sseg { order: 2; } }
+/* Phone, one ticket open: like the order screen's bill, the page tabs step aside for the reply box. */
+@media (max-width: 999px) {
+  body:has(.md.show-detail .composer) #nav { display: none; }
+  body:has(.md.show-detail .composer) main { padding-bottom: 0; }
+  .md-main .composer { bottom: 0; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+}
+#toast.has-act { width: max-content; }
+@media (max-width: 700px) {
+  .ract .arow { grid-template-columns: 46px 28px minmax(0, 1fr); padding: 4px 0; }
+  .ract .arow .at { grid-column: 1; grid-row: 1; justify-self: start; align-self: center; font-size: 13.5px; }
+  .ract .arow .aic { grid-column: 2; grid-row: 1; }
+  .ract .arow .atext { grid-column: 3; grid-row: 1; }
+  .ract .arow .aend { display: none; }
+  .dhead .sel-btn { display: none; } /* phones: Select… moves into ⋯ */
+}
+/* 0.14.0 wiring (UI developer) */
+body.locked #ubar { display: none; }
+.arow .bad-text { color: var(--danger-ink); font-weight: 700; }
+.arow .atext small.mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
+.pop-menu .phone-only-item { display: none; }
+@media (max-width: 700px) { .pop-menu .phone-only-item { display: flex; } }
+.pop-menu button.on { font-weight: 700; color: var(--brand-ink); }
+.pop-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+.srow.bad .srow-hint { color: var(--danger-ink); font-weight: 600; }
+.help-tickets .srow-label .icon { vertical-align: -5px; }
+@media (min-width: 1000px) and (max-width: 1365px) {
+  .manage.rail:not(.peek) .mnav-item > span.mnav-n { display: block; }
+}
+/* Ticket header: the title shrinks first so status and ⋯ stay on one line. */
+.thead { gap: 8px; }
+.thead h3 { flex: 1 1 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thead .sstate { width: 16px; flex: none; }
+.arow .at { white-space: nowrap; }
+/* Devices that show 10:25 AM: a wider time column. */
+body.h12 .arow { grid-template-columns: 72px 36px minmax(0, 1fr) auto; }
+body.h12 .arow.sel { grid-template-columns: 36px 72px 36px minmax(0, 1fr) auto; }
+body.h12 .ract .arow { grid-template-columns: 64px 28px minmax(0, 1fr) auto; }
+@media (max-width: 700px) {
+  body.h12 .arow { grid-template-columns: 36px minmax(0, 1fr) auto; }
+  body.h12 .arow.sel { grid-template-columns: 36px 36px minmax(0, 1fr) auto; }
+  body.h12 .ract .arow { grid-template-columns: 64px 28px minmax(0, 1fr); }
+}
+.sheet-foot .tattach + .grow { display: none; }
+/* A narrow ticket pane (1024 px with the list beside it): status on its own row under the title. */
+.md-tickets .md-main { container-type: inline-size; }
+@container (max-width: 560px) {
+  .thead h3 { white-space: normal; flex: 1 1 0; }
+  .thead .more-btn { order: 1; }
+  .thead .sstate { order: 1; }
+  .thead .sseg { order: 2; flex: 1 1 100%; display: flex; }
+  .thead .sseg button { flex: 1 1 0; }
+}
+/* The reply box in a sheet's foot (My tickets): its own layout, not the foot's full-width buttons. */
+.sheet-foot .composer { flex: 1 1 100%; min-width: 0; }
+.sheet-foot .composer .primary { flex: none; order: 0; min-width: 0; min-height: 48px; }
+.sheet-foot .composer-row textarea { flex: 1 1 auto; min-width: 0; }
+@media (max-width: 700px) {
+  .arow.sel, body.h12 .arow.sel { grid-template-columns: 32px 36px minmax(0, 1fr) auto; }
+  .arow.sel input[type=checkbox] { grid-column: 1; grid-row: 1 / span 2; }
+  .arow.sel .aic { grid-column: 2; }
+  .arow.sel .atext { grid-column: 3; }
+  .arow.sel .at, .arow.sel .aend { grid-column: 4; }
+}
+[data-row="log_size"] .srow-hint { white-space: normal; }
+[data-row="log_keep_days"] .sseg { display: flex; width: 100%; }
+[data-row="log_keep_days"] .sseg button { flex: 1 1 0; padding: 0 4px; min-width: 0; }
+/* Dark theme has its own .on colour: the red Urgent and green Done win over it. */
+:root[data-theme="dark"] .sseg button.on.urgent { background: var(--danger-fill); color: #fff; }
+:root[data-theme="dark"] .thead .sseg button.on[data-v="done"] { background: var(--go-fill); color: #fff; }
+/* "Sent with it" in a narrow ticket pane: one column. */
+@container (max-width: 560px) {
+  .tctx-grid { grid-template-columns: 1fr; }
+  .tctx-grid .srow:nth-child(2) { border-top: 1px solid var(--line); }
+}
+/* "You sent #14 Printer 2 min ago": New ticket | Add to #14 */
+.tdup { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; padding: 8px 8px 8px 14px; border-radius: var(--radius);
+  background: var(--warn-soft); color: var(--ink); font-size: 15px; font-weight: 600; }
+.tdup .sseg { flex: 0 1 auto; }
+@media (max-width: 700px) { .tdup .sseg { flex: 1 1 100%; display: flex; } .tdup .sseg button { flex: 1 1 0; } }
+.ract .arow.look { box-shadow: none; }

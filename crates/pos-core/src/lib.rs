@@ -3,6 +3,7 @@
 //! Everything the app can do goes through [`Pos`]. Methods that need
 //! authorisation take a [`Session`], which only `Pos::login` can produce.
 
+mod activity;
 mod auth;
 mod channels;
 mod customers;
@@ -28,6 +29,7 @@ mod settings;
 mod shifts;
 mod sets;
 mod teams;
+mod tickets;
 mod users;
 mod variants;
 
@@ -36,6 +38,10 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
+pub use activity::{
+    ActivityCount, ActivityCursor, ActivityDay, ActivityFilter, ActivityOrder, ActivityPage, ActivityRow, ActivityStaff, LogRetention, CLEANUP_BATCH, CLEANUP_EVERY_SECS,
+    LOG_KEEP_CHOICES, LOG_KEEP_DEFAULT, LOG_KEEP_KEY, clean_device_label,
+};
 pub use auth::{HashedPin, LoginThrottle, LoginUser, PinHasher};
 pub use channels::{Channel, ChannelInput};
 pub use dayclose::{BusinessDay, DayClose};
@@ -61,11 +67,13 @@ pub use reports::{GroupTotal, SalesSummary, TopProduct};
 pub use restore::{io_error, is_disk_full, BackupSummary, PreparedRestore, DISK_FULL};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
 pub use settings::{
-    discount_presets, PaymentNames, BACKUPS_KEPT_DEFAULT, BACKUPS_KEPT_KEY, BACKUPS_KEPT_RANGE, DISCOUNT_LIMIT_DEFAULT, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS, MAX_PAY_NAME,
+    discount_presets, BackupSettings, PaymentNames, BACKUPS_KEPT_DEFAULT, BACKUP_COPY_ON_KEY, BACKUP_DAYCLOSE_KEY, BACKUP_EMERGENCY_KEY, BACKUP_EXIT_KEY,
+    BACKUP_HOURLY_EVERY_KEY, BACKUP_HOURLY_KEEP_KEY, BACKUP_HOURLY_ON_KEY, TICKETS_CALL_TEXT_KEY, BACKUPS_KEPT_KEY, BACKUPS_KEPT_RANGE, DISCOUNT_LIMIT_DEFAULT, DISCOUNT_LIMIT_KEY, MAX_DISCOUNT_PRESETS, MAX_PAY_NAME,
     PAY_NAME_CARD_KEY, PAY_NAME_CASH_KEY,
 };
 pub use shifts::{CashMove, Shift};
 pub use sets::{SetChoice, SetPick, SetSection, SetSectionInput};
+pub use tickets::{LatestReply, NewTicket, Ticket, TicketBadges, TicketMessage, TicketRow, UrgentTicket, TICKET_CATEGORIES};
 pub use teams::{Team, TeamInput, TEAM_CHOICE_KEY};
 pub use roles::{Permission, Role, Session};
 pub use users::User;
@@ -109,7 +117,12 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0029_line_menu_price.sql"),
     include_str!("migrations/0030_order_activity.sql"),
     include_str!("migrations/0031_payment_ids.sql"),
+    include_str!("migrations/0032_tickets.sql"),
+    include_str!("migrations/0033_activity.sql"),
 ];
+/// The migration (1-based, as in `user_version`) after which old audit rows
+/// get their `order_id` / `approver_id` filled in from their detail text.
+const ACTIVITY_MIGRATION: usize = 33;
 /// The schema this app creates; backups up to this version can be restored.
 pub const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
@@ -120,6 +133,9 @@ pub struct Pos {
     throttle: LoginThrottle,
     /// When forgotten empty orders were last cancelled (see `sweep_empty_orders_if_due`).
     last_empty_sweep: Option<std::time::Instant>,
+    /// The terminal the current command came from ("local", "web-<id>"),
+    /// written on every audit row (see [`Pos::set_terminal`]).
+    terminal: Option<String>,
 }
 
 impl Pos {
@@ -156,7 +172,7 @@ impl Pos {
         if database_id(&conn)?.is_none() {
             new_database_id(&conn)?;
         }
-        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default(), last_empty_sweep: None })
+        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default(), last_empty_sweep: None, terminal: None })
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -258,10 +274,23 @@ impl Pos {
     }
 
     fn audit(&self, user_id: Option<i64>, action: &str, detail: &str) -> Result<()> {
-        self.conn
-            .prepare_cached("INSERT INTO audit_log (user_id, action, detail) VALUES (?1, ?2, ?3)")?
-            .execute(rusqlite::params![user_id, action, detail])?;
-        Ok(())
+        activity::insert(&self.conn, user_id, action, detail, self.terminal.as_deref())
+    }
+
+    /// The terminal the next commands come from, written on their audit rows:
+    /// `"local"` for the main till, anything else is a browser (stored as
+    /// "web-" and its first 6 characters). None for the app's own work.
+    pub fn set_terminal(&mut self, t: Option<&str>) {
+        self.set_terminal_device(t, None);
+    }
+
+    /// [`Pos::set_terminal`] with the browser's own device name ("Bar
+    /// tablet"), stored with the terminal as "web-xxxxxx|Bar tablet".
+    pub fn set_terminal_device(&mut self, t: Option<&str>, device: Option<&str>) {
+        self.terminal = t.map(|t| match device.and_then(activity::clean_device_label) {
+            Some(d) if t != "local" => format!("{}|{d}", activity::terminal_label(t)),
+            _ => activity::terminal_label(t),
+        });
     }
 }
 
@@ -275,6 +304,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(sql)?;
+        if i + 1 == ACTIVITY_MIGRATION {
+            activity::backfill(&tx)?;
+        }
         tx.pragma_update(None, "user_version", i as i32 + 1)?;
         tx.commit()?;
     }
@@ -312,4 +344,9 @@ fn new_database_id(conn: &Connection) -> Result<String> {
         [DB_ID_KEY, &id],
     )?;
     Ok(id)
+}
+
+/// The local date (YYYY-MM-DD) of unix time `secs`, on this PC's clock.
+pub fn local_date(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0).map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()).unwrap_or_default()
 }

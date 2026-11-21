@@ -20,6 +20,8 @@ tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2.7"
 # A second start (a double-click, or autostart while already open) shows the open window instead.
 tauri-plugin-single-instance = "2.5"
+# "Also copy backups to": the native folder picker (Settings > Backup & data, main till only).
+tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
 tiny_http = "0.12"

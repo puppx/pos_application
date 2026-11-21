@@ -58,6 +58,91 @@ pub struct App {
     /// an update waits for it. True once an update is installing: no
     /// automatic backup starts after that.
     backup_gate: Mutex<bool>,
+    /// The live database file, for the automatic backups (set by main.rs).
+    db_path: Mutex<Option<PathBuf>>,
+    /// What the automatic backups did, for Backup & data and the admins' alert.
+    backup_state: Mutex<BackupState>,
+    /// `Pos::change_count` when the last backup started (None = none yet).
+    backed_up_changes: Mutex<Option<i64>>,
+    /// When the last scheduled backup was made (or the app started).
+    last_scheduled: Mutex<Instant>,
+    /// Each browser's own device name, as it last sent it (`X-Device`).
+    devices: Mutex<HashMap<String, String>>,
+    /// The background worker (main.rs): day close backups and log cleanups
+    /// go there; without one (tests) they run at once.
+    jobs: Mutex<Option<std::sync::mpsc::Sender<Job>>>,
+}
+
+/// Work for the background worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Job {
+    /// The automatic log and done-ticket cleanup (if due).
+    LogCleanup,
+    Backup(BackupKind),
+}
+
+/// Kinds of automatic backup, each its own file name and keep rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupKind {
+    /// Once a day after start ("pos-<time>.db", Keep N).
+    Daily,
+    /// "Backup now" ("pos-<time>.db").
+    Manual,
+    /// Every 1, 2 or 4 hours while the app runs, when something changed ("pos-auto-<time>.db").
+    Scheduled,
+    /// After the day is closed ("pos-<time>.db").
+    DayClose,
+    /// When the app closes normally, when something changed ("pos-exit-<time>.db", newest 3).
+    Exit,
+    /// On the start after the app did not close properly ("pos-emergency-<time>.db").
+    Emergency,
+}
+
+impl BackupKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            BackupKind::Daily | BackupKind::Manual | BackupKind::DayClose => "pos-",
+            BackupKind::Scheduled => "pos-auto-",
+            BackupKind::Exit => "pos-exit-",
+            BackupKind::Emergency => "pos-emergency-",
+        }
+    }
+}
+
+/// What the automatic backups did since the app started.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BackupState {
+    /// The app did not close properly last time (crash, power cut, killed).
+    pub unclean_shutdown: bool,
+    /// The emergency backup made because of it.
+    pub emergency_backup: Option<String>,
+    /// The database failed its integrity check: no automatic backup runs
+    /// (good older ones are never pushed out); restore one.
+    pub damaged: bool,
+    pub damaged_detail: Option<String>,
+    /// Admins dismissed the "did not close properly" note.
+    pub dismissed: bool,
+    /// The newest backup made by this app run, and when (unix seconds).
+    pub last_backup: Option<String>,
+    pub last_backup_at: Option<u64>,
+    pub last_backup_kind: Option<BackupKind>,
+    /// The last automatic backup that failed, and why.
+    pub last_error: Option<String>,
+    pub last_error_at: Option<u64>,
+    /// Second folder: the last good copy, or why the last copy failed.
+    pub copy_ok_at: Option<u64>,
+    pub copy_error: Option<String>,
+    pub copy_error_at: Option<u64>,
+}
+
+/// `app_status.backup_alert` (admins only): something an admin must know.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupAlert {
+    /// "damaged", "unclean" or "copy_failed" (the most serious first).
+    kind: &'static str,
+    message: String,
+    emergency_backup: Option<String>,
 }
 
 impl App {
@@ -68,6 +153,59 @@ impl App {
             backup_dir,
             hasher,
             backup_gate: Mutex::new(false),
+            db_path: Mutex::new(None),
+            backup_state: Mutex::new(BackupState::default()),
+            backed_up_changes: Mutex::new(None),
+            last_scheduled: Mutex::new(Instant::now()),
+            jobs: Mutex::new(None),
+            devices: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The device name a browser sent with its request (server.rs), kept for
+    /// its audit rows. None or empty forgets it.
+    pub fn set_device(&self, t: &str, device: Option<&str>) {
+        let mut d = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+        match device.and_then(clean_device_label) {
+            Some(name) if d.get(t) != Some(&name) => {
+                if d.len() >= 4 * MAX_TERMINALS {
+                    d.clear();
+                }
+                d.insert(t.to_string(), name);
+            }
+            Some(_) => {}
+            None => {
+                d.remove(t);
+            }
+        }
+    }
+
+    fn device(&self, t: &str) -> Option<String> {
+        self.devices.lock().unwrap_or_else(|e| e.into_inner()).get(t).cloned()
+    }
+
+    /// The live database file (for the automatic backups).
+    pub fn set_db_path(&self, db: PathBuf) {
+        *self.db_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(db);
+    }
+
+    fn db_path(&self) -> Option<PathBuf> {
+        self.db_path.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn backup_state(&self) -> MutexGuard<'_, BackupState> {
+        self.backup_state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hand background work to the worker (main.rs), or do it now without one.
+    pub fn set_jobs(&self, tx: std::sync::mpsc::Sender<Job>) {
+        *self.jobs.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    }
+
+    pub fn request(&self, job: Job) {
+        let sent = self.jobs.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|tx| tx.send(job).is_ok());
+        if sent != Some(true) {
+            run_job(self, job);
         }
     }
 
@@ -113,7 +251,10 @@ impl App {
         match inner.pos.refresh_session(&current) {
             Ok(s) => {
                 inner.logins.insert(t.to_string(), Login { session: s.clone(), last_used: Instant::now() });
-                f(inner, &s)
+                inner.pos.set_terminal_device(Some(t), self.device(t).as_deref());
+                let out = f(inner, &s);
+                inner.pos.set_terminal(None);
+                out
             }
             Err(_) => {
                 inner.logins.remove(t);
@@ -182,6 +323,10 @@ pub struct AppStatus {
     /// Changes when a backup is restored: the UI reloads to drop what it
     /// remembers from the old data.
     db_id: String,
+    /// Ticket badges for the logged-in user (None when logged out).
+    tickets: Option<TicketBadges>,
+    /// Admins only: a backup problem to show (None = nothing to say).
+    backup_alert: Option<BackupAlert>,
 }
 
 /// Result of a print attempt. Printing problems never undo the action
@@ -292,6 +437,49 @@ pub struct UploadedBackup {
     summary: BackupSummary,
 }
 
+#[derive(Serialize)]
+pub struct BackupStatusView {
+    settings: BackupSettings,
+    state: BackupState,
+    /// The second folder is there now (None = none set).
+    copy_dir_ok: Option<bool>,
+    /// The folder can be picked here (the main till only).
+    can_pick_folder: bool,
+}
+
+#[derive(Serialize)]
+pub struct CreatedTicket {
+    ticket: Ticket,
+    /// Managers and admins logged in on any terminal right now.
+    answerers_online: usize,
+    /// "Who staff call when urgent" (Settings → Login & staff), if set.
+    call_text: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DeletedCount {
+    deleted: usize,
+}
+
+#[derive(Serialize)]
+pub struct ExportedCsv {
+    csv: String,
+    rows: usize,
+    /// Suggested file name: activity-YYYY-MM-DD.csv.
+    file_name: String,
+    /// Where the main till saved it (Downloads), when asked to save.
+    path: Option<String>,
+}
+
+/// The user's Downloads folder (the backup folder if there is none).
+fn downloads_dir(fallback: &Path) -> PathBuf {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    match home.map(|h| PathBuf::from(h).join("Downloads")) {
+        Some(d) if d.is_dir() => d,
+        _ => fallback.to_path_buf(),
+    }
+}
+
 /// A full backup file in the backup folder.
 #[derive(Serialize)]
 pub struct BackupFile {
@@ -306,6 +494,12 @@ pub struct BackupFile {
 /// reset or a restore, and files loaded from elsewhere ("pos-imported-…").
 fn is_full_backup_name(name: &str) -> bool {
     name.starts_with("pos-") && name.ends_with(".db") && !name.contains(['/', '\\']) && !name.contains("..")
+}
+
+/// Today's date on this PC, YYYY-MM-DD.
+fn chrono_today() -> String {
+    let secs = unix_now() as i64;
+    pos_core::local_date(secs)
 }
 
 fn unix_now() -> u64 {
@@ -325,33 +519,275 @@ pub fn auto_backup(app: &App, db: &Path, every: Duration) -> Option<PathBuf> {
         return None;
     }
     let dir = &app.backup_dir;
-    let (set_up, keep) = {
-        let g = app.lock();
-        (!g.pos.needs_setup().unwrap_or(true), g.pos.backups_kept().unwrap_or(BACKUPS_KEPT_DEFAULT))
-    };
+    let set_up = !app.lock().pos.needs_setup().unwrap_or(true);
     // Only daily and manual backups count: a restore or a loaded file is not one.
     let fresh = newest_regular_backup(dir).and_then(|t| t.elapsed().ok()).is_some_and(|age| age < every);
     if fresh || !set_up {
         return None;
     }
+    let made = backup_locked(app, db, BackupKind::Daily);
+    drop(gate);
+    made
+}
+
+/// An automatic backup of kind `kind` now (scheduled, day close, exit,
+/// emergency): in the background, through a connection of its own, so
+/// terminals keep working. Scheduled and exit backups are skipped when
+/// nothing changed since the last backup. Never while the database is
+/// damaged (good older backups are never pushed out). Returns the new file.
+pub fn backup_kind(app: &App, kind: BackupKind) -> Option<PathBuf> {
+    let db = app.db_path()?;
+    let gate = app.backup_gate();
+    if *gate {
+        return None;
+    }
+    let set_up = !app.lock().pos.needs_setup().unwrap_or(true);
+    if !set_up {
+        return None;
+    }
+    if matches!(kind, BackupKind::Scheduled | BackupKind::Exit) && !changed_since_backup(app) {
+        return None;
+    }
+    let made = backup_locked(app, &db, kind);
+    drop(gate);
+    made
+}
+
+/// Something was written since the last backup this app run made (or, with
+/// none yet, since the app started).
+fn changed_since_backup(app: &App) -> bool {
+    let now = app.lock().pos.change_count().unwrap_or(i64::MAX);
+    let last = *app.backed_up_changes.lock().unwrap_or_else(|e| e.into_inner());
+    last != Some(now)
+}
+
+/// Remember the start of the app as "backed up": scheduled and exit backups
+/// then only run once something changed. main.rs calls this after startup.
+pub fn mark_unchanged(app: &App) {
+    let now = app.lock().pos.change_count().ok();
+    *app.backed_up_changes.lock().unwrap_or_else(|e| e.into_inner()) = now;
+}
+
+/// Make the backup (the caller holds `backup_gate`): copy under a scratch
+/// name, check it (`quick_check`), rename it into place, prune, then copy
+/// it to the second folder if one is set.
+fn backup_locked(app: &App, db: &Path, kind: BackupKind) -> Option<PathBuf> {
+    let dir = &app.backup_dir;
+    if app.backup_state().damaged && kind != BackupKind::Manual {
+        return None;
+    }
+    let (settings, changes) = {
+        let g = app.lock();
+        (g.pos.backup_settings().ok(), g.pos.change_count().ok())
+    };
     remove_stale_uploads(dir);
     let work = dir.join(format!("backup-work-{}-{}.tmp", unix_now(), std::process::id()));
-    let made = Pos::backup_database_file(db, &work).and_then(|()| {
-        let path = backup_path(dir);
+    let made = Pos::backup_database_file(db, &work).and_then(|()| Pos::verify_backup_file(&work)).and_then(|()| {
+        let (path, _) = unique_backup_path(dir, kind.prefix());
         std::fs::rename(&work, &path).map_err(|e| io_error(&e, "saving the backup"))?;
         Ok(path)
     });
     let made = match made {
-        Ok(path) => Some(path),
+        Ok(path) => {
+            *app.backed_up_changes.lock().unwrap_or_else(|e| e.into_inner()) = changes;
+            let mut st = app.backup_state();
+            st.last_backup = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            st.last_backup_at = Some(unix_now());
+            st.last_backup_kind = Some(kind);
+            Some(path)
+        }
         Err(e) => {
-            eprintln!("auto backup failed: {e}");
+            eprintln!("{kind:?} backup failed: {e}");
             let _ = std::fs::remove_file(&work);
+            let mut st = app.backup_state();
+            st.last_error = Some(e.to_string());
+            st.last_error_at = Some(unix_now());
             None
         }
     };
-    prune_backups(dir, keep);
-    drop(gate);
+    let keep = settings.as_ref().map_or(BACKUPS_KEPT_DEFAULT, |s| s.kept);
+    let auto_keep = settings.as_ref().map_or(12, |s| s.hourly_keep);
+    prune_all(dir, keep, auto_keep);
+    if let (Some(path), Some(settings)) = (&made, &settings) {
+        second_copy(app, settings, path);
+    }
     made
+}
+
+/// Prune every kind: the daily rule ([`prune_backups`]), scheduled ones to
+/// `auto_keep`, exit ones to the newest few, emergency ones like safety copies.
+pub fn prune_all(dir: &Path, keep: usize, auto_keep: usize) {
+    prune_backups(dir, keep);
+    let all = list_backups(dir);
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let of_kind = |kind: &'static str| all.iter().filter(move |(_, p)| is_kind(&name(p), kind));
+    let old_enough = |(t, _): &&(SystemTime, PathBuf)| t.elapsed().is_ok_and(|age| age > SAFETY_COPIES_MIN_AGE);
+    let old = of_kind("pos-auto-")
+        .skip(auto_keep.max(1))
+        .chain(of_kind("pos-exit-").skip(SAFETY_COPIES_KEPT))
+        .chain(of_kind("pos-emergency-").skip(SAFETY_COPIES_KEPT).filter(old_enough));
+    for (_, p) in old {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// "Also copy backups to": copy a new, checked backup to the second folder
+/// (scratch name, then rename) and keep the same number there. A missing or
+/// read-only folder never fails the backup: the status says why, for the admins.
+fn second_copy(app: &App, settings: &BackupSettings, path: &Path) {
+    let Some(dir) = settings.copy_dir.as_deref().filter(|_| settings.copy_on) else { return };
+    let dir = Path::new(dir);
+    let result = (|| -> std::result::Result<(), String> {
+        if !dir.is_dir() {
+            return Err("folder not found".into());
+        }
+        let name = path.file_name().ok_or_else(|| "bad name".to_string())?;
+        let tmp = dir.join(format!(".copy-{}.tmp", name.to_string_lossy()));
+        let copied = std::fs::copy(path, &tmp).and_then(|_| std::fs::File::open(&tmp)?.sync_all()).and_then(|()| std::fs::rename(&tmp, dir.join(name)));
+        if let Err(e) = copied {
+            let _ = std::fs::remove_file(&tmp);
+            // ERROR_DISK_FULL (Windows), ENOSPC (elsewhere).
+            return Err(if matches!(e.raw_os_error(), Some(112 | 39 | 28)) {
+                "the folder's disk is full".into()
+            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "cannot write to the folder".into()
+            } else {
+                format!("cannot write to the folder ({e})")
+            });
+        }
+        prune_all(dir, settings.kept, settings.hourly_keep);
+        Ok(())
+    })();
+    let mut st = app.backup_state();
+    match result {
+        Ok(()) => {
+            st.copy_ok_at = Some(unix_now());
+            st.copy_error = None;
+            st.copy_error_at = None;
+        }
+        Err(e) => {
+            eprintln!("second backup copy failed: {e}");
+            st.copy_error = Some(e);
+            st.copy_error_at = Some(unix_now());
+        }
+    }
+}
+
+/// What admins are told by `app_status.backup_alert`.
+fn backup_alert(app: &App) -> Option<BackupAlert> {
+    let st = app.backup_state();
+    if st.damaged {
+        return Some(BackupAlert {
+            kind: "damaged",
+            message: "The POS data is damaged. Restore a backup now (Backup & data → Restore).".into(),
+            emergency_backup: None,
+        });
+    }
+    if st.unclean_shutdown && !st.dismissed {
+        let message = if st.emergency_backup.is_some() {
+            "POS did not close properly last time; a backup was made."
+        } else {
+            "POS did not close properly last time."
+        };
+        return Some(BackupAlert { kind: "unclean", message: message.into(), emergency_backup: st.emergency_backup.clone() });
+    }
+    st.copy_error.as_ref().map(|e| BackupAlert { kind: "copy_failed", message: format!("Second copy failed: {e}"), emergency_backup: None })
+}
+
+/// On start, after the app did not close properly (`unclean`): check the
+/// database; if sound, take an emergency backup (switch on) before selling;
+/// if damaged, make no backup at all and tell the admins to restore.
+pub fn startup_check(app: &App, unclean: bool) {
+    if !unclean {
+        return;
+    }
+    let (problem, on) = {
+        let g = app.lock();
+        (g.pos.integrity_problem(), g.pos.backup_settings().map(|s| s.emergency_on).unwrap_or(true))
+    };
+    {
+        let mut st = app.backup_state();
+        st.unclean_shutdown = true;
+        match &problem {
+            Ok(None) => {}
+            Ok(Some(p)) => {
+                st.damaged = true;
+                st.damaged_detail = Some(p.clone());
+            }
+            Err(e) => {
+                st.damaged = true;
+                st.damaged_detail = Some(e.to_string());
+            }
+        }
+    }
+    if matches!(problem, Ok(None)) && on {
+        let made = backup_kind(app, BackupKind::Emergency);
+        app.backup_state().emergency_backup = made.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    }
+}
+
+/// The scheduled backup, when due (the worker asks every minute).
+pub fn scheduled_tick(app: &App) {
+    let Ok(settings) = app.lock().pos.backup_settings() else { return };
+    if !settings.hourly_on {
+        return;
+    }
+    let every = Duration::from_secs(u64::from(settings.hourly_every) * 3600);
+    if app.last_scheduled.lock().unwrap_or_else(|e| e.into_inner()).elapsed() < every {
+        return;
+    }
+    if backup_kind(app, BackupKind::Scheduled).is_some() {
+        *app.last_scheduled.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
+}
+
+/// When the app closes normally (switch on): a backup when something
+/// changed. The exit handler runs this on a thread of its own and waits a
+/// bounded time for it.
+pub fn exit_backup(app: &App) -> Option<PathBuf> {
+    let on = app.lock().pos.backup_settings().map(|s| s.exit_on).unwrap_or(false);
+    if !on {
+        return None;
+    }
+    backup_kind(app, BackupKind::Exit)
+}
+
+/// The automatic log cleanup, in batches of [`CLEANUP_BATCH`] with the lock
+/// let go between them (other terminals keep working). At most every 20 h.
+pub fn run_log_cleanup(app: &App) -> Option<(usize, usize)> {
+    let now = unix_now() as i64;
+    let (cutoff, days) = app.lock().pos.log_cleanup_due(now).ok()??;
+    let (mut count, mut tickets) = (0, 0);
+    loop {
+        let batch = app.lock().pos.log_cleanup_batch(cutoff);
+        match batch {
+            Ok((0, 0)) => break,
+            Ok((n, t)) => {
+                count += n;
+                tickets += t;
+            }
+            Err(e) => {
+                eprintln!("log cleanup: {e}");
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if let Err(e) = app.lock().pos.log_cleanup_finish(cutoff, days, count, tickets) {
+        eprintln!("log cleanup: {e}");
+    }
+    Some((count, tickets))
+}
+
+pub fn run_job(app: &App, job: Job) {
+    match job {
+        Job::LogCleanup => {
+            run_log_cleanup(app);
+        }
+        Job::Backup(kind) => {
+            backup_kind(app, kind);
+        }
+    }
 }
 
 /// A fresh scratch file for checking a backup (see `Pos::prepare_restore`);
@@ -581,7 +1017,6 @@ commands! {
         Ok(AppStatus {
             version: env!("CARGO_PKG_VERSION"),
             needs_setup: g.pos.needs_setup()?,
-            session,
             store_name: g.pos.setting("store_name")?,
             plan_width: PLAN_WIDTH,
             plan_height: PLAN_HEIGHT,
@@ -589,6 +1024,12 @@ commands! {
             auto_pin: g.pos.auto_login_length()?,
             auto_pin_on: g.pos.pin_auto_login()?,
             db_id: g.pos.database_id()?,
+            tickets: match &session {
+                Some(s) => Some(g.pos.ticket_badges(s)?),
+                None => None,
+            },
+            backup_alert: session.as_ref().filter(|s| s.role == Role::Admin).and_then(|_| backup_alert(app)),
+            session,
         })
     }
 
@@ -614,24 +1055,32 @@ commands! {
             if t == LOCAL { &g.local_throttle } else { &g.network_throttle }.check(Instant::now())?;
         }
         let pin = app.hash_pin(&pin);
+        let device = app.device(t);
         let mut g = app.lock();
         let inner = &mut *g;
+        inner.pos.set_terminal_device(Some(t), device.as_deref());
         let s = if t == LOCAL {
             let mut throttle = std::mem::take(&mut inner.local_throttle);
             let r = inner.pos.login_hashed(user_id, &pin, &mut throttle);
             inner.local_throttle = throttle;
-            r?
+            r
         } else {
-            inner.pos.login_hashed(user_id, &pin, &mut inner.network_throttle)?
+            inner.pos.login_hashed(user_id, &pin, &mut inner.network_throttle)
         };
+        inner.pos.set_terminal(None);
+        let s = s?;
         g.sign_in(t, &s);
         Ok(s)
     }
 
     fn logout(app, t) -> () {
+        let device = app.device(t);
         let mut g = app.lock();
         if let Some(l) = g.logins.remove(t) {
-            g.pos.logout(&l.session)?;
+            g.pos.set_terminal_device(Some(t), device.as_deref());
+            let r = g.pos.logout(&l.session);
+            g.pos.set_terminal(None);
+            r?;
         }
         Ok(())
     }
@@ -1215,6 +1664,12 @@ commands! {
             Ok((DayCloseView { close, text }, job))
         })?;
         let empty = view.close.summary.is_empty();
+        // In the background on the main till: the day close backup (switch
+        // on) and the log cleanup (at most every 20 hours).
+        if app.lock().pos.backup_settings().is_ok_and(|b| b.dayclose_on) {
+            app.request(Job::Backup(BackupKind::DayClose));
+        }
+        app.request(Job::LogCleanup);
         Ok(CloseResult { view, print: print(job), empty })
     }
 
@@ -1509,13 +1964,61 @@ commands! {
     }
 
     fn backup_now(app, t) -> String {
+        if app.backup_state().damaged {
+            return Err(PosError::Validation("The POS data is damaged: restore a backup instead (good backups are kept).".into()));
+        }
         let path = backup_path(&app.backup_dir);
-        let keep = app.with_session(t, |pos, s| {
+        let settings = app.with_session(t, |pos, s| {
+            let changes = pos.change_count().ok();
             pos.backup_to(s, &path)?;
-            pos.backups_kept()
+            if let Err(e) = Pos::verify_backup_file(&path) {
+                let _ = std::fs::remove_file(&path);
+                return Err(e);
+            }
+            *app.backed_up_changes.lock().unwrap_or_else(|e| e.into_inner()) = changes;
+            pos.backup_settings()
         })?;
-        prune_backups(&app.backup_dir, keep);
+        {
+            let mut st = app.backup_state();
+            st.last_backup = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            st.last_backup_at = Some(unix_now());
+            st.last_backup_kind = Some(BackupKind::Manual);
+        }
+        prune_all(&app.backup_dir, settings.kept, settings.hourly_keep);
+        second_copy(app, &settings, &path);
         Ok(path.display().to_string())
+    }
+
+    /// Backup & data: the backup switches, the second folder and what the
+    /// automatic backups did (admins).
+    fn backup_status(app, t) -> BackupStatusView {
+        let settings = app.with_session(t, |pos, s| {
+            s.require(Permission::Backup)?;
+            pos.backup_settings()
+        })?;
+        let state = app.backup_state().clone();
+        let copy_dir_ok = settings.copy_dir.as_deref().map(|d| Path::new(d).is_dir());
+        Ok(BackupStatusView { settings, state, copy_dir_ok, can_pick_folder: t == LOCAL })
+    }
+
+    /// Hide the "did not close properly" note (admins). A damaged database
+    /// or a failed second copy keeps showing until it is put right.
+    fn dismiss_backup_alert(app, t) -> () {
+        app.with_session(t, |_, s| s.require(Permission::Backup))?;
+        app.backup_state().dismissed = true;
+        Ok(())
+    }
+
+    /// Turn the second backup folder off and forget it (admins).
+    fn clear_backup_copy_folder(app, t) -> () {
+        app.with_session(t, |pos, s| {
+            pos.set_backup_copy_dir(s, None)?;
+            pos.set_setting(s, BACKUP_COPY_ON_KEY, "0")
+        })?;
+        let mut st = app.backup_state();
+        st.copy_error = None;
+        st.copy_error_at = None;
+        Ok(())
     }
 
     /// Where the full backups are, so they can be copied to a USB stick.
@@ -1646,9 +2149,121 @@ commands! {
             let keep = inner.pos.backups_kept().unwrap_or(BACKUPS_KEPT_DEFAULT);
             Ok((RestoreResult { summary, restored: name, safety_copy }, keep))
         })?;
+        {
+            // The data is replaced by a checked backup: no longer damaged,
+            // and the next automatic backup has something new to save.
+            let mut st = app.backup_state();
+            st.damaged = false;
+            st.damaged_detail = None;
+        }
+        *app.backed_up_changes.lock().unwrap_or_else(|e| e.into_inner()) = None;
         prune_backups(&app.backup_dir, keep);
         Ok(restored)
     }
+
+    // ---- tickets ("Contact admin") ----
+
+    /// Open a ticket (anyone logged in). The server adds who, the terminal,
+    /// the order's table, the version and recent print failures.
+    fn create_ticket(app, t, category: String, urgency: Option<String>, body: String, order_id: Option<i64>, screen: Option<String>, screen_label: Option<String>, device: Option<String>) -> CreatedTicket {
+        let input = NewTicket { category, urgency, body, order_id, screen, screen_label, device };
+        app.with_session_inner(t, |inner, s| {
+            let ticket = inner.pos.create_ticket(s, &input)?;
+            let ids: Vec<i64> = inner
+                .logins
+                .iter()
+                .filter(|(k, l)| k.as_str() == LOCAL || l.last_used.elapsed() < IDLE_LOGOUT)
+                .map(|(_, l)| l.session.user_id)
+                .collect();
+            let answerers_online = inner.pos.answerers_among(&ids)?;
+            let call_text = inner.pos.setting(TICKETS_CALL_TEXT_KEY)?.filter(|c| !c.trim().is_empty());
+            Ok(CreatedTicket { ticket, answerers_online, call_text })
+        })
+    }
+
+    /// `tab`: "mine" (anyone), or "open" / "waiting" / "done" (managers and
+    /// admins; staff get "mine").
+    fn list_tickets(app, t, tab: String, limit: Option<i64>, offset: Option<i64>) -> Vec<TicketRow> {
+        app.with_session(t, |pos, s| pos.list_tickets(s, &tab, limit.unwrap_or(100), offset.unwrap_or(0)))
+    }
+
+    /// One ticket with its messages; marks it read. "not found" when the
+    /// caller may not see it.
+    fn get_ticket(app, t, id: i64) -> Ticket {
+        app.with_session(t, |pos, s| pos.get_ticket(s, id))
+    }
+
+    fn reply_ticket(app, t, id: i64, body: String, set_status: Option<String>) -> Ticket {
+        app.with_session(t, |pos, s| pos.reply_ticket(s, id, &body, set_status.as_deref()))
+    }
+
+    fn set_ticket_status(app, t, id: i64, status: String) -> Ticket {
+        app.with_session(t, |pos, s| pos.set_ticket_status(s, id, &status))
+    }
+
+    /// Admins only.
+    fn delete_ticket(app, t, id: i64) -> () {
+        app.with_session(t, |pos, s| pos.delete_ticket(s, id))
+    }
+
+    // ---- activity log ----
+
+    /// One page of the Activity log (managers and admins), newest first.
+    fn list_activity(app, t, from: Option<i64>, to: Option<i64>, user_id: Option<i64>, kind: Option<String>, look: Option<bool>, q: Option<String>, before: Option<ActivityCursor>, limit: Option<usize>) -> ActivityPage {
+        let f = ActivityFilter { from, to, user_id, kind, look, q };
+        app.with_session(t, |pos, s| pos.list_activity(s, &f, before, limit))
+    }
+
+    /// An order's rows, oldest first (History detail; managers and admins).
+    fn order_activity(app, t, order_id: i64) -> Vec<ActivityRow> {
+        app.with_session(t, |pos, s| pos.order_activity(s, order_id))
+    }
+
+    fn activity_staff(app, t) -> Vec<ActivityStaff> {
+        app.with_session(t, |pos, s| pos.activity_staff(s))
+    }
+
+    /// Delete chosen rows (admins, with their PIN).
+    fn delete_activity(app, t, ids: Vec<i64>, pin: String) -> DeletedCount {
+        app.with_session(t, |pos, s| Ok(DeletedCount { deleted: pos.delete_activity(s, &ids, &pin)? }))
+    }
+
+    /// What clearing before `before` would delete (admins).
+    fn activity_count(app, t, before: i64) -> ActivityCount {
+        app.with_session(t, |pos, s| pos.activity_count(s, before))
+    }
+
+    /// Delete every row older than `before` (admins, PIN and DELETE typed).
+    /// `csv`: a CSV copy was saved first (recorded in the log).
+    fn clear_activity(app, t, before: i64, pin: String, confirm: String, csv: Option<bool>) -> DeletedCount {
+        app.with_session(t, |pos, s| Ok(DeletedCount { deleted: pos.clear_activity(s, before, &pin, &confirm, csv.unwrap_or(false))? }))
+    }
+
+    /// The rows of a filter, or every row older than `before`, as CSV
+    /// (admins). `save`: on the main till, also write it to Downloads.
+    fn export_activity(app, t, from: Option<i64>, to: Option<i64>, user_id: Option<i64>, kind: Option<String>, look: Option<bool>, q: Option<String>, before: Option<i64>, save: Option<bool>) -> ExportedCsv {
+        let f = ActivityFilter { from, to, user_id, kind, look, q };
+        let (csv, rows) = app.with_session(t, |pos, s| pos.export_activity(s, &f, before))?;
+        let file_name = format!("activity-{}.csv", chrono_today());
+        let path = if save == Some(true) && t == LOCAL {
+            let (mut path, mut n) = (downloads_dir(&app.backup_dir).join(&file_name), 1);
+            while path.exists() {
+                n += 1;
+                path = downloads_dir(&app.backup_dir).join(format!("activity-{}-{n}.csv", chrono_today()));
+            }
+            std::fs::write(&path, csv.as_bytes()).map_err(|e| io_error(&e, "cannot save the CSV file"))?;
+            Some(path.display().to_string())
+        } else {
+            None
+        };
+        Ok(ExportedCsv { csv, rows, file_name, path })
+    }
+
+    /// "Keep for" and the log's size (admins).
+    fn log_retention(app, t) -> LogRetention {
+        app.with_session(t, |pos, s| pos.log_retention(s))
+    }
+
 }
 
 #[cfg(test)]
@@ -2673,5 +3288,199 @@ mod tests {
         assert!(newest_regular_backup(dir.path()).is_none());
         std::fs::write(dir.path().join("pos-5.db"), b"1").unwrap();
         assert!(newest_regular_backup(dir.path()).is_some());
+    }
+    #[test]
+    fn tickets_from_a_tablet_reach_the_answerers_and_only_admins_delete() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        let tablet = "0123456789abcdef0123456789abcdef";
+        let phone = "fedcba9876543210fedcba9876543210";
+        dispatch(&app, tablet, "login", json!({ "pin": "2222" })).unwrap();
+        // Nobody who answers is logged in: the sent screen says to phone them.
+        app.with_session(tablet, |_, _| Ok(())).unwrap();
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        let admin_id = app.lock().pos.login_users().unwrap().into_iter().find(|u| u.name == "Owner").unwrap().id;
+        dispatch(&app, phone, "login", json!({ "pin": "1111", "userId": admin_id })).unwrap();
+        dispatch(&app, phone, "set_setting", json!({ "key": "tickets_call_text", "value": "Quinn: 07700 900123" })).unwrap();
+        dispatch(&app, phone, "logout", json!({})).unwrap();
+        let made = dispatch(&app, tablet, "create_ticket", json!({
+            "category": "printer", "urgency": "urgent", "body": "Not printing", "screen": "tables", "screenLabel": "Tables", "device": "Bar tablet"
+        }))
+        .unwrap();
+        assert_eq!(made["answerers_online"], 0);
+        assert_eq!(made["call_text"], "Quinn: 07700 900123");
+        assert_eq!(made["ticket"]["terminal"], "web");
+        let id = made["ticket"]["id"].as_i64().unwrap();
+        // Quinn logs in on the phone: badge, banner info, and a count of one answerer.
+        dispatch(&app, phone, "login", json!({ "pin": "4646" })).unwrap();
+        let st = dispatch(&app, phone, "app_status", Value::Null).unwrap();
+        assert_eq!((st["tickets"]["unread"].clone(), st["tickets"]["urgent"][0]["id"].clone()), (json!(1), json!(id)));
+        assert!(st["backup_alert"].is_null(), "managers are never told about backups");
+        let again = dispatch(&app, tablet, "create_ticket", json!({ "category": "other", "body": "and this" })).unwrap();
+        assert_eq!(again["answerers_online"], 1);
+        // Staff on the till cannot see Sam's... Sam is on both: his own on either.
+        assert_eq!(dispatch(&app, LOCAL, "list_tickets", json!({ "tab": "open" })).unwrap().as_array().unwrap().len(), 2);
+        dispatch(&app, phone, "reply_ticket", json!({ "id": id, "body": "On my way" })).unwrap();
+        let st = dispatch(&app, tablet, "app_status", Value::Null).unwrap();
+        assert_eq!(st["tickets"]["latest"]["by"], "Quinn");
+        assert_eq!(st["tickets"]["unread"], 1);
+        dispatch(&app, LOCAL, "get_ticket", json!({ "id": id })).unwrap();
+        // Read on the till: gone on the tablet too.
+        assert_eq!(dispatch(&app, tablet, "app_status", Value::Null).unwrap()["tickets"]["unread"], 0);
+        // Deleting: the manager and staff are refused, the admin may.
+        assert!(matches!(dispatch(&app, phone, "delete_ticket", json!({ "id": id })), Err(PosError::Forbidden)));
+        assert!(matches!(dispatch(&app, tablet, "delete_ticket", json!({ "id": id })), Err(PosError::Forbidden)));
+        dispatch(&app, phone, "logout", json!({})).unwrap();
+        dispatch(&app, phone, "login", json!({ "pin": "1111", "userId": admin_id })).unwrap();
+        dispatch(&app, phone, "delete_ticket", json!({ "id": id })).unwrap();
+        assert!(matches!(dispatch(&app, tablet, "get_ticket", json!({ "id": id })), Err(PosError::NotFound)));
+        // Logged out: no ticket info.
+        assert!(dispatch(&app, "nobody-here-0000", "app_status", Value::Null).unwrap()["tickets"].is_null());
+    }
+
+    #[test]
+    fn the_activity_log_is_for_managers_and_admins_and_its_management_for_admins() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        let tablet = "0123456789abcdef0123456789abcdef";
+        dispatch(&app, tablet, "login", json!({ "pin": "2222" })).unwrap();
+        for cmd in ["list_activity", "activity_staff", "log_retention"] {
+            assert!(matches!(dispatch(&app, tablet, cmd, json!({})), Err(PosError::Forbidden)), "{cmd}");
+        }
+        assert!(matches!(dispatch(&app, tablet, "order_activity", json!({ "orderId": 1 })), Err(PosError::Forbidden)));
+        dispatch(&app, tablet, "logout", json!({})).unwrap();
+        // A wrong PIN on the tablet is logged with its terminal and its own name.
+        app.set_device(tablet, Some("Bar tablet"));
+        assert!(dispatch(&app, tablet, "login", json!({ "pin": "9999" })).is_err());
+        dispatch(&app, tablet, "login", json!({ "pin": "4646" })).unwrap();
+        let page = dispatch(&app, tablet, "list_activity", json!({ "kind": "login", "look": true })).unwrap();
+        let failed = &page["rows"][0];
+        assert_eq!((failed["action"].clone(), failed["terminal"].clone(), failed["look"].clone()), (json!("login.failed"), json!("web-012345"), json!(true)));
+        assert_eq!(page["look_count"], 1);
+        assert_eq!(failed["device"], "Bar tablet");
+        assert!(dispatch(&app, tablet, "activity_staff", json!({})).unwrap().as_array().unwrap().len() == 3);
+        for (cmd, args) in [
+            ("delete_activity", json!({ "ids": [1], "pin": "4646" })),
+            ("clear_activity", json!({ "before": 2_000_000_000i64, "pin": "4646", "confirm": "DELETE" })),
+            ("activity_count", json!({ "before": 2_000_000_000i64 })),
+            ("export_activity", json!({})),
+            ("log_retention", json!({})),
+            ("set_setting", json!({ "key": "log_keep_days", "value": "30" })),
+            ("backup_status", json!({})),
+        ] {
+            assert!(matches!(dispatch(&app, tablet, cmd, args), Err(PosError::Forbidden)), "{cmd}");
+        }
+        // The admin: delete, with a wrong PIN logged first.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        assert!(matches!(dispatch(&app, LOCAL, "delete_activity", json!({ "ids": [1], "pin": "0000" })), Err(PosError::InvalidPin)));
+        let r = dispatch(&app, LOCAL, "delete_activity", json!({ "ids": [1, 2], "pin": "1111" })).unwrap();
+        assert_eq!(r["deleted"], 2);
+        let csv = dispatch(&app, LOCAL, "export_activity", json!({ "kind": "login" })).unwrap();
+        assert!(csv["csv"].as_str().unwrap().contains("log.bad_pin"));
+        assert!(csv["path"].is_null(), "only saved when asked");
+        assert!(dispatch(&app, LOCAL, "set_setting", json!({ "key": "log_keep_days", "value": "45" })).is_err());
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "log_keep_days", "value": "90" })).unwrap();
+        assert_eq!(dispatch(&app, LOCAL, "log_retention", json!({})).unwrap()["keep_days"], 90);
+        // History: who cancelled it, and with whose PIN.
+        dispatch(&app, tablet, "logout", json!({})).unwrap();
+        dispatch(&app, tablet, "login", json!({ "pin": "2222" })).unwrap();
+        let o = dispatch(&app, tablet, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap();
+        let id = o["id"].as_i64().unwrap();
+        let curry = app.with_session(LOCAL, |pos, s| pos.create_product(s, curry("Curry"))).unwrap();
+        dispatch(&app, tablet, "add_item", json!({ "orderId": id, "productId": curry.id, "qty": 1 })).unwrap();
+        dispatch(&app, tablet, "send_to_kitchen", json!({ "orderId": id })).unwrap();
+        dispatch(&app, tablet, "cancel_order", json!({ "orderId": id, "reason": "mistake", "pin": "4646" })).unwrap();
+        let order = dispatch(&app, LOCAL, "get_order", json!({ "id": id })).unwrap();
+        assert_eq!((order["closed_by_name"].clone(), order["close_approver_name"].clone()), (json!("Sam"), json!("Quinn")), "{order}");
+        assert_eq!(order["close_approver_role"], "manager");
+        let acts = dispatch(&app, LOCAL, "order_activity", json!({ "orderId": id })).unwrap();
+        let cancel = acts.as_array().unwrap().iter().find(|r| r["action"] == "order.cancel").cloned().expect("the cancel row");
+        assert_eq!((cancel["user_name"].clone(), cancel["approver_name"].clone(), cancel["look"].clone()), (json!("Sam"), json!("Quinn"), json!(true)), "{acts}");
+    }
+
+    #[test]
+    fn automatic_backups_by_kind_skip_when_nothing_changed_and_copy_to_a_second_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = till_on_disk(dir.path());
+        app.set_db_path(db.clone());
+        mark_unchanged(&app);
+        // Nothing changed since the start: no scheduled or exit backup.
+        assert!(backup_kind(&app, BackupKind::Scheduled).is_none());
+        assert!(backup_kind(&app, BackupKind::Exit).is_none());
+        // Day close backups are made whatever.
+        let made = backup_kind(&app, BackupKind::DayClose).expect("a day close backup");
+        assert!(is_kind(&made.file_name().unwrap().to_string_lossy(), "pos-"));
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let auto = backup_kind(&app, BackupKind::Scheduled).expect("something changed");
+        assert!(auto.file_name().unwrap().to_string_lossy().starts_with("pos-auto-"));
+        assert!(backup_kind(&app, BackupKind::Scheduled).is_none(), "and nothing since");
+        // A second folder that is not there: the backup is still made, the status says why.
+        let usb = dir.path().join("usb");
+        app.with_session(LOCAL, |pos, s| pos.set_backup_copy_dir(s, Some(&usb.display().to_string()))).unwrap();
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "backup_copy_on", "value": "1" })).unwrap();
+        let name = dispatch(&app, LOCAL, "backup_now", json!({})).unwrap();
+        assert!(Path::new(name.as_str().unwrap()).is_file());
+        let st = dispatch(&app, LOCAL, "backup_status", json!({})).unwrap();
+        assert_eq!(st["state"]["copy_error"], "folder not found");
+        assert_eq!(st["copy_dir_ok"], false);
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["backup_alert"]["message"], "Second copy failed: folder not found");
+        // Plugged in again: the next backup is copied there, and the alert goes.
+        std::fs::create_dir_all(&usb).unwrap();
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "store_name", "value": "Changed" })).unwrap();
+        let auto = backup_kind(&app, BackupKind::Exit).expect("an exit backup");
+        let copied = usb.join(auto.file_name().unwrap());
+        assert_eq!(store_name(&copied), "Changed");
+        assert_eq!(files(&usb), [auto.file_name().unwrap().to_string_lossy().into_owned()]);
+        assert!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["backup_alert"].is_null());
+        // Scheduled ones keep their own count.
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "backup_hourly_keep", "value": "3" })).unwrap();
+        for i in 0..5 {
+            dispatch(&app, LOCAL, "set_setting", json!({ "key": "store_name", "value": format!("v{i}") })).unwrap();
+            backup_kind(&app, BackupKind::Scheduled).expect("a scheduled backup");
+        }
+        let names = files(&app.backup_dir);
+        assert_eq!(names.iter().filter(|n| n.starts_with("pos-auto-")).count(), 3, "{names:?}");
+        assert_eq!(names.iter().filter(|n| is_kind(n, "pos-")).count(), 2, "the daily ones stay: {names:?}");
+        assert!(!names.iter().any(|n| n.ends_with(".tmp") || n.ends_with("-wal") || n.ends_with("-shm")), "{names:?}");
+    }
+
+    #[test]
+    fn after_an_unclean_shutdown_an_emergency_backup_is_made_or_a_damaged_database_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = till_on_disk(dir.path());
+        app.set_db_path(db.clone());
+        startup_check(&app, false);
+        assert!(!app.backup_state().unclean_shutdown);
+        startup_check(&app, true);
+        let st = app.backup_state().clone();
+        assert!(st.unclean_shutdown && !st.damaged);
+        let name = st.emergency_backup.expect("an emergency backup");
+        assert!(name.starts_with("pos-emergency-") && app.backup_dir.join(&name).is_file());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let alert = dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["backup_alert"].clone();
+        assert_eq!((alert["kind"].clone(), alert["message"].clone()), (json!("unclean"), json!("POS did not close properly last time; a backup was made.")));
+        dispatch(&app, LOCAL, "dismiss_backup_alert", json!({})).unwrap();
+        assert!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["backup_alert"].is_null());
+        // Staff never see it.
+        let tablet = "0123456789abcdef0123456789abcdef";
+        dispatch(&app, tablet, "login", json!({ "pin": "2222" })).unwrap();
+        assert!(matches!(dispatch(&app, tablet, "dismiss_backup_alert", json!({})), Err(PosError::Forbidden)));
+        // Damaged: no backup of any kind, so good ones are never pushed out.
+        {
+            let mut st = app.backup_state();
+            st.damaged = true;
+        }
+        let before = files(&app.backup_dir);
+        assert!(backup_kind(&app, BackupKind::DayClose).is_none());
+        assert!(backup_kind(&app, BackupKind::Emergency).is_none());
+        assert!(dispatch(&app, LOCAL, "backup_now", json!({})).is_err());
+        assert_eq!(files(&app.backup_dir), before);
+        assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["backup_alert"]["kind"], "damaged");
     }
 }

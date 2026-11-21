@@ -233,6 +233,11 @@ fn old_paid_orders_get_their_payment_on_upgrade() {
              ALTER TABLE dining_tables DROP COLUMN is_table;
              ALTER TABLE order_items DROP COLUMN menu_price_cents;
              ALTER TABLE orders DROP COLUMN touched_at;
+             DROP TABLE ticket_reads; DROP TABLE ticket_messages; DROP TABLE tickets;
+             DROP INDEX audit_log_order; DROP INDEX audit_log_user; DROP INDEX audit_log_action;
+             ALTER TABLE audit_log DROP COLUMN order_id;
+             ALTER TABLE audit_log DROP COLUMN approver_id;
+             ALTER TABLE audit_log DROP COLUMN terminal;
              PRAGMA user_version = 17;",
         )
         .unwrap();

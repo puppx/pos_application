@@ -331,3 +331,94 @@ fn cancelling_two_sets_sent_together_prints_them_by_course() {
     assert!(text.contains("SET: LUNCH SET") && !text.contains("DINNER") && !text.contains("STARTERS"), "{text}");
     assert!(text.find("STARTER").unwrap() < text.find("1 x Soup").unwrap(), "{text}");
 }
+
+/// A Dinner set with a note on the set line: `starter`, Green curry, Jasmine rice.
+fn dinner_noted(k: &mut Kit, order: i64, starter: i64, note: &str) {
+    let secs = &k.dinner_secs;
+    let picks = [SetPick { section_id: secs[0].id, product_id: starter, ..Default::default() }, pick(&secs[1], &k.curry), pick(&secs[2], &k.rice)];
+    k.pos.add_set(&k.s, order, k.dinner.id, &picks, Some(note)).unwrap();
+}
+
+#[test]
+fn a_set_lines_note_prints_under_the_set_on_every_kind_of_ticket() {
+    let mut k = setup();
+    // All courses together, one set: the note under the set's name.
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap().id;
+    let dish = k.soup.id;
+    dinner_noted(&mut k, o, dish, "no peanuts");
+    let sent = k.pos.call_mains(&k.s, o).unwrap();
+    let text = ticket_text(&k, o, &sent);
+    assert_eq!(
+        plain(body(&text)),
+        ["SET: DINNER SET", "** no peanuts", "STARTER", "1 x Soup", "MAIN", "1 x Green curry", "SIDE", "1 x Jasmine rice"],
+        "{text}"
+    );
+    // Reprint.
+    let order = k.pos.get_order(&k.s, o).unwrap();
+    let t = k.pos.kitchen_tickets(&k.s, o, &order.items, true).unwrap();
+    let text = t[0].to_text(42);
+    assert!(text.contains("REPRINT") && text.contains("** no peanuts"), "{text}");
+    // Cancelled.
+    let job = k.pos.cancel_order_for_kitchen(&k.s, o, "").unwrap().expect("a CANCELLED ticket");
+    let text = String::from_utf8_lossy(&job.bytes()).to_string();
+    assert!(text.contains("CANCELLED") && text.contains("no peanuts"), "{text}");
+
+    // Course by course: the starters, then "call mains", each with the note.
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap().id;
+    let dish = k.satay.id;
+    dinner_noted(&mut k, o, dish, "nut allergy");
+    let sent = k.pos.send_to_kitchen(&k.s, o).unwrap();
+    let text = ticket_text(&k, o, &sent);
+    assert_eq!(plain(body(&text)), ["SET: DINNER SET", "** nut allergy", "STARTER", "1 x Satay"], "{text}");
+    let sent = k.pos.call_mains(&k.s, o).unwrap();
+    let text = ticket_text(&k, o, &sent);
+    assert!(text.contains("MAINS AWAY"), "{text}");
+    assert_eq!(plain(body(&text)), ["SET: DINNER SET", "** nut allergy", "MAIN", "1 x Green curry", "SIDE", "1 x Jasmine rice"], "{text}");
+    // Added later: another set with its own note.
+    let dish = k.soup.id;
+    dinner_noted(&mut k, o, dish, "mild");
+    let sent = k.pos.call_mains(&k.s, o).unwrap();
+    let text = ticket_text(&k, o, &sent);
+    assert!(text.contains("ADDITIONAL") && text.contains("** mild") && !text.contains("nut allergy"), "{text}");
+}
+
+#[test]
+fn several_sets_by_course_name_each_sets_note() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap().id;
+    let dish = k.soup.id;
+    dinner_noted(&mut k, o, dish, "no peanuts");
+    let dish = k.pad_thai.id;
+    lunch(&mut k, o, dish);
+    let sent = k.pos.call_mains(&k.s, o).unwrap();
+    let text = ticket_text(&k, o, &sent);
+    let lines = plain(body(&text));
+    assert_eq!(lines[..2], ["SET: DINNER SET", "SET: LUNCH SET"], "{text}");
+    // The note (wrapped on the double-height line) before the starters.
+    assert_eq!(format!("{} {}", lines[2], lines[3]), "** DINNER SET: no peanuts", "{text}");
+    assert_eq!(lines[4], "STARTERS", "{text}");
+}
+
+#[test]
+fn notes_on_a_sets_dishes_and_a_changed_set_note_are_printed() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap().id;
+    let dish = k.soup.id;
+    dinner(&mut k, o, dish);
+    let items = k.pos.get_order(&k.s, o).unwrap().items;
+    let curry = items.iter().find(|i| i.product_id == k.curry.id).unwrap().clone();
+    let set = items.iter().find(|i| i.is_set).unwrap().clone();
+    // A note on one dish of the set, before sending.
+    k.pos.update_item(&k.s, curry.id, &ItemUpdate { qty: curry.qty, discount_cents: 0, note: Some("extra hot".into()) }).unwrap();
+    let sent = k.pos.call_mains(&k.s, o).unwrap();
+    let text = ticket_text(&k, o, &sent);
+    assert!(text.find("1 x Green curry").unwrap() < text.find("** extra hot").unwrap(), "{text}");
+    // A note added to the set line after it was sent: a CHANGED ticket with it.
+    let (_, job) = k.pos.update_item_for_kitchen(&k.s, set.id, &ItemUpdate { qty: set.qty, discount_cents: 0, note: Some("no chilli".into()) }).unwrap();
+    let text = String::from_utf8_lossy(&job.expect("a CHANGED ticket").bytes()).to_string();
+    assert!(text.contains("CHANGED") && text.contains("SET: DINNER SET") && text.contains("no chilli"), "{text}");
+    // A note changed on a sent dish of the set.
+    let (_, job) = k.pos.update_item_for_kitchen(&k.s, curry.id, &ItemUpdate { qty: curry.qty, discount_cents: 0, note: Some("very hot".into()) }).unwrap();
+    let text = String::from_utf8_lossy(&job.expect("a CHANGED ticket").bytes()).to_string();
+    assert!(text.contains("very hot") && text.contains("no chilli"), "{text}");
+}

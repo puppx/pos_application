@@ -49,6 +49,8 @@ impl Role {
                     | Permission::ManageShift
                     | Permission::KitchenSettings
                     | Permission::AnyDiscount
+                    | Permission::AnswerTickets
+                    | Permission::ViewActivity
             ),
             // Staff only sell: everything else in Manage (reports, End of
             // day, the shift, menu, settings) is for managers and admins.
@@ -92,6 +94,11 @@ pub enum Permission {
     Backup,
     /// Check for a new version of the app and install it (admins only).
     Updates,
+    /// See and answer everyone's tickets ("Contact admin"): managers and admins.
+    AnswerTickets,
+    /// Manage → Activity log and the activity of an order in History
+    /// (managers and admins). Deleting from it needs [`Permission::Delete`].
+    ViewActivity,
     /// Deleting anything for good: orders, menu items, categories, options,
     /// floors, customers, backups (admins only).
     Delete,

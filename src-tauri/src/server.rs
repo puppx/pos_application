@@ -221,6 +221,27 @@ fn error(status: u16, msg: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     json(status, serde_json::to_string(msg).unwrap_or_default())
 }
 
+/// `encodeURIComponent` undone (bad sequences are kept as they are).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// A terminal id is the browser's own random secret: 32 to 64 hex digits.
 fn terminal_id(rq: &Request) -> Option<String> {
     let h = rq.headers().iter().find(|h| h.field.equiv("X-Terminal"))?;
@@ -274,6 +295,9 @@ fn api(handle: &AppHandle, rq: &mut Request, cmd: &str) -> (u16, String) {
         }
     };
     let app = handle.state::<App>();
+    // The device's own name (Settings > Devices & display), URI-encoded, for the Activity log.
+    let device = rq.headers().iter().find(|h| h.field.equiv("X-Device")).map(|h| percent_decode(h.value.as_str()));
+    app.set_device(&terminal, device.as_deref());
     match dispatch(&app, &terminal, cmd, args) {
         Ok(v) => (200, v.to_string()),
         Err(e) => fail(400, &e.to_string()),
@@ -337,6 +361,12 @@ fn download(handle: &AppHandle, rq: &mut Request) -> Result<Response<std::fs::Fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_names_arrive_uri_encoded() {
+        assert_eq!(percent_decode("Bar%20tablet%20%E0%B8%81"), "Bar tablet ก");
+        assert_eq!(percent_decode("100%"), "100%");
+    }
 
     /// A tiny_http server on a free port as [`Server::start`] makes it,
     /// answering each request with `handle`.

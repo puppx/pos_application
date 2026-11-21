@@ -285,6 +285,13 @@ pub struct Order {
     pub paid_at: Option<i64>,
     pub closed_at: Option<i64>,
     pub close_reason: Option<String>,
+    /// Who cancelled or voided it at the till (History), and who took the payment.
+    pub closed_by_name: Option<String>,
+    pub paid_by_name: Option<String>,
+    /// Whose PIN approved cancelling or voiding it, when not the closer's own.
+    pub close_approver_name: Option<String>,
+    /// That person's role ("manager", "admin").
+    pub close_approver_role: Option<String>,
     pub items: Vec<OrderItem>,
     /// Payments so far (one for a normal order, several for a split bill).
     pub payments: Vec<Payment>,
@@ -724,9 +731,7 @@ fn close_paid(tx: &Transaction, s: &Session, order_id: i64, t: &Totals) -> Resul
 }
 
 pub(crate) fn audit_tx(tx: &Transaction, user_id: i64, action: &str, detail: &str) -> Result<()> {
-    tx.prepare_cached("INSERT INTO audit_log (user_id, action, detail) VALUES (?1, ?2, ?3)")?
-        .execute(params![user_id, action, detail])?;
-    Ok(())
+    crate::activity::insert(tx, Some(user_id), action, detail, None)
 }
 
 /// Who answers for a change to the money on an order that needs `p` (a
@@ -843,8 +848,11 @@ impl Pos {
                 "SELECT o.id, o.order_type, o.status, o.table_id, t.name, f.name, o.customer_name, o.customer_phone,
                         o.delivery_address, o.notes, o.opened_by, u.name, o.opened_at, o.payment_method,
                         o.tendered_cents, o.change_cents, o.paid_by, o.paid_at, o.closed_at, o.close_reason,
-                        o.channel_id, ch.name, o.external_ref, o.customer_id, o.service_bp, o.tax_bp, o.tax_incl
+                        o.channel_id, ch.name, o.external_ref, o.customer_id, o.service_bp, o.tax_bp, o.tax_incl,
+                        cu.name, pu.name
                  FROM orders o JOIN users u ON u.id = o.opened_by
+                 LEFT JOIN users cu ON cu.id = o.closed_by
+                 LEFT JOIN users pu ON pu.id = o.paid_by
                  LEFT JOIN dining_tables t ON t.id = o.table_id
                  LEFT JOIN floors f ON f.id = t.floor_id
                  LEFT JOIN delivery_channels ch ON ch.id = o.channel_id
@@ -879,6 +887,10 @@ impl Pos {
                     service_bp: r.get(24)?,
                     tax_bp: r.get(25)?,
                     tax_incl: r.get(26)?,
+                    closed_by_name: r.get(27)?,
+                    paid_by_name: r.get(28)?,
+                    close_approver_name: None,
+                    close_approver_role: None,
                     subtotal_cents: 0,
                     discount_cents: 0,
                     tax_cents: 0,
@@ -900,6 +912,14 @@ impl Pos {
             s.require(Permission::ViewOwnOrders)?;
             if o.opened_by != s.user_id && o.paid_by != Some(s.user_id) {
                 return Err(PosError::Forbidden);
+            }
+        }
+        if matches!(o.status.as_str(), "cancelled" | "voided") {
+            // With someone else's PIN: the person at the till closed it, the PIN approved it.
+            if let Some((by, approver, role)) = self.close_approver(id)? {
+                o.closed_by_name = by.or(o.closed_by_name);
+                o.close_approver_name = Some(approver);
+                o.close_approver_role = Some(role);
             }
         }
         o.items = load_items(&self.conn, id)?;

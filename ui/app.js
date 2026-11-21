@@ -7,7 +7,7 @@
 const TAURI = window.__TAURI__?.core;
 /// Commands only the desktop window has (they act on this PC itself).
 const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server', 'toggle_fullscreen', 'open_backup_folder',
-  'get_autostart', 'set_autostart']);
+  'get_autostart', 'set_autostart', 'pick_backup_copy_folder']);
 /// A browser's own random id: its login belongs to this id only.
 const terminalId = (() => {
   const make = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -24,10 +24,11 @@ async function invoke(cmd, args = {}) {
   if (args.orderId != null && args.orderId === state.orderEmpty && !ORDER_READS.has(cmd)) state.orderEmpty = null;
   if (TAURI) return DESKTOP_ONLY.has(cmd) ? TAURI.invoke(cmd, args) : TAURI.invoke('call', { cmd, args });
   let r;
+  // This device's name (Devices & display), so the log and tickets can say "Bar tablet".
+  const headers = { 'Content-Type': 'application/json', 'X-Terminal': terminalId };
+  try { const n = localStorage.getItem('pos.deviceName')?.trim(); if (n) headers['X-Device'] = encodeURIComponent(n); } catch {}
   try {
-    r = await fetch(`/api/${cmd}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Terminal': terminalId }, body: JSON.stringify(args),
-    });
+    r = await fetch(`/api/${cmd}`, { method: 'POST', headers, body: JSON.stringify(args) });
   } catch {
     throw 'Cannot reach the POS. Check the main till is on and its server is running.';
   }
@@ -112,7 +113,19 @@ const ICONS = {
   minus: '<path d="M5 12h14"/>',
   alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5h.01"/>',
   calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/><path d="M8 11h.01M12 11h.01M16 11h.01"/>',
+  send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/>',
+  paperclip: '<path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/>',
+  activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2"/>',
+  coin: '<circle cx="12" cy="12" r="9"/><path d="M14.5 9.5c-.5-1-1.5-1.5-2.5-1.5-1.7 0-2.5 1-2.5 2s1 1.6 2.5 2 2.5 1 2.5 2-1 2-2.5 2c-1 0-2-.5-2.5-1.5M12 6v2M12 16v2"/>',
+  trash: '<path d="M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
 };
+// Manage pages are drawn with their own id as the icon.
+ICONS.tickets = ICONS.chat;
+ICONS.log = ICONS.activity;
 
 // ---------- light / dark theme (per device) ----------
 
@@ -278,14 +291,27 @@ const where = (o) => o.order_type === 'dine_in'
 const addressText = (c) => [c.address_line1, c.address_line2, c.town, c.postcode].filter(Boolean).join(', ');
 
 let toastTimer;
-/// `ms`: how long it stays (longer messages need longer).
-function toast(msg, err = false, ms = err ? 4000 : 2500) {
+/// `ms`: how long it stays (longer messages need longer). `action`: { label, onclick },
+/// one button in the toast (e.g. Open), which also hides it.
+function toast(msg, err = false, ms = err ? 4000 : 2500, action = null) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = err ? 'err' : '';
+  if (action) {
+    t.classList.add('has-act');
+    t.replaceChildren(h('span', {}, msg), h('button', { class: 'toast-act', onclick: () => { t.hidden = true; clearTimeout(toastTimer); action.onclick(); } }, action.label));
+  }
   t.hidden = false;
+  placeToast();
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), ms);
+}
+
+/// Over an open sheet a toast sits above the sheet's foot (Send, the reply box), not on it.
+function placeToast() {
+  const t = document.getElementById('toast');
+  const foot = !t.hidden && !document.body.classList.contains('kb-open') && document.querySelector('#modal.sheet-host:not([hidden]) .sheet-foot');
+  t.style.bottom = foot ? `${Math.max(24, innerHeight - foot.getBoundingClientRect().top + 12)}px` : '';
 }
 
 /// Saving a setting can change the order screen ("Starter or Main?", tax,
@@ -620,6 +646,8 @@ const VIEWS = [
   ['menuAdmin', 'Menu', 'manager'],
   ['plan', 'Floor plan', 'manager'],
   ['users', 'Staff', 'admin'],
+  ['tickets', 'Tickets', 'manager'],
+  ['log', 'Activity log', 'manager'],
 ];
 const inManage = (view) => !VIEWS.find(([id]) => id === view)?.[3];
 
@@ -715,9 +743,12 @@ function renderShell() {
   const view = state.orderId ? renderOrder : {
     floor: renderFloor, orders: renderOrders, history: renderHistory, menuAdmin: renderMenuAdmin,
     plan: renderPlan, users: renderUsers, reports: renderReports, settings: renderSettings,
-    customers: renderCustomers, shift: renderShift, kitchen: renderKitchen,
+    customers: renderCustomers, shift: renderShift, kitchen: renderKitchen, tickets: renderTickets, log: renderActivity,
   }[state.view];
   view().catch((e) => { if (!e?.handled) toast(String(e?.message ?? e), true); });
+  drawTicketBadges();
+  // Just logged in: badges, a reply toast and admins' backup alerts at once, not in 10 s.
+  if (!tk.started) { tk.started = true; pollTickets(); }
 }
 
 // ---------- help: "How does this screen work?" ----------
@@ -766,6 +797,7 @@ function showHelp() {
   showModal(h('div', { class: 'row nowrap' }, h('h3', { class: 'grow' }, title), h('button', { class: 'icon-btn ghost', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
     h('ol', { class: 'help-steps' }, steps.map((s) => h('li', {}, s))),
     h('div', { class: 'muted small' }, 'Tap ? at the top whenever you need this again.'),
+    helpTickets(),
     h('button', { class: 'primary', onclick: closeModal }, 'Got it'));
   document.querySelector('#modal .dialog')?.classList.add('help-dialog');
   // Esc closes it, like the other dialogs.
@@ -2032,6 +2064,7 @@ function closeModal() {
   // A settings sheet (see sheet()) dresses the same host.
   m.removeAttribute('class');
   m.onclick = null;
+  placeToast();
   state.sheetBack = null;
   document.removeEventListener('keydown', state.modalKeys);
   // Run once, however the dialog was closed (see payDialog).
@@ -2599,6 +2632,7 @@ function orderDetail(o, onChange) {
       // where() names the customer on all but dine-in orders.
       (o.customer_phone || o.delivery_address || (o.order_type === 'dine_in' && o.customer_name)) && h('div', {},
         [o.order_type === 'dine_in' && o.customer_name, o.customer_phone, o.delivery_address].filter(Boolean).join(' · '))),
+    orderWho(o),
     h('div', { class: 'rcpt-lines' }, o.items.map((i) => h('div', { class: 'rline' },
       h('span', { class: 'rq' }, `${i.qty}×`),
       h('span', { class: 'rn' }, i.name,
@@ -2622,6 +2656,7 @@ function orderDetail(o, onChange) {
         p.change_cents && `paid ${money(p.tendered_cents)}, change ${money(p.change_cents)}`].filter(Boolean).join(' · '))),
       h('span', {}, money(p.amount_cents))))),
     o.close_reason && h('div', { class: 'rcpt-reason' }, `Reason: ${o.close_reason}`),
+    orderActivity(o),
     o.status !== 'cancelled' && h('div', { class: 'rcpt-foot' },
       printBtn(paid ? 'Reprint receipt' : 'Print', async () => printResult(await call('print_receipt', { orderId: o.id }), paid ? 'Receipt printed' : 'Printed')),
       paid && printBtn('Staff copy', async () => printResult(await call('print_staff_copy', { orderId: o.id }), 'Staff copy printed')),
@@ -2842,6 +2877,8 @@ async function renderHistory() {
   empty();
   screen({ action: isAdmin() && h('button', { onclick: bulk }, 'Select…') }, md);
   await load();
+  // Asked for from a ticket or the Activity log: shown whatever the dates.
+  if (state.histOpen) { const id = state.histOpen; state.histOpen = null; await show(id); }
 }
 const STATUS_LABEL = { paid: 'Paid', voided: 'Voided', cancelled: 'Cancelled', open: 'Open' };
 const statusPill = (s) => h('span', { class: `pill ${{ paid: 'ok', voided: 'bad', open: 'warn' }[s] ?? ''}` }, STATUS_LABEL[s] ?? s);
@@ -4422,6 +4459,8 @@ async function devicesGroup() {
   return [
     ssec('This device', [
       theme,
+      textRow({ id: 'device_name', label: "This device's name", hint: 'Shown on tickets', value: pref(DEVICE_NAME_KEY, ''), placeholder: deviceLabel(), max: 40,
+        save: async (v) => { setPref(DEVICE_NAME_KEY, v); } }),
       !state.remote && autostart != null && switchRow({ id: 'autostart', label: 'Start with Windows', hint: 'Opens POS when the PC starts', value: autostart,
         save: (v) => call('set_autostart', { enabled: v }, { quiet: true }) }),
       !state.remote && keySwitch(raw, 'start_fullscreen', 'Full screen at start', { def: false }),
@@ -4487,7 +4526,7 @@ const printResult = (r, ok) => toast(r.error ? `Did not print: ${r.error}` : ok,
 // by side. Phones: the list, then the page on its own with ‹ Manage to go back.
 
 /// Daily work pages, in the order they are used.
-const MANAGE_DAILY = ['history', 'reports', 'shift', 'menuAdmin', 'customers', 'kitchen', 'plan', 'users'];
+const MANAGE_DAILY = ['tickets', 'history', 'reports', 'shift', 'menuAdmin', 'customers', 'kitchen', 'plan', 'users', 'log'];
 /// Settings groups. `need`: who sees the group (its loosest row): 'all',
 /// 'kitchen' (managers and admins: the server's kitchen settings) or 'admin'.
 const MANAGE_GROUPS = [
@@ -4605,7 +4644,9 @@ let mshell = null;
 /// open editor, the person picked in Staff. Called on every logout and login.
 function resetManage() {
   Object.assign(state, { dirty: false, settingsTab: null, groupSub: null, findRow: null, sheetBack: null, itemBack: null, groupGen: (state.groupGen ?? 0) + 1,
-    menuTab: null, menuShown: null, menuReorder: false, menuRemoved: false, newSubOf: null, openEditor: null, staffSel: null });
+    menuTab: null, menuShown: null, menuReorder: false, menuRemoved: false, newSubOf: null, openEditor: null, staffSel: null,
+    ticketSel: null, ticketTab: null, logFilter: null, histOpen: null });
+  ticketsLoggedOut();
   mshell = null;
   if (backStack.length) clearBack();
 }
@@ -4626,6 +4667,7 @@ function manageScreen(kids) {
   mshell.el.classList.toggle('at-detail', !!item);
   if (mshell.item !== item) { mshell.detail.scrollTop = 0; if (!wideQ.matches) app.scrollTop = 0; mshell.item = item; }
   setKids(mshell.detail, kids);
+  drawTicketBadges();
   // The selected item in the middle of the side list when it is near an edge (a short
   // till shows a few rows either side of it). Only the list scrolls, never the page.
   const sel = item && wideQ.matches && mshell.el.querySelector(`.mnav-wide [data-item="${item}"]`);
@@ -4668,7 +4710,7 @@ function buildShell() {
   const groups = visibleGroups();
   const name = (id) => VIEWS.find(([v]) => v === id)?.[1];
   // On the rail (a page open, 1000-1365 px) each icon has a short name under it.
-  const RAIL_NAME = { shift: 'Shift', kitchen: 'Kitchen', plan: 'Floor', menuAdmin: 'Menu' };
+  const RAIL_NAME = { shift: 'Shift', kitchen: 'Kitchen', plan: 'Floor', menuAdmin: 'Menu', log: 'Activity' };
   const item = (data, ic, label, cls = '') => h('button', { class: `mnav-item ${cls}`, 'data-item': data, onclick: () => openManage(data), title: label },
     icon(ic, 20), h('span', {}, label), h('small', { class: 'rail-label', 'aria-hidden': 'true' }, RAIL_NAME[data.slice(2)] ?? label));
   let folded = pref('pos.manage.fold') === '1';
@@ -4797,6 +4839,7 @@ function renderStaffManage() {
   drawTitle('Manage');
   setKids(app, h('div', { class: 'staff-manage' },
     h('button', { class: 'dtile dtile-big', onclick: () => go('kitchen') }, icon('kitchen', 26), h('span', {}, 'Kitchen screen')),
+    h('button', { class: 'dtile dtile-big', 'data-tickets': '', onclick: () => myTicketsSheet() }, icon('chat', 26), h('span', {}, 'My tickets'), countEl(tk.info?.unread_mine ?? tk.info?.unread)),
     h('button', { class: 'dtile dtile-big', onclick: () => { state.settingsTab = 'about'; renderShell(); } }, icon('info', 26), h('span', {}, 'About'))));
 }
 
@@ -4814,6 +4857,8 @@ const MANAGE_INDEX = [
   ['p:kitchen', 'Kitchen screen', 'kitchen screen tablet kds cook chef done display', false],
   ['p:plan', 'Floor plan', 'floor plan tables layout rooms terrace seats', 'manager'],
   ['p:users', 'Staff', 'staff users people pin password roles manager admin waiter', 'admin'],
+  ['p:tickets', 'Tickets', 'tickets contact admin help problem messages reply urgent staff support', 'manager'],
+  ['p:log', 'Activity log', 'activity log audit history who cancelled voided deleted refund pin logins changes needs a look', 'manager'],
   ['g:printers', 'Printers', 'printer printers receipt kitchen bar ticket copies paper thai image test cash drawer windows usb network', 'admin'],
   ['g:printers#receipt', 'Receipt printer', 'receipt bill printer copies paper 58 80 mm item names thai english bold image mode raster slow send test', 'admin'],
   ['g:printers#kitchen', 'Kitchen printer', 'kitchen printer tickets copies starters mains all courses together call mains again prepare added later additional large text font table image mode raster slow send test', 'admin'],
@@ -4866,6 +4911,7 @@ const MANAGE_INDEX = [
   ['g:login#auto_logout_warn_secs', 'Warn before', 'warning logout seconds', 'admin'],
   ['g:login#pin_auto_login', 'Log in without OK', 'pin auto login ok', 'admin'],
   ['g:login#staff', 'Staff & PINs', 'staff users people roles pin', 'admin'],
+  ['g:login#tickets_call_text', 'Who staff call when urgent', 'tickets contact admin phone call urgent number', 'admin'],
   ['g:restaurant', 'Restaurant', 'restaurant name address phone vat tax rate prices included currency', 'admin'],
   ['g:restaurant#store_name', 'Restaurant name', 'restaurant shop name', 'admin'],
   ['g:restaurant#shop_name', 'Name on bills', 'shop name bill receipt top', 'admin'],
@@ -4876,6 +4922,7 @@ const MANAGE_INDEX = [
   ['g:delivery', 'Delivery apps', 'delivery apps uber eats just eat deliveroo grab platform', 'admin'],
   ['g:devices', 'Devices & display', 'theme dark light button size large full screen display local server network tablet phone wifi', 'admin'],
   ['g:devices#theme', 'Theme', 'theme light or dark mode night auto colours', 'admin'],
+  ['g:devices#device_name', "This device's name", 'device name tablet till label tickets', 'admin'],
   ['g:devices#buttons', 'Menu button size', 'button size large big tiles', 'admin'],
   ['g:devices#autostart', 'Start with Windows', 'start with windows startup boot automatically open pc switched on login', 'admin', true],
   ['g:devices#start_fullscreen', 'Full screen at start', 'full screen start open window display', 'admin', true],
@@ -4890,6 +4937,12 @@ const MANAGE_INDEX = [
   ['g:data#menu', 'Back up the menu', 'menu backup copy restore', 'admin'],
   ['g:data#menufile', 'Load a menu file', 'menu file load import other till', 'admin'],
   ['g:data#reset', 'Reset data', 'reset delete clear data danger', 'admin'],
+  ['g:data#log_keep_days', 'Keep for (Activity log)', 'log keep days retention activity space tickets clear old', 'admin'],
+  ['g:data#backup_hourly_on', 'Back up while open', 'auto automatic backup hourly every hours schedule', 'admin'],
+  ['g:data#backup_dayclose_on', 'Back up at day close', 'backup day close end of day automatic', 'admin'],
+  ['g:data#backup_exit_on', 'Back up when POS closes', 'backup close exit shut down automatic', 'admin'],
+  ['g:data#backup_emergency_on', 'Back up after a crash', 'emergency crash power cut backup unclean', 'admin'],
+  ['g:data#backup_copy_on', 'Also copy backups to', 'second copy usb onedrive google drive folder backup d drive', 'admin'],
   ['g:about', 'About', 'about version credits', 'all'],
   ['g:about#updates', 'Updates', 'update updates install version', 'admin', true],
 ].map(([id, label, words, need, local]) => {
@@ -5398,7 +5451,8 @@ function sheet({ title, body, onSave, onTest, saveLabel = 'Save', wide = false, 
   // The phone's back button closes the sheet (or asks first).
   pushBack('sheet');
   state.sheetBack = () => { if (dirty && onSave) { ask(); pushBack('sheet'); } else { closed = true; state.sheetBack = null; closeModal(); } };
-  return { el, show, close, foot, normal, test, save };
+  requestAnimationFrame(placeToast);
+  return { el, show, close, foot, normal, test, save, body: bodyEl, clean: () => { dirty = false; } };
 }
 
 /// The bar under a list or form with changes: "N changes · Discard · Save" (or `text`).
@@ -5946,7 +6000,8 @@ async function teamsPage() {
 // ---------- Settings: Login & staff ----------
 
 async function loginGroup() {
-  const raw = await invoke('get_settings', { keys: ['start_screen', 'auto_logout_minutes', 'auto_logout_warn_secs', 'pin_auto_login'] });
+  const raw = await invoke('get_settings', { keys: ['start_screen', 'auto_logout_minutes', 'auto_logout_warn_secs', 'pin_auto_login', 'tickets_call_text'] });
+  const callText = raw.tickets_call_text ?? '';
   const ui = uiSettings(raw);
   const people = await call('list_users').then((u) => u.length).catch(() => null);
   const mins = [[0, 'Never'], [1, '1 minute'], [2, '2 minutes'], [5, '5 minutes'], [10, '10 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']];
@@ -5966,6 +6021,8 @@ async function loginGroup() {
     ], 'Open orders are kept. Applies to every device.'),
     ssec('PIN', [keySwitch(raw, 'pin_auto_login', 'Log in without OK', { hint: 'As soon as the PIN is complete',
       tip: 'Works after each person logs in once. Shorter PINs still press OK.' })]),
+    ssec('Tickets', [textRow({ id: 'tickets_call_text', label: 'Who staff call when urgent', hint: 'Shown when no manager is logged in', value: callText,
+      placeholder: 'e.g. Quinn: 07700 900123', max: 80, save: (v) => saveKey('tickets_call_text', v) })]),
     ssec('Staff', [navRow({ id: 'staff', label: 'Staff & PINs', value: people == null ? null : `${people} ${people === 1 ? 'person' : 'people'}`, onOpen: () => openManage('p:users') })]),
   ];
 }
@@ -6232,6 +6289,8 @@ async function dataGroup() {
       menus.length > 3 && navRow({ id: 'allmenus', label: 'All menu backups', value: String(menus.length), onOpen: () => openSub('menus') }),
       menuFile, menuPick,
     ]),
+    ...await backupAutoSection(),
+    await retentionSection(),
     ssec('Danger zone', [navRow({ id: 'reset', label: 'Reset data…', cls: 'danger', onOpen: resetSheet })]),
   ];
 }
@@ -6326,7 +6385,8 @@ function aboutGroup() {
 const fileSize = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
 /// What a full backup file is, from its name (see prune_backups in commands.rs).
 function backupKind(name) {
-  const kinds = [['pos-before-update-', 'Before an update'], ['pos-before-reset-', 'Before a reset'],
+  const kinds = [['pos-auto-', 'While open'], ['pos-exit-', 'When POS closed'], ['pos-emergency-', 'After a crash'],
+    ['pos-before-update-', 'Before an update'], ['pos-before-reset-', 'Before a reset'],
     ['pos-before-restore-', 'Before a restore'], ['pos-imported-', 'Loaded from a file']];
   return kinds.find(([p]) => name.startsWith(p))?.[1] ?? 'Backup';
 }
@@ -6395,6 +6455,1147 @@ function restoreSheet(f, s) {
   check();
 }
 
+// ---------- tickets ("Contact admin") ----------
+
+/// Category: [icon, name]. Quick text: one tap adds it to the message.
+const TCAT = { printer: ['printer', 'Printer'], payment: ['card', 'Payment / card'], order: ['receipt', 'Order / bill'],
+  menu: ['tag', 'Menu / price'], till: ['monitor', 'Till / tablet'], other: ['help', 'Other'] };
+const TQUICK = {
+  printer: ['Not printing', 'Paper out', 'Prints blank', 'Prints twice'],
+  payment: ['Card machine offline', 'Payment declined', 'Charged twice', 'Need a refund approved'],
+  order: ['Wrong item on bill', "Can't close bill", 'Need a refund approved', 'Split went wrong'],
+  menu: ['Wrong price', 'Item missing', 'Should be sold out', 'Wrong option'],
+  till: ['Screen frozen', 'Very slow', 'Wi-Fi drops', 'Logged out by itself'],
+  other: [],
+};
+const TSTATUS = { open: ['New', 'bad'], in_progress: ['In progress', 'prog'], waiting: ['Waiting', 'wait'], done: ['Done', 'ok'] };
+const tcatName = (c) => TCAT[c]?.[1] ?? 'Other';
+const tcatIcon = (c) => TCAT[c]?.[0] ?? 'help';
+const tstatusPill = (st) => { const [l, c] = TSTATUS[st] ?? [st, '']; return h('span', { class: `pill ${c}` }, l); };
+const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// 12-hour clocks ("10:25 AM") need a wider time column in the Activity log.
+if (/[AP]M/i.test(new Date(2020, 0, 1, 15).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))) document.body.classList.add('h12');
+/// "now", "3 min", "2 h", "3 d".
+function shortAge(t) {
+  const m = Math.max(0, Math.floor((Date.now() / 1000 - t) / 60));
+  return m < 1 ? 'now' : m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)} h` : `${Math.floor(m / 1440)} d`;
+}
+/// A table name as on the order screen: "2" → "Table 2", "Window" stays.
+const tableTitle = (n) => (n == null ? null : /^\d+[a-z]?$/i.test(n) ? `Table ${n}` : n);
+/// May answer tickets (see every ticket, the badge, the urgent alert): managers and admins.
+const isAnswerer = () => isManager();
+
+/// This device's name in tickets: set by an admin (Devices & display), else "Main till"
+/// on the desktop app or a short browser name ("iPad · Safari").
+const DEVICE_NAME_KEY = 'pos.deviceName';
+function deviceLabel() {
+  const named = pref(DEVICE_NAME_KEY, '').trim();
+  if (named) return named;
+  if (!state.remote) return 'Main till';
+  const ua = navigator.userAgent;
+  const dev = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iPad' : /iPhone/.test(ua) ? 'iPhone'
+    : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Browser';
+  const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+  return br ? `${dev} · ${br}` : dev;
+}
+
+/// What the poll knows (app_status.tickets), print failures of the last 30 minutes,
+/// the ticket on screen (no toast or banner for it) and what a view wants redrawn.
+const tk = { info: null, fails: [], viewing: null, watch: null, seq: null, first: true, polling: false };
+const ssGet = (k) => { try { return JSON.parse(sessionStorage.getItem(k) || '[]'); } catch { return []; } };
+const ssSet = (k, v) => { try { sessionStorage.setItem(k, JSON.stringify(v.slice(-50))); } catch {} };
+const lsList = (k) => { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch { return []; } };
+/// The urgent tone: on unless turned off on this device (never on the Kitchen screen).
+const TONE_KEY = 'pos.ticketSound';
+const toneOn = () => pref(TONE_KEY, '1') !== '0';
+
+/// A count in a red circle (nothing for 0).
+const countEl = (n, cls = 'mnav-n') => (n > 0 ? h('span', { class: cls }, n > 99 ? '99+' : String(n)) : null);
+function setCount(host, n, cls) {
+  if (!host) return;
+  host.querySelector(`:scope > .${cls}`)?.remove();
+  const c = countEl(n, cls);
+  if (c) host.append(c);
+}
+
+/// Logged out: no badges, no banner; the next login starts afresh.
+function ticketsLoggedOut() {
+  tk.info = null;
+  tk.first = true;
+  tk.started = false;
+  tk.viewing = null;
+  tk.watch = null;
+  tk.seq = null;
+  drawTicketBadges();
+}
+
+/// One look at app_status (the 10 s loop): badges, a toast for a new reply, the
+/// urgent alert, and a reload if a backup was restored on another till.
+async function pollTickets() {
+  if (!state.session || tk.polling || document.visibilityState === 'hidden') return;
+  tk.polling = true;
+  try {
+    const st = await invoke('app_status');
+    if (dataChanged(st) || !state.session) return;
+    if (st.session && st.session.user_id !== state.session.user_id) return;
+    backupAlert(st.backup_alert);
+    const t = st.tickets ?? null;
+    tk.info = t;
+    drawTicketBadges();
+    if (!t) return;
+    replyToast(t);
+    drawUrgent();
+    if (tk.seq != null && t.seq !== tk.seq) tk.watch?.();
+    tk.seq = t.seq;
+  } catch { /* offline: try again next time */ } finally { tk.polling = false; }
+}
+
+/// A new reply on one of my tickets: "Mia replied to #14: …" with Open (once per message on this device).
+function replyToast(t) {
+  const key = `pos.tkToast.${state.session.user_id}`;
+  const last = Number(pref(key, '0'));
+  const first = tk.first;
+  tk.first = false;
+  const l = t.latest;
+  if (!l) return;
+  if (!first && l.msg_id <= last) return;
+  setPref(key, String(Math.max(last, l.msg_id)));
+  if (tk.viewing === l.ticket_id) return;
+  const open = { label: 'Open', onclick: () => openTicket(l.ticket_id) };
+  const quote = l.preview.length > 40 ? `${l.preview.slice(0, 40)}…` : l.preview;
+  // My own tickets only: a manager's `unread` counts every ticket.
+  const mineN = t.unread_mine ?? t.unread;
+  if (first && mineN > 1) toast(`${mineN} replies to your tickets`, false, 8000, { label: 'Open', onclick: () => myTicketsSheet() });
+  else toast(`${l.by} replied to #${l.ticket_id}: “${quote}”`, false, 8000, open);
+}
+
+/// Badges: ? (staff, their unread replies); Tickets in the bar, on the Manage list
+/// and on the phone's Manage tab (managers and admins).
+function drawTicketBadges() {
+  const t = state.session ? tk.info : null;
+  const n = t?.unread ?? 0;
+  const ans = !!state.session && isAnswerer();
+  const tb = document.getElementById('tickets');
+  tb.hidden = !ans;
+  tb.setAttribute('aria-label', n ? `Tickets, ${n} new` : 'Tickets');
+  setCount(tb, ans ? n : 0, 'tb-badge');
+  tb.querySelector('.tb-badge')?.classList.toggle('urgent', !!t?.urgent?.length);
+  setCount(document.getElementById('help'), ans ? 0 : n, 'tb-badge');
+  for (const b of document.querySelectorAll('#nav button')) setCount(b, b.getAttribute('aria-label') === 'Manage' && ans ? n : 0, 'nav-n');
+  for (const el of document.querySelectorAll('.manage [data-item="p:tickets"]')) {
+    setCount(el, ans ? n : 0, 'mnav-n');
+    // The count goes before the rail's short name.
+    const c = el.querySelector(':scope > .mnav-n');
+    if (c) el.querySelector('.rail-label')?.before(c);
+  }
+  for (const el of document.querySelectorAll('[data-tickets]')) setCount(el, t?.unread_mine ?? n, 'mnav-n');
+  if (!t || !ans) document.getElementById('ubar').replaceChildren();
+  else drawUrgent();
+}
+
+/// Urgent tickets (managers and admins): a red bar under the top bar on every screen
+/// but that ticket's own, and one short tone per ticket on this device.
+const UB_HIDDEN = 'pos.urgentHidden', TONE_DONE = 'pos.ticketToned';
+function drawUrgent() {
+  const bar = document.getElementById('ubar');
+  const t = tk.info;
+  if (!state.session || !isAnswerer() || !t?.urgent?.length || document.body.classList.contains('locked')) return bar.replaceChildren();
+  const hidden = new Set(ssGet(UB_HIDDEN));
+  const list = t.urgent.filter((u) => !hidden.has(u.id) && tk.viewing !== u.id);
+  // urgent holds at most 3; urgent_count is all of them (less those hidden here).
+  const count = Math.max(list.length, (t.urgent_count ?? t.urgent.length) - (t.urgent.length - list.length));
+  // The tone: once per urgent ticket per device, never on the Kitchen screen.
+  const toned = lsList(TONE_DONE);
+  const fresh = t.urgent.filter((u) => !toned.includes(u.id));
+  if (fresh.length) {
+    try { localStorage.setItem(TONE_DONE, JSON.stringify([...toned, ...fresh.map((u) => u.id)].slice(-100))); } catch {}
+    if (toneOn() && state.view !== 'kitchen') urgentTone();
+  }
+  // The Tickets page lists them already (urgent first): no banner over it.
+  if (!list.length || (state.view === 'tickets' && !state.orderId)) return bar.replaceChildren();
+  const u = list[0];
+  const hide = () => { ssSet(UB_HIDDEN, [...hidden, ...list.map((x) => x.id)]); bar.replaceChildren(); };
+  bar.replaceChildren(h('div', { class: 'urgent-bar', role: 'alert' }, icon('alert', 22),
+    count > 1
+      ? h('span', { class: 'ub-text' }, h('strong', {}, 'Urgent'), h('span', {}, `${count} tickets`))
+      : h('span', { class: 'ub-text' }, h('strong', {}, 'Urgent'), h('span', {}, `${tcatName(u.category)}: ${u.preview}`),
+        h('small', {}, [u.by, u.device, shortAge(u.created_at)].filter(Boolean).join(' · '))),
+    h('button', { class: 'open', onclick: () => (count > 1 ? (state.ticketSel = null, state.ticketTab = 'open', go('tickets')) : openTicket(u.id)) }, 'Open'),
+    h('button', { class: 'x', 'aria-label': 'Hide on this device', onclick: hide }, icon('x', 20))));
+}
+/// Three falling notes (~0.6 s), unlike the kitchen screen's two rising beeps.
+function urgentTone() {
+  const ctx = kdsAudioCtx();
+  if (!ctx) return;
+  if (ctx.state !== 'running') ctx.resume?.().catch(() => {});
+  const t = ctx.currentTime + 0.02;
+  [[0, 1318], [0.2, 1047], [0.4, 784]].forEach(([d, f]) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'triangle'; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t + d);
+    g.gain.exponentialRampToValueAtTime(0.45, t + d + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.19);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t + d); o.stop(t + d + 0.2);
+  });
+}
+// Browsers allow sound only after a tap: the first tap of a manager or admin readies it.
+document.addEventListener('pointerdown', () => {
+  if (state.session && isAnswerer() && toneOn() && kdsAudio.ctx?.state !== 'running') kdsAudioCtx()?.resume?.().catch(() => {});
+}, true);
+
+/// Open one ticket: managers and admins on the Tickets page, staff in My tickets.
+function openTicket(id) {
+  if (!isAnswerer()) return myTicketsSheet(id);
+  state.ticketSel = id;
+  if (state.view === 'tickets' && !state.orderId) return renderShell();
+  go('tickets');
+}
+
+/// ? Help: Contact admin and My tickets, above "Got it".
+function helpTickets() {
+  if (!state.session) return null;
+  const t = tk.info;
+  const row = (ic, label, hint, n, onclick) => {
+    const r = srow({ label, hint, cls: 'nav', ctl: [countEl(n), h('span', { class: 'chev' }, icon('chev', 20))] });
+    r.querySelector('.srow-label').prepend(icon(ic, 20));
+    r.tabIndex = 0;
+    r.setAttribute('role', 'button');
+    r.onclick = () => { closeModal(); onclick(); };
+    r.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); r.click(); } };
+    return r;
+  };
+  const mine = row('receipt', 'My tickets', 'None yet', t?.unread_mine ?? t?.unread ?? 0, () => myTicketsSheet());
+  // The latest ticket under My tickets ("#14 Printer · In progress").
+  invoke('list_tickets', { tab: 'mine', limit: 1 }).then((rows) => {
+    const r = rows?.[0];
+    if (r) setHint(mine, `#${r.id} ${tcatName(r.category)} · ${TSTATUS[r.status]?.[0] ?? r.status}`);
+  }).catch(() => {});
+  return h('div', { class: 'help-tickets sgroup' },
+    row('chat', 'Contact admin', 'Printer, card machine, prices, anything', 0, () => newTicketSheet()), mine);
+}
+
+/// Contact admin: what about, what happened, how soon. Stays open after Send to say it went.
+async function newTicketSheet(preset = {}) {
+  let cat = preset.category ?? null, urgency = 'normal';
+  const msgIn = h('textarea', { class: 'tmsg-in', rows: 3, maxlength: 500, placeholder: 'A few words', 'aria-label': 'Message' });
+  msgIn.value = preset.body ?? '';
+  msgIn.addEventListener('pointerup', () => tapFocus(msgIn));
+  const quick = h('div', { class: 'qtext' });
+  const addText = (q) => {
+    const v = msgIn.value.trim().replace(/[.\s]+$/, '');
+    msgIn.value = (v ? `${v}. ${q}` : q).slice(0, 500);
+    msgIn.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const drawQuick = () => setKids(quick, (TQUICK[cat] ?? []).map((q) => h('button', { type: 'button', onclick: () => addText(q) }, q)));
+  const cats = h('div', { class: 'tcats', role: 'radiogroup', 'aria-label': 'What is it about?' });
+  const drawCats = () => setKids(cats, Object.entries(TCAT).map(([k, [ic, l]]) => h('button', { type: 'button', class: `tchip${k === cat ? ' on' : ''}`,
+    role: 'radio', 'aria-checked': String(k === cat), 'aria-pressed': String(k === cat), onclick: () => { cat = k; drawCats(); drawQuick(); drawDup(); } }, icon(ic, 20), l)));
+  // The same person, the same kind of problem, a few minutes ago, still open: add to that ticket instead.
+  let recent = [], addTo = null;
+  const dupBox = h('div', { class: 'tdup', hidden: true });
+  const drawDup = () => {
+    const now = Date.now() / 1000;
+    const d = recent.find((t) => t.category === cat && t.status !== 'done' && now - t.created_at < 5 * 60);
+    if (!d) { addTo = null; dupBox.hidden = true; return paintSend(); }
+    if (addTo && addTo !== d.id) addTo = null;
+    dupBox.hidden = false;
+    setKids(dupBox, h('span', { class: 'grow' }, `You sent #${d.id} ${tcatName(d.category)} ${shortAge(d.created_at) === 'now' ? 'just now' : `${shortAge(d.created_at)} ago`}.`),
+      sseg([['new', 'New ticket'], ['add', `Add to #${d.id}`]], addTo ? 'add' : 'new', (v) => { addTo = v === 'add' ? d.id : null; paintSend(); }, 'Same problem?'));
+    paintSend();
+  };
+  invoke('list_tickets', { tab: 'mine', limit: 20 }).then((rows) => { recent = (rows ?? []).filter((t) => t.mine ?? t.created_by === state.session.user_id); drawDup(); }).catch(() => {});
+  drawCats();
+  drawQuick();
+  const seg = sseg([['normal', 'Normal'], ['urgent', 'Urgent (now)']], urgency, (v) => { urgency = v; paintUrgent(); }, 'How soon?');
+  const paintUrgent = () => seg.querySelectorAll('button').forEach((b, i) => b.classList.toggle('urgent', i === 1 && urgency === 'urgent'));
+  const origSet = seg.set;
+  seg.set = (v) => { origSet(v); paintUrgent(); };
+  // What goes with it: who, this device, the order on screen, print failures, version.
+  const onOrder = state.orderId;
+  let orderText = onOrder ? `Order #${onOrder}` : null;
+  const screenLabel = onOrder ? `Order #${onOrder}` : VIEWS.find(([v]) => v === state.view)?.[1] ?? state.view;
+  const fails = tk.fails.filter((f) => Date.now() - f.at < 30 * 60000).length;
+  const parts = () => [state.session.name, deviceLabel(), orderText, fails && `${fails} print failure${fails > 1 ? 's' : ''}`].filter(Boolean);
+  const attachText = h('span', {});
+  const drawAttach = () => setKids(attachText, 'Sent with: ', h('b', {}, parts().join(' · ')), state.version ? ` · v${state.version}` : '');
+  drawAttach();
+  const attach = popButton(h('button', { type: 'button', class: 'tattach', 'aria-expanded': 'false', 'aria-label': 'What is sent with it' }, icon('paperclip', 16), attachText),
+    () => h('ul', { class: 'help-steps' }, [...parts(), screenLabel && `Screen: ${screenLabel}`, state.version && `Version ${state.version}`].filter(Boolean).map((x) => h('li', {}, x))),
+    'Sent with it');
+  if (onOrder) invoke('get_order', { id: onOrder }).then((o) => { orderText = `Order #${o.id} · ${orderTitle(o)}`; drawAttach(); }).catch(() => {});
+  const s = sheet({ title: 'Contact admin', saveLabel: 'Send', left: attach, body: [
+    h('section', { class: 'ssec' }, h('h3', { class: 'ssec-title' }, 'What is it about?'), cats, dupBox),
+    h('section', { class: 'ssec' }, h('h3', { class: 'ssec-title' }, 'What happened?'), msgIn, quick),
+    h('section', { class: 'ssec' }, h('h3', { class: 'ssec-title' }, 'How soon?'), h('div', { class: 'tsend-row' }, seg)),
+  ], onSave: async () => {
+    if (!cat) return "Pick what it's about";
+    const body = msgIn.value.trim();
+    if (!body) return 'Add a few words';
+    if (addTo) {
+      await call('reply_ticket', { id: addTo, body }, { quiet: true });
+      s.clean();
+      setKids(s.body, h('div', { class: 'tsent' }, h('span', { class: 'eic' }, icon('check', 30)), h('strong', {}, `Added to #${addTo}`),
+        h('p', {}, 'You will see the answer under ? Help → My tickets.')));
+      setKids(s.foot, h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => { s.close(); toast('Sent'); } }, 'Done'));
+      pollTickets();
+      return false;
+    }
+    const r = await call('create_ticket', { category: cat, urgency, body, orderId: onOrder ?? null,
+      screen: onOrder ? 'order' : state.view, screenLabel, device: deviceLabel() }, { quiet: true });
+    const callText = r.answerers_online ? null : r.call_text ?? null;
+    s.clean();
+    setKids(s.body, h('div', { class: 'tsent' }, h('span', { class: 'eic' }, icon('check', 30)), h('strong', {}, `Sent · #${r.ticket?.id ?? r.id ?? ''}`),
+      h('p', {}, 'You will see the answer under ? Help → My tickets.'),
+      !r.answerers_online && h('div', { class: 'warn-box' }, "No manager or admin is logged in right now. If it can't wait, phone them.", callText?.trim() && h('b', {}, callText.trim()))));
+    setKids(s.foot, h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => { s.close(); toast('Sent'); } }, 'Done'));
+    s.foot.querySelector('.primary').focus();
+    pollTickets();
+    return false;
+  } });
+  const paintSend = () => { if (!s?.save || s.save.disabled) return; setKids(s.save, icon('send', 20), addTo ? `Add to #${addTo}` : 'Send'); };
+  s.save.prepend(icon('send', 20));
+  // sheet() puts the label back after a refusal; keep the icon with it.
+  new MutationObserver(() => { if (!s.save.querySelector('.icon, .spin')) s.save.prepend(icon('send', 20)); }).observe(s.save, { childList: true });
+}
+
+/// One ticket in a list (Tickets page, My tickets).
+function ticketRow(t, { on = false, tab = null, mine = false, onclick } = {}) {
+  // Staff see New / In progress / Done; Waiting (an answer is waiting for them) is the answerers' word.
+  const st = mine || t.status === 'done' ? t.status : t.waiting || tab === 'waiting' ? 'waiting' : t.status;
+  const late = tab === 'open' && t.status !== 'done' && Date.now() / 1000 - (t.last_msg_at ?? t.created_at) > 15 * 60;
+  const who = mine
+    ? (t.last_msg_by_name && t.last_msg_by_name !== state.session.name ? `${t.status === 'done' ? 'Done' : 'Replied'} by ${t.last_msg_by_name} · ${hm(t.last_msg_at)}` : `Sent ${hm(t.created_at)}`)
+    : [t.created_by_name, t.device].filter(Boolean).join(' · ');
+  const row = h('div', { class: `orow trow${t.unread ? ' unread' : ''}${t.urgency === 'urgent' ? ' is-urgent' : ''}${on ? ' on' : ''}`, role: 'listitem', tabindex: 0, 'data-id': t.id,
+    onclick, onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); onclick(); } } },
+  h('span', { class: 'tcat-ic' }, icon(tcatIcon(t.category), 20)),
+  h('span', { class: 'o-main' },
+    h('span', { class: 'o-l1' }, h('strong', {}, `#${t.id} ${tcatName(t.category)}`), t.urgency === 'urgent' && h('span', { class: 'pill urgent' }, 'Urgent')),
+    h('span', { class: 'tprev' }, t.preview ?? ''),
+    h('span', { class: 'o-l2' }, tstatusPill(st), h('span', { class: 'o-where' }, who))),
+  h('span', { class: 'tright' }, h('span', { class: `tage${late ? ' late' : ''}` }, shortAge(t.last_msg_at ?? t.created_at)),
+    t.unread ? h('span', { class: 'udot', role: 'img', 'aria-label': 'Unread' }) : null));
+  return row;
+}
+
+/// The conversation: messages (mine on the right) and status changes as centred lines.
+function ticketThread(t) {
+  const me = state.session.user_id;
+  const msgs = t.messages ?? [];
+  const out = msgs.map((m) => (m.kind === 'status'
+    ? h('div', { class: 'tsys' }, `${m.user_name}: ${TSTATUS[m.body]?.[0] ?? m.body} · ${hm(m.created_at)}`)
+    : h('div', { class: `tmsg${(m.mine ?? m.user_id === me) ? ' me' : ''}` }, h('div', { class: 'tby' }, (m.mine ?? m.user_id === me) ? null : m.user_name, h('time', {}, hm(m.created_at))), h('p', {}, m.body))));
+  // Nobody has answered for 10 minutes (no internet push: the admin may be out).
+  if (t.status === 'open' && msgs.filter((m) => m.kind !== 'status').length === 1 && Date.now() / 1000 - t.created_at > 600 && (t.mine ?? t.created_by === me))
+    out.splice(1, 0, h('div', { class: 'tsys' }, 'No answer yet'));
+  return h('div', { class: 'thread' }, out);
+}
+
+/// Reply box: quick replies (each may set a status), a one-line box (OSK on the till) and Send.
+function ticketComposer(t, quick, onSent) {
+  const box = h('textarea', { rows: 1, maxlength: 500, placeholder: 'Reply…', 'aria-label': 'Reply' });
+  box.addEventListener('pointerup', () => tapFocus(box));
+  // The keyboard (on-screen or the phone's) takes the bottom: keep the last message in view above the box.
+  const showLast = () => {
+    const last = (box.closest('.tdetail') ?? box.closest('.sheet'))?.querySelector('.thread')?.lastElementChild;
+    if (!last) return;
+    last.style.scrollMarginBottom = `${(box.closest('.sheet-foot') ? 0 : box.closest('.composer')?.offsetHeight ?? 0) + 12}px`;
+    last.scrollIntoView({ block: 'end' });
+  };
+  box.addEventListener('focus', () => { setTimeout(showLast, 120); setTimeout(showLast, 450); });
+  const send = h('button', { class: 'primary', 'aria-label': 'Send' }, icon('send', 20), 'Send');
+  const go = async (body, setStatus = null) => {
+    body = body.trim();
+    if (!body) { tapFocus(box); return; }
+    send.disabled = true;
+    try {
+      await call('reply_ticket', { id: t.id, body, setStatus }, { quiet: true });
+      box.value = '';
+      await onSent();
+    } catch (e) { toast(String(e?.message ?? e), true); } finally { send.disabled = false; }
+  };
+  send.onclick = () => go(box.value);
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(box.value); } });
+  return h('div', { class: 'composer' },
+    h('div', { class: 'qtext' }, quick.map(([label, st]) => h('button', { type: 'button', onclick: () => go(label, typeof st === 'function' ? st() : st) }, label))),
+    h('div', { class: 'composer-row' }, box, send));
+}
+
+/// Staff (and anyone, for their own tickets): My tickets in a sheet; a row opens its thread there.
+async function myTicketsSheet(openId = null) {
+  const s = sheet({ title: 'My tickets', wide: true, body: [] });
+  const head = s.el.querySelector('.sheet-head');
+  const title = head.querySelector('h3');
+  const back = h('button', { class: 'ghost icon-btn', 'aria-label': 'Back to My tickets', onclick: () => list() }, icon('back'));
+  const stillOpen = () => document.getElementById('modal').contains(s.el);
+  const closed = () => { tk.viewing = null; tk.watch = null; };
+  const done = state.onModalClose;
+  state.onModalClose = () => { closed(); done?.(); };
+  async function list() {
+    tk.viewing = null;
+    back.remove();
+    title.textContent = 'My tickets';
+    setKids(s.foot, h('span', { class: 'grow' }), h('button', { class: 'ghost', onclick: () => s.close() }, 'Close'),
+      h('button', { class: 'primary', onclick: () => newTicketSheet() }, icon('plus', 20), 'New ticket'));
+    let rows;
+    try { rows = await call('list_tickets', { tab: 'mine', limit: 100 }, { quiet: true }); } catch (e) {
+      return setKids(s.body, emptyState({ icon: 'alert', title: 'Could not load', text: String(e?.message ?? e) }));
+    }
+    if (!stillOpen() || title.textContent !== 'My tickets') return;
+    tk.watch = list;
+    setKids(s.body, rows.length
+      ? h('div', { class: 'md-list', role: 'list', style: 'margin-top:10px' }, rows.map((t) => ticketRow(t, { mine: true, onclick: () => thread(t.id) })))
+      : emptyState({ icon: 'chat', title: 'No tickets yet', text: 'Tap New ticket when something needs an admin.' }),
+    h('div', { class: 'ssec-foot' }, 'Done tickets stay here for 30 days.'));
+  }
+  async function thread(id) {
+    let t;
+    try { t = await call('get_ticket', { id }, { quiet: true }); } catch (e) { toast(String(e?.message ?? e), true); return list(); }
+    if (!stillOpen()) return;
+    tk.viewing = id;
+    tk.watch = () => thread(id);
+    if (!back.isConnected) head.prepend(back);
+    title.textContent = `#${t.id} ${tcatName(t.category)}`;
+    const scroller = s.body;
+    setKids(s.body, h('div', { class: 'tdetail', style: 'padding-top:10px' },
+      h('div', { class: 'row' }, tstatusPill(t.status), h('span', { class: 'md-span' }, [`Sent ${hm(t.created_at)}`, t.urgency === 'urgent' && 'Urgent'].filter(Boolean).join(' · '))),
+      ticketThread(t)));
+    const reopenable = t.status !== 'done' || (t.can_reopen ?? (t.closed_at && Date.now() / 1000 - t.closed_at < 7 * 86400));
+    const comp = ticketComposer(t, [['Fixed now, thanks', 'done'], ['Still not working', () => (t.status === 'done' ? 'open' : null)], ['Done it', null]],
+      () => thread(id));
+    comp.style.cssText = 'width:100%;margin:0;padding:0;background:transparent;position:static';
+    setKids(s.foot, reopenable ? comp : h('div', { class: 'muted grow' }, 'Done over 7 days ago. Open a new ticket if it happens again.'));
+    scroller.scrollTop = scroller.scrollHeight;
+    pollTickets();
+  }
+  if (openId) await thread(openId); else await list();
+}
+
+/// Manage → Tickets (managers and admins): Open / Waiting / Done beside the open ticket.
+async function renderTickets() {
+  const tab = state.ticketTab ?? 'open';
+  const listEl = h('div', { class: 'md-list', role: 'list', 'aria-label': 'Tickets' });
+  const detail = h('div', { class: 'md-body' });
+  const counts = { open: tk.info?.open ?? null, waiting: tk.info?.waiting ?? null };
+  const label = (k, l) => (counts[k] ? `${l} · ${counts[k]}` : l);
+  const seg = sseg([['open', 'Open'], ['waiting', 'Waiting'], ['done', 'Done']], tab, (v) => { state.ticketTab = v; load(); }, 'Show');
+  const drawSeg = () => seg.setItems([['open', label('open', 'Open')], ['waiting', label('waiting', 'Waiting')], ['done', 'Done']]);
+  const empty = () => setKids(detail, h('div', { class: 'sgroup md-empty' }, emptyState({ icon: 'chat', title: 'Tap a ticket to read it' })));
+  const md = masterDetail({ cls: 'md-tickets', back: 'Tickets', list: [h('div', { class: 'md-tools' }, seg), listEl], detail });
+  const soundItem = () => h('button', { 'data-keep': '1', onclick: (e) => {
+    setPref(TONE_KEY, toneOn() ? '0' : '1');
+    e.currentTarget.textContent = soundText();
+  } }, soundText());
+  const soundText = () => `Sound for urgent tickets: ${toneOn() ? 'On' : 'Off'} (this device)`;
+  screen({ action: moreMenu('Tickets', () => [soundItem()]) }, md);
+  empty();
+  let loads = 0;
+  async function load() {
+    const mine = ++loads;
+    const cur = state.ticketTab ?? 'open';
+    const rows = await call('list_tickets', { tab: cur, limit: 100 });
+    if (mine !== loads || !listEl.isConnected) return;
+    // Tab counts: app_status (the poll); the shown tab's own list is the freshest.
+    counts.open = cur === 'open' ? rows.length : tk.info?.open ?? counts.open;
+    counts.waiting = cur === 'waiting' ? rows.length : tk.info?.waiting ?? counts.waiting;
+    drawSeg();
+    setKids(listEl, rows.length ? rows.map((t) => ticketRow(t, { tab: cur, on: t.id === state.ticketSel, onclick: () => show(t.id) }))
+      : emptyState({ icon: 'chat', ...{ open: { title: 'Nothing to answer', text: 'New tickets from staff show up here.' },
+        waiting: { title: 'Nothing waiting' }, done: { title: 'No done tickets in the last 30 days' } }[cur] }));
+  }
+  async function show(id, quietly = false) {
+    let t;
+    try { t = await call('get_ticket', { id }, { quiet: quietly }); } catch {
+      if (state.ticketSel === id) { state.ticketSel = null; tk.viewing = null; empty(); md.close(true); }
+      return;
+    }
+    if (!detail.isConnected) return;
+    state.ticketSel = id;
+    tk.viewing = id;
+    for (const r of listEl.querySelectorAll('.orow')) {
+      r.classList.toggle('on', Number(r.dataset.id) === id);
+      if (Number(r.dataset.id) === id) { r.classList.remove('unread'); r.querySelector('.udot')?.remove(); }
+    }
+    const keepScroll = quietly ? detail.closest('.md-main')?.scrollTop : null;
+    const typed = detail.querySelector('.composer textarea')?.value;
+    setKids(detail, ticketDetail(t, { refresh: async () => { await show(id, true); await load(); pollTickets(); }, deleted: async () => {
+      state.ticketSel = null; tk.viewing = null; empty(); md.close(true); await load(); pollTickets();
+    } }));
+    if (typed) detail.querySelector('.composer textarea').value = typed;
+    const main = detail.closest('.md-main');
+    if (main) main.scrollTop = keepScroll ?? 0;
+    md.show();
+    drawUrgent();
+  }
+  tk.watch = async () => { await load(); if (state.ticketSel && !document.activeElement?.closest?.('.composer')) await show(state.ticketSel, true); };
+  // Leaving the page: the ticket is no longer on screen.
+  const stop = setInterval(() => { if (!listEl.isConnected) { clearInterval(stop); tk.watch = null; tk.viewing = null; drawUrgent(); } }, 1000);
+  await load();
+  if (state.ticketSel) await show(state.ticketSel);
+}
+
+/// One ticket for managers and admins: status, the thread, what was sent with it, the reply box.
+function ticketDetail(t, { refresh, deleted }) {
+  const ctx = t.context ?? {};
+  const head = h('div', { class: 'thead' });
+  const statusSeg = h('span', { class: 'sseg', role: 'radiogroup', 'aria-label': 'Status' }, [['open', 'New'], ['in_progress', 'In progress'], ['done', 'Done']].map(([v, l]) =>
+    h('button', { type: 'button', role: 'radio', 'data-v': v, 'aria-checked': String(t.status === v), class: t.status === v ? 'on' : '', onclick: async (e) => {
+      if (t.status === v) return;
+      for (const b of statusSeg.children) { b.classList.toggle('on', b === e.currentTarget); b.setAttribute('aria-checked', String(b === e.currentTarget)); }
+      rowState(head, 'saving');
+      try { await call('set_ticket_status', { id: t.id, status: v }, { quiet: true }); rowState(head, 'saved'); await refresh(); } catch (err) {
+        rowState(head, 'idle');
+        for (const b of statusSeg.children) b.classList.toggle('on', b.dataset.v === t.status);
+        nudge(statusSeg);
+        toast(String(err?.message ?? err), true);
+      }
+    } }, l)));
+  const contextText = () => [`Ticket #${t.id} ${tcatName(t.category)}${t.urgency === 'urgent' ? ' (urgent)' : ''}`, `${t.created_by_name} · ${t.device} · ${friendlyTime(t.created_at)}`,
+    t.order_id && `Order #${t.order_id}${t.table_name ? ` · ${tableTitle(t.table_name)}` : ''}`, ctx.screen_label && `Screen: ${ctx.screen_label}`, ctx.version && `Version ${ctx.version}`,
+    ...(ctx.print_failures ?? []).map((f) => `Print failure${f.at ? ` ${hm(f.at)}` : ''}: ${f.message ?? f}`)].filter(Boolean).join('\n');
+  const delSheet = () => sheet({ title: `Delete ticket #${t.id} for good?`, danger: true, saveLabel: 'Delete', body: [h('p', { class: 'snote' }, 'Its messages go too.')],
+    onSave: async () => { await call('delete_ticket', { id: t.id }, { quiet: true }); toast(`Ticket #${t.id} deleted`); await deleted(); } });
+  setKids(head, h('h3', {}, `#${t.id} ${tcatName(t.category)} `, t.urgency === 'urgent' && h('span', { class: 'pill urgent', style: 'vertical-align:3px' }, 'Urgent')),
+    h('span', { class: 'sstate', role: 'status' }), statusSeg,
+    moreMenu(`ticket #${t.id}`, () => [
+      h('button', { onclick: () => navigator.clipboard?.writeText(contextText()).then(() => toast('Copied'), () => toast('Could not copy', true)) }, t.order_id ? 'Copy order # and context' : 'Copy context'),
+      h('button', { onclick: () => openLog(t.order_id ? { q: `#${t.order_id}`, at: t.created_at } : { at: t.created_at }) }, 'Related activity'),
+      isAdmin() && h('button', { class: 'danger', onclick: delSheet }, 'Delete ticket…'),
+    ]));
+  const fails = ctx.print_failures ?? [];
+  const terminal = ctx.terminal_label ?? (t.terminal === 'local' ? 'Main till' : 'Browser');
+  const crow = (label, value, { hint = null, btn = null, cls = '' } = {}) => srow({ label, hint, cls, ctl: btn ?? h('span', { class: 'srow-value' }, value) });
+  const ost = t.order_status !== undefined ? t.order_status : ctx.order_status;
+  const orderRow = t.order_id && crow('Order', null, { hint: [`#${t.order_id}`, tableTitle(t.table_name), t.order_id && (ost ? STATUS_LABEL[ost] ?? ost : ost === null ? 'Deleted' : null)].filter(Boolean).join(' · '),
+    btn: h('button', { onclick: act(() => openAnyOrder(t.order_id)) }, 'Open order') });
+  const actRow = t.order_id && crow(`Activity on #${t.order_id}`, '…', { cls: 'nav' });
+  if (actRow) {
+    actRow.hidden = true;
+    actRow.onclick = () => openLog({ q: `#${t.order_id}`, at: t.created_at });
+    invoke('order_activity', { orderId: t.order_id }).then((rows) => {
+      const n = rows.filter((r) => !r.action.startsWith('ticket.')).length;
+      if (!n) return;
+      actRow.hidden = false;
+      setKids(actRow.querySelector('.srow-ctl'), h('span', { class: 'srow-value' }, `${n} ${n === 1 ? 'entry' : 'entries'}`), h('span', { class: 'chev' }, icon('chev', 20)));
+    }).catch(() => {});
+  }
+  const failN = ctx.print_failure_count ?? fails.length;
+  const failText = fails.length ? `${fails[0].message ?? fails[0]}${failN > 1 ? ` · ${failN}× since ${hm(fails.at(-1).at ?? t.created_at)}` : ''}` : null;
+  return h('div', { class: 'tdetail' }, head,
+    h('div', { class: 'md-span' }, `${t.created_by_name} · ${t.device || terminal} · ${hm(t.created_at)} (${shortAge(t.created_at)}${shortAge(t.created_at) === 'now' ? '' : ' ago'})`),
+    ticketThread(t),
+    h('section', { class: 'ssec', style: 'margin-top:0' }, h('h3', { class: 'ssec-title' }, icon('paperclip', 16), ' Sent with it'),
+      h('div', { class: 'sgroup tctx' }, h('div', { class: 'tctx-grid' },
+        crow('Who', t.created_by_name),
+        crow('Device', `${t.device || '—'} (${terminal})`),
+        orderRow,
+        ctx.screen_label && crow('Screen', ctx.screen_label),
+        fails.length > 0 && crow('Print failures', null, { cls: 'bad', hint: failText,
+          btn: isAdmin() ? h('button', { onclick: () => openManage('g:printers') }, 'Printers') : h('span', { class: 'srow-value' }, String(failN)) }),
+        ctx.version && crow('Version', ctx.version),
+        actRow))),
+    ticketComposer(t, [['On my way', null], ['Try again now', null], ['Fixed, check it', 'done'], ['After service', null]], refresh));
+}
+
+/// An order from a ticket or the log: the order screen while open, else History.
+async function openAnyOrder(id) {
+  let o;
+  try { o = await invoke('get_order', { id }); } catch { return toast('This order was deleted', true); }
+  if (o.status === 'open') return openOrder(id);
+  state.histOpen = id;
+  if (state.view === 'history' && !state.orderId) return renderShell();
+  go('history');
+}
+
+// ---------- Activity log ----------
+
+/// Type filter (server-side groups, see list_activity `kind`).
+const ACT_KINDS = [['void', 'Cancels & voids'], ['money', 'Money'], ['login', 'Logins & PINs'], ['setup', 'Settings & menu'], ['shift', 'Shifts & day close'], ['other', 'Other']];
+const LOG_KEEP = [[30, '30 days'], [90, '90 days'], [180, '180 days'], [365, '1 year'], [0, 'Forever']];
+const LOG_KEEP_DEFAULT = 180;
+const PIN_RE = /\s*\((?:PIN of (.+?) #\d+|no PIN), \w+\)\s*$/;
+const ROLE_RE = /\((?:PIN of .+? #\d+|no PIN), (\w+)\)\s*$/;
+
+/// Open the Activity log with a search and/or the day of `at`.
+function openLog({ q = '', at = null } = {}) {
+  state.logFilter = { mode: at ? 'day' : 'today', day: at ? isoDate(new Date(at * 1000)) : today(), userId: null, kind: null, look: false, q };
+  if (state.view === 'log' && !state.orderId) return renderShell();
+  go('log');
+}
+
+/// One log entry as plain words: { ic, g (icon colour), text, sub, opens, look }.
+function actText(r) {
+  const d = r.detail ?? '';
+  const a = r.action;
+  const plain = d.replace(PIN_RE, '');
+  const who = r.user_name ?? (r.user_id != null ? 'Former staff' : /^(login\.failed|pin\.failed)$/.test(a) ? 'Someone' : 'System');
+  const o = r.order_id;
+  const title = r.order ? orderTitle(r.order) : r.order_title;
+  const at = title ? ` · ${title}` : '';
+  const term = r.device || termLabel(r.terminal);
+  const c = (s) => money(Number(s) || 0);
+  const ref = r.ref_name;
+  const order = o ? { order: o } : null;
+  let m;
+  const x = (ic, g, text, sub = who, opens = order) => ({ ic, g, text, sub, opens });
+  switch (a) {
+    case 'order.cancel': {
+      if (/^\d+ empty$/.test(d)) return x('orders', 'other', r.user_id == null ? `Closed automatically · #${o} (empty)` : `Closed empty order #${o}`);
+      if (/empty order\(s\) at day close/.test(d)) return x('orders', 'other', `Closed ${d}`, who, null);
+      const reason = plain.replace(/^\d+\s*/, '');
+      return x('ban', 'void', `Cancelled order #${o}${at}`, `${who}${reason ? ` · reason: ${reason}` : ''}`);
+    }
+    case 'order.void': return x('ban', 'void', `Voided paid order #${o}${r.order?.total_cents != null ? ` · ${money(r.order.total_cents)}` : ''}${at}`, `${who}${plain.replace(/^\d+\s*/, '') ? ` · ${plain.replace(/^\d+\s*/, '')}` : ''}`);
+    case 'order.delete': m = /^#(\d+) (\w+) total (-?\d+)\s*(.*)$/.exec(d);
+      return x('trash', 'void', m ? `Deleted order #${m[1]} (${m[2]}, ${c(m[3])})` : `Deleted order ${d}`, `${who}${m?.[4] ? ` · ${m[4]}` : ''}`, null);
+    case 'order.item_void': m = /^order \d+ (.+) x(\d+)$/.exec(plain);
+      return x('ban', 'void', m ? `Removed ${m[2]}× ${m[1]} (sent) · #${o}` : `Removed a sent dish · #${o}`, `${who}${at}`);
+    case 'order.payment_removed': m = /payment \d+ (\w+) (-?\d+) tip (-?\d+) taken by (.+)$/.exec(plain);
+      return x('coin', 'money', m ? `Took back a ${m[1]} payment of ${c(m[2])} · #${o}` : `Took back a payment · #${o}`, `${who}${m ? ` · taken by ${m[4]}` : ''}`);
+    case 'order.payment_other': m = /^order \d+ (-?\d+)/.exec(plain); return x('coin', 'money', `Other payment ${m ? c(m[1]) : ''} · #${o}`);
+    case 'order.part_payment': m = /^order \d+ (\w+) (-?\d+)/.exec(d); return x('coin', 'money', m ? `Part payment ${c(m[2])} (${m[1]}) · #${o}` : `Part payment · #${o}`);
+    case 'order.discount': m = /^order \d+ (.+) (-?\d+)$/.exec(d); return x('tag', 'money', m ? `Discount ${c(m[2])} on ${m[1]} · #${o}` : `Discount · #${o}`, `${who}${at}`);
+    case 'order.discount_approved': m = /^order \d+ (.+) (-?\d+) for (.+)$/.exec(d);
+      return x('tag', 'money', m ? `Discount ${c(m[2])} on ${m[1]} · #${o}` : `Discount · #${o}`);
+    case 'order.price': m = /^order \d+ (.+) (-?\d+) -> (-?\d+) by (.+)$/.exec(d);
+      return x('tag', 'money', m ? `Price of ${m[1]} ${c(m[2])} → ${c(m[3])} · #${o}` : `Changed a price · #${o}`);
+    case 'order.price_qty_approved': m = /^order \d+ (.+) x(\d+) -> x(\d+) at (-?\d+) for (.+)$/.exec(d);
+      return x('tag', 'money', m ? `${m[1]} ×${m[2]} → ×${m[3]} at a changed price ${c(m[4])} · #${o}` : `More at a changed price · #${o}`);
+    case 'order.open_item': m = /^order \d+ (.+) (-?\d+)$/.exec(plain); return x('plus', 'money', m ? `Open item ${m[1]} ${c(m[2])} · #${o}` : `Open item · #${o}`);
+    case 'order.service': m = /^\d+ (-?\d+) \(was (-?\d+)\)/.exec(plain);
+      return x('receipt', 'money', m ? `Service charge ${pct(+m[1])}% (was ${pct(+m[2])}%) · #${o}` : `Service charge · #${o}`);
+    case 'order.tax': {
+      m = /^\d+ (Some\((\d+)\)|None) \(was (Some\((\d+)\)|None)\)/.exec(plain);
+      const rate = (s, n) => (s === 'None' ? 'menu rates' : `${pct(+n)}%`);
+      return x('receipt', 'money', m ? `Tax for the whole order ${rate(m[1], m[2])} (was ${rate(m[3], m[4])}) · #${o}` : `Tax for the whole order · #${o}`);
+    }
+    case 'drawer.open': return d === 'no sale' ? { ...x('drawer', 'money', 'Opened the drawer · no sale', [who, term].filter(Boolean).join(' · '), null), look: true }
+      : x('drawer', 'money', `Drawer opened for cash · #${o}`);
+    case 'order.move': return x('move', 'other', `Moved #${o} to ${ref ? `table ${ref}` : 'another table'}`);
+    case 'order.merge': m = /-> order (\d+)/.exec(d); return x('move', 'other', `Joined #${o} onto #${m?.[1] ?? '?'}`, who, m ? { order: +m[1] } : order);
+    case 'order.move_items': m = /-> order (\d+): (\d+) dish/.exec(d); return x('move', 'other', m ? `Moved ${m[2]} dishes from #${o} to #${m[1]}` : `Moved dishes from #${o}`, who, m ? { order: +m[1] } : order);
+    case 'kitchen.main_course': return x('chef', 'other', `Called mains · #${o}`);
+    case 'login': case 'logout': return x('user', 'login', `${a === 'login' ? 'Logged in' : 'Logged out'}${r.fold > 1 ? ` ×${r.fold}` : ''}`,
+      [who, term, r.fold > 1 && `first ${hm(r.foldEnd)}`].filter(Boolean).join(' · '), null);
+    case 'login.failed': return x('key', 'login', r.fold > 1 ? `Wrong PIN ×${r.fold}` : 'Wrong PIN at login', ['Someone', term].filter(Boolean).join(' · '), null);
+    case 'pin.failed': return x('key', 'login', r.fold > 1 ? `Wrong manager PIN ×${r.fold}` : 'Wrong manager PIN', ['Someone', term].filter(Boolean).join(' · '), null);
+    case 'reset.bad_pin': return x('key', 'login', 'Wrong PIN on Reset data', who, null);
+    case 'log.bad_pin': return x('key', 'login', 'Wrong PIN on Clear log', who, null);
+    case 'user.reset_pin': return x('key', 'login', `Reset the PIN of ${ref ?? `#${d}`}`, who, { item: 'p:users' });
+    case 'setup.admin_created': return x('user', 'login', 'Created the first admin', who, null);
+    case 'shift.open': m = /float (-?\d+)/.exec(d); return x('shift', 'shift', `Started the shift${m ? ` · float ${c(m[1])}` : ''}`, who, { item: 'p:shift' });
+    case 'shift.cash': m = /^shift \d+ (in|out) (-?\d+)\s*(.*)$/.exec(d);
+      return x('cash', 'shift', m ? `Cash ${m[1]} ${c(m[2])}${m[3] ? ` · ${m[3]}` : ''}` : 'Cash in / out', who, { item: 'p:shift' });
+    case 'shift.close': {
+      m = /counted (-?\d+) expected (-?\d+)/.exec(d);
+      const diff = m ? +m[1] - +m[2] : 0;
+      return { ...x('shift', 'shift', m ? `Closed the shift · counted ${c(m[1])} (expected ${c(m[2])})` : 'Closed the shift', who, { item: 'p:shift' }),
+        bad: diff ? ` · ${money(Math.abs(diff))} ${diff < 0 ? 'short' : 'over'}` : null };
+    }
+    case 'day.close': m = /^(.+?): (\d+) orders, total (-?\d+)/.exec(d);
+      return x('reports', 'shift', m ? `Closed the day ${m[1]} · ${m[2]} orders · ${c(m[3])}` : `Closed the day ${d}`, who, { item: 'p:reports' });
+    case 'setting.update': {
+      const e = MANAGE_INDEX.find((i) => i.row === d);
+      return x('settings', 'setup', `Changed ${e ? e.label : d}`, who, e && needOk(e.need) ? { item: e.item, row: e.row } : null);
+    }
+    case 'printer.routes': case 'printer.kitchen': case 'printer.receipt':
+      return x('printer', 'setup', `Changed printer settings (${a.slice(8)})`, who, isAdmin() ? { item: 'g:printers' } : null);
+    case 'service.settings': return x('settings', 'setup', 'Changed the service charge', who, isAdmin() ? { item: 'g:payments', row: 'service' } : null);
+    case 'server.settings': return x('settings', 'setup', 'Changed the network server', who, isAdmin() ? { item: 'g:devices', row: 'server' } : null);
+    case 'teams.save': return x('settings', 'setup', 'Changed kitchen teams', who, { item: 'g:kitchen', row: 'teams' });
+    case 'channels.save': return x('settings', 'setup', 'Changed delivery apps', who, isAdmin() ? { item: 'g:delivery' } : null);
+    case 'device.autostart': return x('monitor', 'setup', `Start with Windows ${d}`, who, isAdmin() ? { item: 'g:devices', row: 'autostart' } : null);
+    case 'user.create': case 'user.update': {
+      m = /^\d+ (.+?) (admin|manager|staff)(.*)$/.exec(d);
+      const name = m?.[1] ?? ref ?? '';
+      return x('users', 'setup', a === 'user.create' ? `Added staff member ${name}${m ? ` (${ROLE_LABEL[m[2]] ?? m[2]})` : ''}` : `Changed staff member ${name}${/active=false/.test(d) ? ' · turned off' : ''}`,
+        who, isAdmin() ? { item: 'p:users' } : null);
+    }
+    case 'customer.create': case 'customer.update': case 'customer.delete':
+      return x('customers', 'setup', `${{ create: 'Added', update: 'Changed', delete: 'Deleted' }[a.slice(9)]} customer ${ref ?? `#${d}`}`, who, { item: 'p:customers' });
+    case 'floor.create': case 'floor.update': case 'floor.delete': case 'floor.layout': {
+      const name = ref ?? d.replace(/^\d+\s*/, '');
+      return x('plan', 'setup', a === 'floor.layout' ? 'Changed the floor plan' : `${{ create: 'Added', update: 'Renamed', delete: 'Deleted' }[a.slice(6)]} floor ${name}`, who, { item: 'p:plan' });
+    }
+    case 'backup': return x('database', 'other', 'Made a backup', who, isAdmin() ? { item: 'g:data' } : null);
+    case 'backup.restore': return x('database', 'other', `Restored a backup${d ? ` ${d}` : ''}`, 'System', null);
+    case 'data.reset': {
+      const names = [['sales', 'sales'], ['customers', 'customers'], ['menu', 'menu'], ['floor_plan', 'floor plan'], ['staff', 'staff'], ['settings', 'settings']];
+      const on = names.filter(([k]) => new RegExp(`${k}: (true|Some)`).test(d)).map(([, n]) => n);
+      return x('trash', 'other', `Reset data${on.length ? `: ${on.join(', ')}` : ''}`, who, null);
+    }
+    case 'log.cleared': case 'log.auto_cleared': {
+      let j = {};
+      try { j = JSON.parse(d); } catch {}
+      const day = (t) => (t ? new Date((typeof t === 'number' ? t : Date.parse(t) / 1000) * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '?');
+      const n = Number(j.count ?? 0).toLocaleString();
+      if (a === 'log.auto_cleared') return { ic: 'lock', g: 'cleared', cleared: true, text: `Cleared ${n} entries older than ${day(j.cutoff)} automatically${j.tickets ? ` · ${j.tickets} done tickets` : ''}`,
+        sub: `System${j.days ? ` · keep for ${j.days} days` : ''} · cannot be deleted`, opens: null };
+      return { ic: 'lock', g: 'cleared', cleared: true, text: j.kind === 'selected' ? `Deleted ${n} selected ${j.count === 1 ? 'entry' : 'entries'}` : `Cleared ${n} log entries · ${day(j.from)} to ${day(j.to)}`,
+        sub: `${who}${j.csv ? ' · CSV saved first' : ''} · cannot be deleted`, opens: null };
+    }
+    default: break;
+  }
+  if (a.startsWith('ticket.')) {
+    m = /^#(\d+)\s*(.*)$/.exec(d);
+    const id = m ? +m[1] : null;
+    const rest = m?.[2] ?? d;
+    const text = a === 'ticket.create' ? `Ticket #${id} · ${tcatName(rest.split(' ')[0])}${/urgent/.test(rest) ? ' · Urgent' : ''}`
+      : a === 'ticket.status' ? `Ticket #${id} → ${TSTATUS[rest.split('->').pop().trim()]?.[0] ?? rest}` : a === 'ticket.delete' ? `Deleted ticket #${id}` : `Ticket #${id}`;
+    return x('chat', 'system', text, who, id && a !== 'ticket.delete' ? { ticket: id } : null);
+  }
+  if (a.startsWith('product.')) {
+    m = /^(\d+) (.*)$/.exec(d);
+    const name = ref ?? m?.[2] ?? d;
+    const flag = { starter: 'starter', prep: 'prep ahead', dessert: 'dessert', drink: 'drink', set_only: 'set only' }[a.slice(8)];
+    const text = a === 'product.sold_out' ? `Marked ${ref ?? `#${m?.[1]}`} ${/true/.test(d) ? 'sold out' : 'back on sale'}`
+      : flag ? `${ref ?? `#${m?.[1]}`}: ${flag} ${/true/.test(d) ? 'on' : 'off'}`
+        : `${{ create: 'Added', update: 'Changed', delete: 'Deleted', duplicate: 'Copied' }[a.slice(8)] ?? 'Changed'} menu item ${name}`;
+    return x(a === 'product.sold_out' ? 'tag' : 'menuAdmin', 'setup', text, who, { item: 'p:menuAdmin' });
+  }
+  if (a.startsWith('category.')) {
+    m = /^(\d+) (.*?)( active=.*)?$/.exec(d);
+    const name = ref ?? m?.[2] ?? '';
+    return x('menuAdmin', 'setup', `${{ create: 'Added', update: 'Changed', delete: 'Deleted' }[a.slice(9)] ?? 'Changed'} category ${a.slice(9) === 'create' || a.slice(9) === 'update' ? name : ref ?? ''}`.trim(), who, { item: 'p:menuAdmin' });
+  }
+  if (a.startsWith('options.') || a.startsWith('menu.')) {
+    const text = { 'menu.variants': 'Changed sizes', 'menu.set': 'Changed set menus', 'menu.import': 'Pasted a menu', 'menu.restore': 'Restored a menu backup',
+      'menu.apply_default_tax': `Applied the default tax to ${/^(\d+)/.exec(d)?.[1] ?? 'the'} items` }[a] ?? 'Changed option groups';
+    return x('menuAdmin', 'setup', text, who, { item: 'p:menuAdmin' });
+  }
+  return { ic: 'info', g: 'other', text: a, sub: d, mono: true, opens: null };
+}
+
+/// Where a row was done: the main till or a browser (`terminal`: 'local' / 'web-xxxxxx').
+const termLabel = (t) => (!t ? null : t === 'local' ? 'Main till' : t.startsWith('web') ? 'Browser' : t);
+
+/// Fold failed PINs in a row (same device, within 2 minutes) into one "Wrong PIN ×3".
+function foldPins(rows) {
+  const out = [];
+  // Logged in / out: one row per person, device and day ("Logged in ×5", the newest time).
+  const seen = new Map();
+  for (const r of rows) {
+    if (/^log(in|out)$/.test(r.action) && r.user_id != null) {
+      const key = `${r.action}|${r.user_id}|${r.device ?? r.terminal ?? ''}|${r.day ?? isoDate(new Date(r.at * 1000))}`;
+      const first = seen.get(key);
+      if (first) { first.fold = (first.fold ?? 1) + 1; first.foldEnd = r.at; first.foldIds.push(r.id); continue; }
+      const row = { ...r, foldEnd: r.at, foldIds: [r.id] };
+      seen.set(key, row);
+      out.push(row);
+      continue;
+    }
+    const p = out.at(-1);
+    if (p && /^(login|pin)\.failed$/.test(r.action) && p.action === r.action && p.terminal === r.terminal && p.foldEnd - r.at <= 120) {
+      p.fold = (p.fold ?? 1) + 1;
+      p.foldEnd = r.at;
+      p.foldIds.push(r.id);
+      continue;
+    }
+    out.push({ ...r, foldEnd: r.at, foldIds: [r.id] });
+  }
+  return out;
+}
+
+/// One row: time, icon, the words, "PIN: Mia", › when it opens something.
+function actRow(r, { compact = false, selecting = false, checked = false, onToggle = null, here = null } = {}) {
+  const t = actText(r);
+  if (here != null) {
+    if (t.opens?.order === here) t.opens = null;
+    t.text = t.text.replace(new RegExp(` · #${here}$`), '');
+  }
+  const cleared = t.cleared || r.cleared;
+  // The server names whose PIN approved it (old rows: from the detail's "(PIN of …)").
+  const approver = r.approver_name !== undefined ? (r.approver_name && r.approver_name !== r.user_name ? r.approver_name : null) : PIN_RE.exec(r.detail ?? '')?.[1] ?? null;
+  const look = !cleared && (r.look || t.look);
+  const opens = !selecting && t.opens;
+  const open = () => {
+    if (!opens) return;
+    if (opens.order) return openAnyOrder(opens.order);
+    if (opens.ticket) return openTicket(opens.ticket);
+    if (opens.item) openManage(opens.item, opens.row ?? null);
+  };
+  const box = selecting && h('input', { type: 'checkbox', checked, disabled: !!cleared, 'aria-label': 'Select', tabindex: -1 });
+  const sub = t.mono ? h('small', { class: 'mono' }, t.sub) : h('small', {}, h('b', {}, t.sub.split(' · ')[0]), t.sub.includes(' · ') ? ` · ${t.sub.split(' · ').slice(1).join(' · ')}` : '');
+  const row = h('div', { class: `arow${opens ? ' link' : ''}${look ? ' look' : ''}${cleared ? ' cleared' : ''}${selecting ? ' sel' : ''}${selecting && cleared ? ' locked' : ''}${checked ? ' checked' : ''}`,
+    role: 'listitem', tabindex: opens || (selecting && !cleared) ? 0 : null,
+    onclick: () => { if (selecting) { if (!cleared) onToggle?.(); } else open(); },
+    onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); row.click(); } } },
+  box, h('span', { class: 'at' }, hm(r.at)),
+  h('span', { class: `aic g-${cleared ? 'system' : t.g}` }, icon(cleared ? 'lock' : t.ic, compact ? 16 : 20)),
+  h('span', { class: 'atext' }, h('strong', {}, t.text, t.bad && h('span', { class: 'bad-text' }, t.bad)), sub),
+  h('span', { class: 'aend' }, approver && h('span', { class: 'pill pin' }, `PIN: ${approver}`), opens && h('span', { class: 'chev' }, icon('chev', 18))));
+  return row;
+}
+
+/// The dates of the log (and History): Today = the open business day, Yesterday =
+/// the day closed last, 7 days, or one picked calendar day. { from, to, span }.
+const OPEN_END = 4102444800;
+async function logRange(mode, picked) {
+  const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d; };
+  const day = await call('business_day');
+  logRange.today = day.date;
+  logRange.yesterday = day.prev_date;
+  if (mode === 'day') { const [from, to] = dayRange(picked); return { from, to, span: `${dayLabel(picked)} · midnight to midnight` }; }
+  const stale = Date.now() / 1000 - day.since > 36 * 3600;
+  if (stale) {
+    const [from, to] = mode === 'week' ? [dayRange(isoDate(daysAgo(6)))[0], OPEN_END] : mode === 'today' ? [dayRange(today())[0], OPEN_END] : dayRange(isoDate(daysAgo(1)));
+    return { from, to, span: `Day not closed since ${friendlyTime(day.since)}: calendar days` };
+  }
+  if (mode === 'today') return { from: day.since, to: OPEN_END, span: `Since ${hm(day.since)} (business day)` };
+  if (mode === 'yesterday') return { from: day.prev_since, to: day.since, span: `${day.prev_date ? dayLabel(day.prev_date) : 'Previous day'} · ${friendlyTime(day.prev_since)} to ${friendlyTime(day.since)}` };
+  return { from: day.week_since, to: OPEN_END, span: `Since ${friendlyTime(day.week_since)}` };
+}
+
+/// Manage → Activity log (managers and admins). Admins can also delete and clear.
+async function renderActivity() {
+  const f = state.logFilter ??= { mode: 'today', day: today(), userId: null, kind: null, look: false, q: '' };
+  let rows = [], next = null, total = null, lookCount = 0, selecting = false;
+  const sel = new Set();
+  let staff = null;
+  const listEl = h('div', { class: 'alog', role: 'list', 'aria-label': 'Activity' });
+  const span = h('div', { class: 'alog-span' });
+  const seg = sseg([['today', 'Today'], ['yesterday', 'Yesterday'], ['week', '7 days']], f.mode === 'day' ? null : f.mode, (v) => { f.mode = v; load(); }, 'Dates');
+  const dayBtn = h('button', { class: 'daybtn', 'aria-label': 'Pick a day', onclick: () => {
+    const date = h('input', { type: 'date', value: f.day, max: today(), 'aria-label': 'Day' });
+    const s = sheet({ title: 'Show one day', saveLabel: 'Show', body: ssec(null, [srow({ label: 'Day', ctl: date, cls: 'text-row' })]), onSave: () => {
+      if (!date.value) return 'Pick a day';
+      f.day = date.value; f.mode = 'day'; load();
+    } });
+    date.addEventListener('keydown', (e) => { if (e.key === 'Enter') s.save.click(); });
+  } });
+  const fbtn = (ic, text) => h('button', { class: 'fbtn' }, ic && icon(ic, 18), h('span', {}, text), h('span', { class: 'chev' }, icon('chev', 14)));
+  const whoBtn = fbtn('user', 'Everyone');
+  const typeBtn = fbtn(null, 'All types');
+  const lookBtn = h('button', { class: 'fbtn look', 'aria-pressed': 'false', onclick: () => { f.look = !f.look; load(); } }, icon('alert', 18), 'Needs a look', h('span', { class: 'n', hidden: true }));
+  const find = h('input', { type: 'search', placeholder: 'Order #, table or name', 'aria-label': 'Search the log', enterkeyhint: 'search', value: f.q });
+  find.addEventListener('pointerup', () => tapFocus(find));
+  let ft;
+  find.addEventListener('input', () => { clearTimeout(ft); ft = setTimeout(() => { f.q = find.value.trim(); load(); }, 250); });
+  const whoItems = () => {
+    const on = (staff ?? []).filter((u) => u.active), off = (staff ?? []).filter((u) => !u.active);
+    return [{ v: null, label: 'Everyone', on: f.userId == null }, ...on.map((u) => ({ v: u.id, label: u.name, on: f.userId === u.id })),
+      off.length && '-', ...off.map((u) => ({ v: u.id, label: u.name, on: f.userId === u.id }))].filter(Boolean);
+  };
+  const tools = h('div', { class: 'alog-tools' }, seg, dayBtn, whoBtn, typeBtn, lookBtn, h('label', { class: 'searchbox' }, icon('search', 20), find));
+  // Who / type menus: built on each open, so the ✓ follows the filter.
+  const menuFor = (btn, title, items, pick) => {
+    btn.onclick = async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (btn === whoBtn && !staff) staff = await call('activity_staff').catch(() => []);
+      const list = items();
+      const choose = (v) => { closeInfoPop(); if (document.querySelector('#modal .sheet')) closeModal(); pick(v); };
+      const make = () => h('div', { class: 'pop-menu' }, list.map((it) => (it === '-' ? h('hr') : h('button', { class: it.on ? 'on' : '', onclick: () => choose(it.v) }, it.on ? icon('check', 16) : null, it.label))));
+      if (innerWidth <= 700) return sheet({ title, body: make() });
+      const mine = openPop?.btn === btn;
+      closeInfoPop();
+      if (mine) return;
+      const pop = h('div', { class: 'pop pop-menu-host', role: 'menu', 'aria-label': title }, make());
+      document.body.append(pop);
+      const place = () => { const r = btn.getBoundingClientRect(); pop.style.left = `${Math.max(16, Math.min(r.left, innerWidth - pop.offsetWidth - 16))}px`; pop.style.top = `${Math.min(r.bottom + 2, innerHeight - pop.offsetHeight - 8)}px`; };
+      place();
+      btn.setAttribute('aria-expanded', 'true');
+      openPop = { btn, pop, place, at: Date.now() };
+    };
+  };
+  menuFor(whoBtn, 'Who', whoItems, (v) => { f.userId = v; load(); });
+  menuFor(typeBtn, 'Type', () => [{ v: null, label: 'All types', on: !f.kind }, ...ACT_KINDS.map(([v, l]) => ({ v, label: l, on: f.kind === v }))], (v) => { f.kind = v; load(); });
+  const selCount = h('strong', {});
+  const selBar = h('div', { class: 'savebar', hidden: true, role: 'region', 'aria-label': 'Selected entries' }, selCount,
+    h('button', { class: 'ghost', onclick: () => setSelecting(false) }, 'Cancel'),
+    h('button', { class: 'danger solid', onclick: () => deleteSelected() }, 'Delete…'));
+  const setSelecting = (on) => { selecting = on; sel.clear(); draw(); };
+  const selBtn = isAdmin() && h('button', { class: 'sel-btn', onclick: () => setSelecting(!selecting) }, 'Select…');
+  const menu = isAdmin() && moreMenu('Activity log', () => [
+    h('button', { class: 'phone-only-item', onclick: () => setSelecting(!selecting) }, selecting ? 'Stop selecting' : 'Select…'),
+    h('button', { onclick: () => clearSheet() }, 'Clear older entries…'),
+    h('button', { onclick: act(() => exportCsv()) }, 'Export CSV…'),
+    h('button', { onclick: () => openManage('g:data', 'log_keep_days') }, `Keep for ${keepLabel(state.logKeep)} ›`),
+  ]);
+  screen({ action: isAdmin() ? [selBtn, menu] : null }, h('div', { class: 'stack' }, tools, span, listEl, selBar));
+  if (isAdmin()) call('get_setting', { key: 'log_keep_days' }, { quiet: true }).then((v) => { state.logKeep = v == null || v === '' ? LOG_KEEP_DEFAULT : Number(v); }).catch(() => {});
+
+  const query = (extra = {}) => ({ from: range.from, to: range.to, userId: f.userId, kind: f.kind, look: f.look || null, q: f.q || null, ...extra });
+  let range = { from: 0, to: OPEN_END }, days = [];
+  let loads = 0;
+  async function load() {
+    const mine = ++loads;
+    seg.set(f.mode === 'day' ? null : f.mode);
+    dayBtn.classList.toggle('on', f.mode === 'day');
+    setKids(dayBtn, icon('calendar', 20), f.mode === 'day' && h('span', {}, dayLabel(f.day)));
+    const wl = staff?.find((u) => u.id === f.userId)?.name;
+    whoBtn.classList.toggle('on', f.userId != null);
+    setKids(whoBtn, icon('user', 18), h('span', {}, f.userId == null ? 'Everyone' : wl ?? 'One person'), h('span', { class: 'chev' }, icon('chev', 14)));
+    typeBtn.classList.toggle('on', !!f.kind);
+    setKids(typeBtn, h('span', {}, f.kind ? ACT_KINDS.find(([v]) => v === f.kind)[1] : 'All types'), h('span', { class: 'chev' }, icon('chev', 14)));
+    lookBtn.classList.toggle('on', f.look);
+    lookBtn.setAttribute('aria-pressed', String(f.look));
+    range = await logRange(f.mode, f.day);
+    const r = await call('list_activity', { ...query(), limit: 200 });
+    if (mine !== loads || !listEl.isConnected) return;
+    rows = r.rows ?? [];
+    next = r.next ?? null;
+    days = r.days ?? [];
+    total = r.total ?? (days.length ? days.reduce((n, d) => n + d.count, 0) : null);
+    lookCount = r.look_count ?? 0;
+    const n = lookBtn.querySelector('.n');
+    n.hidden = !lookCount;
+    n.textContent = lookCount;
+    span.textContent = [f.mode === 'week' && f.look ? '7 days' : range.span, f.look && 'Needs a look', `${(total ?? rows.length).toLocaleString()} ${(total ?? rows.length) === 1 ? 'entry' : 'entries'}`].filter(Boolean).join(' · ');
+    sel.clear();
+    draw();
+  }
+  async function more(btn) {
+    btn.disabled = true;
+    try {
+      const r = await call('list_activity', { ...query(), before: next, limit: 200 });
+      rows.push(...(r.rows ?? []));
+      next = r.next ?? null;
+      draw();
+    } finally { btn.disabled = false; }
+  }
+  function draw() {
+    selBar.hidden = !selecting;
+    selCount.textContent = `${sel.size} selected`;
+    selBar.querySelector('.danger').disabled = !sel.size;
+    if (selBtn) selBtn.textContent = selecting ? 'Done' : 'Select…';
+    if (!rows.length) {
+      const filtered = f.userId != null || f.kind || f.look || f.q;
+      return setKids(listEl, filtered
+        ? emptyState({ icon: 'search', title: 'Nothing matches', action: h('button', { onclick: () => { Object.assign(f, { userId: null, kind: null, look: false, q: '' }); find.value = ''; load(); } }, 'Clear filters') })
+        : emptyState({ icon: 'activity', title: 'No activity', text: 'Nothing logged on this day.' }));
+    }
+    const out = [];
+    let lastDay = null;
+    const tday = logRange.today ?? today(), yest = logRange.yesterday ?? isoDate(new Date(Date.now() - 86400000));
+    for (const r of foldPins(rows)) {
+      // The business day (as History), else the calendar day.
+      const d = r.day ?? isoDate(new Date(r.at * 1000));
+      if (d !== lastDay) {
+        lastDay = d;
+        const n = days.find((x) => x.date === d)?.count;
+        const name = d === tday ? `Today · ${dayLabel(d)}` : d === yest ? `Yesterday · ${dayLabel(d)}` : dayLabel(d);
+        out.push(h('div', { class: 'aday' }, h('span', {}, name), n != null && h('span', {}, `${n.toLocaleString()} ${n === 1 ? 'entry' : 'entries'}`)));
+      }
+      const ids = r.foldIds;
+      out.push(actRow(r, { selecting, checked: ids.every((i) => sel.has(i)), onToggle: () => {
+        const on = !ids.every((i) => sel.has(i));
+        for (const i of ids) { if (on) sel.add(i); else sel.delete(i); }
+        draw();
+      } }));
+    }
+    const left = total != null ? total - rows.length : null;
+    if (next) out.push(h('button', { class: 'ghost olist-more alog-more', onclick: (e) => more(e.currentTarget) }, left > 0 ? `Show more (${left.toLocaleString()})` : 'Show more'));
+    const keep = listEl.closest('.mdetail')?.scrollTop;
+    setKids(listEl, out);
+    if (keep != null) listEl.closest('.mdetail').scrollTop = keep;
+  }
+  function deleteSelected() {
+    const ids = [...sel];
+    if (!ids.length) return;
+    const pin = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'off', 'aria-label': 'Your PIN' });
+    pin.addEventListener('pointerup', () => tapFocus(pin));
+    const n = ids.length;
+    const s = sheet({ title: `Delete ${n} ${n === 1 ? 'entry' : 'entries'}?`, danger: true, saveLabel: `Delete ${n}`, body: [
+      h('p', { class: 'snote' }, `A line saying you deleted ${n} ${n === 1 ? 'entry' : 'entries'} stays in the log.`),
+      ssec(null, [srow({ label: 'Your PIN', cls: 'text-row', ctl: pin })]),
+    ], onSave: async () => {
+      const r = await call('delete_activity', { ids, pin: pin.value }, { quiet: true }).catch((e) => { throw pinError(String(e?.message ?? e)); });
+      toast(`${(r?.deleted ?? n).toLocaleString()} ${(r?.deleted ?? n) === 1 ? 'entry' : 'entries'} deleted`);
+      selecting = false;
+      await load();
+    } });
+    s.save.prepend(icon('trash', 20));
+    const check = () => { s.save.disabled = !/^\d{4,8}$/.test(pin.value); };
+    pin.addEventListener('input', check);
+    check();
+  }
+  async function exportCsv(extra = null) {
+    const r = await call('export_activity', { ...(extra ?? query()), save: !state.remote });
+    return saveCsv(r);
+  }
+  function clearSheet() {
+    const keep = state.logKeep ?? LOG_KEEP_DEFAULT;
+    const def = new Date(); def.setDate(def.getDate() - (keep || 90));
+    const date = h('input', { type: 'date', value: isoDate(def), max: today(), 'aria-label': 'Older than' });
+    const sumN = h('dd', {}, '…'), sumKept = h('dd', {}, '…');
+    const csv = switchRow({ label: 'Save a CSV copy first', hint: state.remote ? 'Downloads to this device' : 'To Downloads on this PC', value: true, onChange: () => check() });
+    const word = h('input', { class: 'typed', placeholder: 'DELETE', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', 'aria-label': 'Type DELETE' });
+    const pin = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'off', 'aria-label': 'Your PIN' });
+    for (const i of [word, pin]) i.addEventListener('pointerup', () => tapFocus(i));
+    let count = 0;
+    const before = () => dayRange(date.value || today())[0];
+    const s = sheet({ title: 'Clear older entries', danger: true, saveLabel: 'Delete', body: [
+      h('section', { class: 'ssec' }, h('div', { class: 'sgroup' }, srow({ label: 'Older than', cls: 'text-row', ctl: date }),
+        h('dl', { class: 'dsum' }, h('dt', {}, 'Entries'), sumN, h('dt', {}, 'Kept'), sumKept))),
+      ssec(null, [csv]),
+      ssec('To confirm', [srow({ label: 'Type DELETE', cls: 'text-row', ctl: word }), srow({ label: 'Your PIN', cls: 'text-row', ctl: pin })],
+        'A line saying who cleared what stays in the log for good.'),
+    ], onSave: async () => {
+      let saved = null;
+      if (csv.input.checked) {
+        try { saved = await exportCsvRaw({ before: before() }); } catch (e) { throw `CSV not saved, nothing deleted: ${String(e?.message ?? e)}`; }
+      }
+      const r = await call('clear_activity', { before: before(), pin: pin.value, confirm: word.value.trim().toUpperCase(), csv: !!saved }, { quiet: true })
+        .catch((e) => { throw pinError(String(e?.message ?? e)); });
+      const n = r?.deleted ?? count;
+      toast(`${n.toLocaleString()} ${n === 1 ? 'entry' : 'entries'} deleted${saved ? ` · CSV saved${state.remote ? '' : ' to Downloads'}` : ''}`, false, 4000);
+      await load();
+    } });
+    s.save.prepend(icon('trash', 20));
+    const dd = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    let seq = 0;
+    const summary = async () => {
+      const mine = ++seq;
+      sumN.textContent = '…';
+      const r = await call('activity_count', { before: before() }, { quiet: true }).catch(() => null);
+      if (mine !== seq) return;
+      count = r?.count ?? 0;
+      sumN.textContent = r ? (count ? `${count.toLocaleString()} · ${dd(r.from)} to ${dd(r.to)}` : 'None') : '?';
+      sumKept.textContent = `Clearings, and everything from ${dd(before())}`;
+      check();
+    };
+    function check() {
+      setKids(s.save, icon('trash', 20), `Delete ${count.toLocaleString()}`);
+      s.save.disabled = !(count > 0 && word.value.trim().toUpperCase() === 'DELETE' && /^\d{4,8}$/.test(pin.value));
+    }
+    date.addEventListener('change', summary);
+    word.addEventListener('input', check);
+    pin.addEventListener('input', check);
+    summary();
+  }
+  async function exportCsvRaw(args) {
+    const r = await call('export_activity', { ...args, save: !state.remote }, { quiet: true });
+    return saveCsv(r, true);
+  }
+  await load();
+}
+const keepLabel = (d) => LOG_KEEP.find(([v]) => v === (d ?? LOG_KEEP_DEFAULT))?.[1] ?? `${d} days`;
+/// export_activity: the desktop app has saved the file (its path back); a browser gets the CSV text to download.
+function saveCsv(r, quiet = false) {
+  if (r && typeof r === 'object' && r.path) { if (!quiet) toast(`CSV saved: ${r.path}`, false, 5000); return r.path; }
+  const text = typeof r === 'string' ? r : r?.csv ?? '';
+  const name = r?.file_name ?? `activity-${today()}.csv`;
+  const a = h('a', { href: URL.createObjectURL(new Blob([text.startsWith('﻿') ? text : `﻿${text}`], { type: 'text/csv;charset=utf-8' })), download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  if (!quiet) toast('CSV downloaded');
+  return name;
+}
+
+/// History order detail (managers and admins): who paid / cancelled / voided it, and its Activity.
+function orderWho(o) {
+  if (!isManager()) return null;
+  const by = o.closed_by_name ?? o.paid_by_name;
+  if (!by || o.status === 'open') return null;
+  const t = o.closed_at ?? o.paid_at;
+  const apn = o.close_approver_name ?? o.approver_name;
+  const ap = apn && apn !== by ? apn : null;
+  const verb = { paid: 'Paid by', cancelled: 'Cancelled by', voided: 'Voided by' }[o.status] ?? 'Closed by';
+  return h('div', { class: 'rcpt-who' }, h('span', {}, `${verb} `, h('b', {}, o.status === 'paid' ? (o.paid_by_name ?? by) : by),
+    ap && [' · PIN of ', h('b', {}, ap), (o.close_approver_role ?? o.approver_role) ? ` (${(ROLE_LABEL[o.close_approver_role ?? o.approver_role] ?? o.close_approver_role).toLowerCase()})` : ''], t ? ` · ${hm(t)}` : ''));
+}
+function orderActivity(o) {
+  if (!isManager()) return null;
+  const box = h('div', { class: 'ract', hidden: true });
+  invoke('order_activity', { orderId: o.id }).then((rows) => {
+    const shown = rows.filter((r) => r.action !== 'order.open');
+    if (!shown.length || !box.isConnected) return;
+    const opened = { id: 0, at: o.opened_at, action: 'order.opened', detail: '', user_name: o.opened_by_name, order_id: o.id };
+    setKids(box, h('h4', {}, h('span', {}, 'Activity'), h('button', { class: 'ghost', onclick: () => openLog({ q: `#${o.id}`, at: o.opened_at }) }, 'All in log ', icon('chev', 14))),
+      actRowOpened(opened, o), shown.map((r) => actRow({ ...r, order: null, order_title: null }, { compact: true, here: o.id })));
+    box.hidden = false;
+  }).catch(() => {});
+  return box;
+}
+const actRowOpened = (r, o) => h('div', { class: 'arow', role: 'listitem' }, h('span', { class: 'at' }, hm(r.at)), h('span', { class: 'aic g-shift' }, icon('orders', 16)),
+  h('span', { class: 'atext' }, h('strong', {}, `Opened${where(o) ? ` · ${orderTitle(o)}` : ''}`), h('small', {}, h('b', {}, r.user_name ?? ''))), h('span', { class: 'aend' }));
+
+// ---------- start-up notices (admins): unclean shutdown, damaged database ----------
+
+/// Admins: what app_status.backup_alert says (damaged data → Restore; did not close properly;
+/// second copy failed). Each kind once per login on this device.
+const alertShown = new Set();
+function backupAlert(al) {
+  if (!al || !isAdmin()) return;
+  const key = `${state.session.user_id}:${al.kind}`;
+  if (alertShown.has(key)) return;
+  alertShown.add(key);
+  const toData = (row = null) => openManage('g:data', row);
+  if (al.kind === 'damaged') {
+    return showModal(h('h3', {}, 'The POS data is damaged'),
+      h('div', { class: 'stack confirm-hint' }, 'Restore the newest good backup. Your backups were not changed.'),
+      h('button', { class: 'danger solid paybig', onclick: () => { closeModal(); state.view = 'settings'; state.settingsTab = 'data'; state.groupSub = 'backups'; state.findRow = null; renderShell(); } }, 'Restore a backup'),
+      h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Later')));
+  }
+  if (al.kind === 'unclean') {
+    return toast(al.message || 'POS did not close properly last time.', false, 12000, { label: 'OK', onclick: () => invoke('dismiss_backup_alert').catch(() => {}) });
+  }
+  toast(al.message || 'Second copy failed', true, 10000, { label: 'Fix', onclick: () => toData('backup_copy') });
+}
+
+// ---------- Backup & data: automatic backups, a second copy, Keep for (admins) ----------
+
+const BK = { auto: 'backup_hourly_on', hours: 'backup_hourly_every', keep: 'backup_hourly_keep', dayClose: 'backup_dayclose_on', exit: 'backup_exit_on',
+  emergency: 'backup_emergency_on', copyOn: 'backup_copy_on' };
+async function backupAutoSection() {
+  const st = await call('backup_status', {}, { quiet: true }).catch(() => null);
+  if (!st) return [];
+  const cfg = st.settings ?? {}, now = st.state ?? {};
+  const every = segRow({ id: BK.hours, label: 'Every', items: [[1, '1 h'], [2, '2 h'], [4, '4 h']], value: [1, 2, 4].includes(Number(cfg.hourly_every)) ? Number(cfg.hourly_every) : 2,
+    stacked: false, save: (v) => saveKey(BK.hours, v) });
+  const keep = stepperRow({ id: BK.keep, label: 'Keep', hint: 'These backups only', value: Number(cfg.hourly_keep) || 12, min: 3, max: 48, unit: 'backups', save: (v) => saveKey(BK.keep, v) });
+  for (const r of [every, keep]) { r.hidden = !cfg.hourly_on; r.dataset.dep = BK.auto; }
+  const sw = (k, on, label, hint, o = {}) => switchRow({ id: BK[k], label, hint, value: !!on, save: (v) => saveKey(BK[k], v ? '1' : '0'), ...o });
+  const rows = [
+    sw('auto', cfg.hourly_on, 'Back up while open', 'Only when something changed', { after: (v) => { every.hidden = !v; keep.hidden = !v; } }),
+    every, keep,
+    sw('dayClose', cfg.dayclose_on, 'Back up at day close'),
+    sw('exit', cfg.exit_on, 'Back up when POS closes'),
+    sw('emergency', cfg.emergency_on, 'Back up after a crash', 'Or a power cut', { tip: 'At the next start POS checks the data first, then makes a backup before anyone sells.' }),
+  ];
+  // A second copy (USB stick, D:, a OneDrive folder): only the main till picks the folder.
+  const dir = cfg.copy_dir || '';
+  const pick = async (btn) => {
+    const row = btn.closest('.srow');
+    rowState(row, 'saving');
+    try {
+      const r = await invoke('pick_backup_copy_folder');
+      if (!r) return rowState(row, 'idle');
+      redrawGroup(BK.copyOn);
+    } catch (e) { rowState(row, 'error', String(e?.message ?? e)); }
+  };
+  const choose = st.can_pick_folder && h('button', { class: 'test', onclick: (e) => pick(e.currentTarget) }, dir ? 'Change…' : 'Choose folder…');
+  const copy = srow({ id: BK.copyOn, label: 'Also copy backups to', hint: dir || (st.can_pick_folder ? 'Pick a folder: USB stick, D: or OneDrive' : 'Chosen on the main till'), cls: dir ? 'path-row' : '',
+    tip: 'Every new backup is copied there too, keeping the same number. If the folder is missing, the backup still works here.',
+    ctl: [choose, dir && cfg.copy_on && h('button', { class: 'ghost', onclick: async (e) => {
+      const row = e.currentTarget.closest('.srow');
+      await saveWith(row, () => call('clear_backup_copy_folder', {}, { quiet: true })) && redrawGroup(BK.copyOn);
+    } }, 'Turn off')] });
+  const err = now.copy_error || (st.copy_dir_ok === false ? 'folder not found' : null);
+  const status = dir && cfg.copy_on && statusRow({ id: 'copy_status', icon: err ? 'alert' : 'check', title: err ? 'Second copy failed' : 'Second copy',
+    meta: err ? `${err[0].toUpperCase()}${err.slice(1)}${now.copy_error_at ? ` · ${friendlyTime(now.copy_error_at)}` : ''}` : now.copy_ok_at ? `Last copied ${friendlyTime(now.copy_ok_at)}` : 'Not copied yet',
+    pill: err ? { cls: 'bad', text: 'Failed' } : now.copy_ok_at ? { cls: 'ok', text: 'OK' } : null });
+  return [ssec('Automatic backups', rows), ssec('Second copy', [copy, status])];
+}
+async function retentionSection() {
+  const [raw, info] = await Promise.all([invoke('get_setting', { key: 'log_keep_days' }).catch(() => null), invoke('log_retention').catch(() => null)]);
+  const keep = raw == null || raw === '' ? LOG_KEEP_DEFAULT : Number(raw);
+  const dd = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const statHint = info && [info.oldest && `Oldest: ${dd(info.oldest)}`,
+    info.last_cleanup_at && `last cleanup ${friendlyTime(info.last_cleanup_at)}, ${Number(info.last_cleanup_count ?? 0).toLocaleString()} removed`].filter(Boolean).join(' · ');
+  const keepRow = segRow({ id: 'log_keep_days', label: 'Keep for', hint: 'Activity log entries, and tickets that are done', items: LOG_KEEP, value: LOG_KEEP.some(([v]) => v === keep) ? keep : LOG_KEEP_DEFAULT,
+    tip: 'Older entries are deleted once a day. A line saying how many stays in the log. Older backups still hold them.',
+    save: (v) => saveKey('log_keep_days', v), after: (v) => { state.logKeep = v; setHint(keepRow, 'Older entries go at the next cleanup (start or day close)'); } });
+  return ssec('Activity log and tickets', [
+    keepRow,
+    info && srow({ id: 'log_size', label: 'In the log now', hint: [`${Number(info.count).toLocaleString()} entries · ${fileSize(info.approx_bytes ?? 0)}`, statHint].filter(Boolean).join(' · ') }),
+    navRow({ id: 'log_open', label: 'Open the Activity log', onOpen: () => openManage('p:log') }),
+  ], 'Older backups still hold entries cleared here until they are deleted.');
+}
+
 // ---------- full screen ----------
 
 /// Desktop: the app window. Browser: the page (tablets have no F11).
@@ -6424,6 +7625,8 @@ document.getElementById('fullscreen').onclick = act(toggleFullscreen);
 document.getElementById('logout').prepend(icon('logout', 20));
 document.getElementById('help').append(icon('help', 22), h('span', { class: 'help-label' }, 'Help'));
 document.getElementById('help').onclick = showHelp;
+document.getElementById('tickets').append(icon('chat', 22));
+document.getElementById('tickets').onclick = () => { state.ticketTab ??= 'open'; go('tickets'); };
 document.getElementById('theme').onclick = toggleTheme;
 applyTheme();
 start().catch((e) => toast(String(e?.message ?? e), true));
@@ -6443,6 +7646,13 @@ setInterval(() => {
   invoke('print_failures', { after: printFailAfter }).then(({ failures: list, last }) => {
     printFailAfter = last;
     if (!list.length) return;
-    toast(list.length > 1 ? `${list.at(-1).message} (and ${list.length - 1} more)` : list[0].message, true, 12000);
+    const now = Date.now();
+    tk.fails = [...tk.fails.filter((f) => now - f.at < 30 * 60000), ...list.map((f) => ({ at: now, message: f.message }))];
+    const text = list.length > 1 ? `${list.at(-1).message} (and ${list.length - 1} more)` : list[0].message;
+    toast(text, true, 12000, { label: 'Tell admin', onclick: () => newTicketSheet({ category: 'printer', body: text }) });
   }).catch(() => {});
+  // Tickets: badges, reply toasts, the urgent alert (and a restore on another till).
+  pollTickets();
 }, 10000);
+// Back on screen: look at once, not up to 10 s later.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.session) pollTickets(); });

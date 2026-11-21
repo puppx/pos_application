@@ -4,6 +4,7 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
+
 use crate::error::invalid;
 use crate::{Pos, Result};
 
@@ -29,6 +30,47 @@ pub const BACKUPS_KEPT_KEY: &str = "backups_kept";
 pub const BACKUPS_KEPT_DEFAULT: usize = 14;
 pub const BACKUPS_KEPT_RANGE: (usize, usize) = (3, 90);
 
+/// Backup & data switches (admins), "1" = on. See [`Pos::backup_settings`].
+pub const BACKUP_HOURLY_ON_KEY: &str = "backup_hourly_on";
+/// Hours between scheduled backups while the app runs: 1, 2 or 4.
+pub const BACKUP_HOURLY_EVERY_KEY: &str = "backup_hourly_every";
+/// Scheduled backups kept (separate from the daily ones).
+pub const BACKUP_HOURLY_KEEP_KEY: &str = "backup_hourly_keep";
+pub const BACKUP_HOURLY_KEEP_DEFAULT: usize = 12;
+pub const BACKUP_HOURLY_KEEP_RANGE: (usize, usize) = (3, 48);
+pub const BACKUP_DAYCLOSE_KEY: &str = "backup_dayclose_on";
+pub const BACKUP_EXIT_KEY: &str = "backup_exit_on";
+pub const BACKUP_EMERGENCY_KEY: &str = "backup_emergency_on";
+pub const BACKUP_COPY_ON_KEY: &str = "backup_copy_on";
+/// The second folder backups are copied to: set only by the folder picker
+/// on the main till (reserved, so no browser can point it anywhere).
+pub(crate) const BACKUP_COPY_DIR_KEY: &str = "_backup_copy_dir";
+/// "Who staff call when urgent" (Login & staff), shown when no manager is in.
+pub const TICKETS_CALL_TEXT_KEY: &str = "tickets_call_text";
+
+/// The backup switches, with their defaults filled in.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct BackupSettings {
+    /// Scheduled backup while the app runs (default off).
+    pub hourly_on: bool,
+    /// 1, 2 or 4 hours (default 2).
+    pub hourly_every: u32,
+    /// Scheduled backups kept (default 12).
+    pub hourly_keep: usize,
+    /// Backup when the day is closed (default on).
+    pub dayclose_on: bool,
+    /// Backup when the app closes normally (default on).
+    pub exit_on: bool,
+    /// Emergency backup after the app did not close properly (default on).
+    pub emergency_on: bool,
+    /// Also copy backups to a second folder (default off).
+    pub copy_on: bool,
+    /// That folder (picked on the main till), if any.
+    pub copy_dir: Option<String>,
+    /// Daily backups kept (`backups_kept`).
+    pub kept: usize,
+}
+
 /// `value` must fit `key` when the key has a fixed shape; other keys pass.
 pub(crate) fn validate(key: &str, value: &str) -> Result<()> {
     let v = value.trim();
@@ -49,6 +91,18 @@ pub(crate) fn validate(key: &str, value: &str) -> Result<()> {
             BACKUPS_KEPT_RANGE.0, BACKUPS_KEPT_RANGE.1
         )),
         "kds_beep" if !matches!(value, "0" | "1") => invalid("use 1 (beep) or 0 (silent)"),
+        BACKUP_HOURLY_ON_KEY | BACKUP_DAYCLOSE_KEY | BACKUP_EXIT_KEY | BACKUP_EMERGENCY_KEY | BACKUP_COPY_ON_KEY if !matches!(value, "0" | "1") => {
+            invalid("use 1 (on) or 0 (off)")
+        }
+        BACKUP_HOURLY_EVERY_KEY if !matches!(v, "1" | "2" | "4") => invalid("every 1, 2 or 4 hours"),
+        BACKUP_HOURLY_KEEP_KEY if !whole_in(v, BACKUP_HOURLY_KEEP_RANGE.0 as i64, BACKUP_HOURLY_KEEP_RANGE.1 as i64) => invalid(format!(
+            "scheduled backups kept: a whole number from {} to {}",
+            BACKUP_HOURLY_KEEP_RANGE.0, BACKUP_HOURLY_KEEP_RANGE.1
+        )),
+        crate::activity::LOG_KEEP_KEY if !v.parse::<i64>().is_ok_and(|d| crate::activity::LOG_KEEP_CHOICES.contains(&d)) => {
+            invalid("keep for 30, 90, 180 or 365 days, or 0 for Forever")
+        }
+        TICKETS_CALL_TEXT_KEY if v.chars().count() > 120 => invalid("up to 120 characters"),
         // Switches: exactly 1 or 0 (" 0" would read differently on the screen).
         crate::printing::PRINT_CANCELLED_ORDER_KEY if !matches!(value, "0" | "1") => invalid("use 1 (print) or 0 (do not print)"),
         _ => Ok(()),
@@ -114,6 +168,68 @@ impl PaymentNames {
 }
 
 impl Pos {
+    fn switch(&self, key: &str, default: bool) -> Result<bool> {
+        Ok(match self.setting(key)?.as_deref() {
+            Some("1") => true,
+            Some("0") => false,
+            _ => default,
+        })
+    }
+
+    /// The backup switches (anyone may read them; the app acts on them).
+    pub fn backup_settings(&self) -> Result<BackupSettings> {
+        let raw_dir: Option<String> = self
+            .conn
+            .query_row("SELECT CAST(value AS TEXT) FROM settings WHERE key = ?1", [BACKUP_COPY_DIR_KEY], |r| r.get(0))
+            .optional()?;
+        Ok(BackupSettings {
+            hourly_on: self.switch(BACKUP_HOURLY_ON_KEY, false)?,
+            hourly_every: match self.setting(BACKUP_HOURLY_EVERY_KEY)?.as_deref().map(str::trim) {
+                Some("1") => 1,
+                Some("4") => 4,
+                _ => 2,
+            },
+            hourly_keep: self
+                .setting(BACKUP_HOURLY_KEEP_KEY)?
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|n| (BACKUP_HOURLY_KEEP_RANGE.0..=BACKUP_HOURLY_KEEP_RANGE.1).contains(n))
+                .unwrap_or(BACKUP_HOURLY_KEEP_DEFAULT),
+            dayclose_on: self.switch(BACKUP_DAYCLOSE_KEY, true)?,
+            exit_on: self.switch(BACKUP_EXIT_KEY, true)?,
+            emergency_on: self.switch(BACKUP_EMERGENCY_KEY, true)?,
+            copy_on: self.switch(BACKUP_COPY_ON_KEY, false)?,
+            copy_dir: raw_dir.filter(|d| !d.trim().is_empty()),
+            kept: self.backups_kept()?,
+        })
+    }
+
+    /// Set (or with None clear) the second backup folder. Admins; the app
+    /// only calls this from the folder picker on the main till.
+    pub fn set_backup_copy_dir(&self, s: &crate::Session, dir: Option<&str>) -> Result<()> {
+        s.require(crate::Permission::ManageSettings)?;
+        s.require(crate::Permission::Backup)?;
+        match dir {
+            Some(d) => self.conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                [BACKUP_COPY_DIR_KEY, d],
+            )?,
+            None => self.conn.execute("DELETE FROM settings WHERE key = ?1", [BACKUP_COPY_DIR_KEY])?,
+        };
+        self.audit(Some(s.user_id), "setting.update", "backup_copy_dir")
+    }
+
+    /// Rows changed through this connection since it opened: a cheap way to
+    /// tell whether anything changed since the last backup.
+    pub fn change_count(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT total_changes()", [], |r| r.get(0))?)
+    }
+
+    /// `PRAGMA integrity_check`: None when the database is sound, else what is wrong.
+    pub fn integrity_problem(&self) -> Result<Option<String>> {
+        let ok: String = self.conn.query_row("PRAGMA integrity_check(1)", [], |r| r.get(0))?;
+        Ok((ok != "ok").then_some(ok))
+    }
+
     /// What Cash and Card are called; not set or empty = "Cash" / "Card".
     pub fn payment_names(&self) -> Result<PaymentNames> {
         let get = |key: &str, def: &str| -> Result<String> {

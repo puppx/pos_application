@@ -423,6 +423,21 @@ pub fn require_updates(app: &App, t: &str) -> Result<()> {
     app.with_session(t, |_, s| s.require(Permission::Updates))
 }
 
+/// This PC's own settings that only an admin at the desktop window may
+/// change, like the local server (e.g. "Start with Windows"). Runs `f` as
+/// that admin. Browsers on the network cannot call these commands at all
+/// (they are not in [`dispatch`]); any terminal but [`LOCAL`] is refused here
+/// too, so one added to `dispatch` by mistake still cannot change the PC.
+pub fn with_device_settings<T>(app: &App, t: &str, f: impl FnOnce(&mut Pos, &Session) -> Result<T>) -> Result<T> {
+    if t != LOCAL {
+        return Err(PosError::Forbidden);
+    }
+    app.with_session(t, |pos, s| {
+        s.require(Permission::ManageSettings)?;
+        f(pos, s)
+    })
+}
+
 fn backup_file(path: &Path) -> Option<BackupFile> {
     let name = path.file_name()?.to_string_lossy().to_string();
     let meta = std::fs::metadata(path).ok()?;
@@ -1782,6 +1797,33 @@ mod tests {
         assert!(err.to_string().starts_with("get_order: missing field `id`"), "{err}");
         let err = dispatch(&app, LOCAL, "install_update", json!({})).unwrap_err();
         assert_eq!(err.to_string(), "unknown command install_update");
+    }
+
+    #[test]
+    fn start_with_windows_is_for_an_admin_at_the_desktop_window_only() {
+        let app = app();
+        let tablet = "web-0123456789abcdef0123456789abcdef";
+        let ran = std::cell::Cell::new(0);
+        let change = |t| with_device_settings(&app, t, |_, _| { ran.set(ran.get() + 1); Ok(()) });
+        // Nobody logged in.
+        assert!(matches!(change(LOCAL), Err(PosError::NotLoggedIn)));
+        // Staff at the till.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        assert!(matches!(change(LOCAL), Err(PosError::Forbidden)));
+        // An admin in a browser on the network: refused, and the commands do not exist there.
+        dispatch(&app, tablet, "login", json!({ "pin": "1111" })).unwrap();
+        assert!(matches!(change(tablet), Err(PosError::Forbidden)));
+        for cmd in ["get_autostart", "set_autostart"] {
+            for t in [tablet, LOCAL] {
+                let err = dispatch(&app, t, cmd, json!({ "enabled": true })).unwrap_err();
+                assert_eq!(err.to_string(), format!("unknown command {cmd}"));
+            }
+        }
+        assert_eq!(ran.get(), 0);
+        // An admin at the till.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        change(LOCAL).unwrap();
+        assert_eq!(ran.get(), 1);
     }
 
     #[test]

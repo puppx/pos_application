@@ -6,7 +6,8 @@
 
 const TAURI = window.__TAURI__?.core;
 /// Commands only the desktop window has (they act on this PC itself).
-const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server', 'toggle_fullscreen', 'open_backup_folder']);
+const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server', 'toggle_fullscreen', 'open_backup_folder',
+  'get_autostart', 'set_autostart']);
 /// A browser's own random id: its login belongs to this id only.
 const terminalId = (() => {
   const make = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -4412,6 +4413,7 @@ const IMAGE_MODES = [['column', '1. Compatible (older printers)'], ['raster_smal
 async function devicesGroup() {
   const raw = await invoke('get_settings', { keys: ['start_fullscreen', 'button_size'] });
   const srv = state.remote ? null : await call('server_status', {}, { quiet: true }).catch(() => null);
+  const autostart = state.remote ? null : await call('get_autostart', {}, { quiet: true }).catch(() => null);
   const theme = segRow({ id: 'theme', label: 'Theme', hint: 'This device only', items: [['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']], value: themePref(),
     stacked: false, cls: 'seg-fold', save: (v) => setTheme(v) });
   // The moon / sun button at the top changes it too: follow it while the row is on screen.
@@ -4420,6 +4422,8 @@ async function devicesGroup() {
   return [
     ssec('This device', [
       theme,
+      !state.remote && autostart != null && switchRow({ id: 'autostart', label: 'Start with Windows', hint: 'Opens POS when the PC starts', value: autostart,
+        save: (v) => call('set_autostart', { enabled: v }, { quiet: true }) }),
       !state.remote && keySwitch(raw, 'start_fullscreen', 'Full screen at start', { def: false }),
       !state.remote && srow({ id: 'fullscreen', label: 'Full screen', hint: 'Or press F11', ctl: h('button', { class: 'test', onclick: act(toggleFullscreen) }, icon('expand', 18), 'On / off') }),
     ]),
@@ -4494,7 +4498,7 @@ const MANAGE_GROUPS = [
   { id: 'login', icon: 'lock', title: 'Login & staff', need: 'admin', build: loginGroup },
   { id: 'restaurant', icon: 'store', title: 'Restaurant', need: 'admin', build: restaurantGroup },
   { id: 'delivery', icon: 'bike', title: 'Delivery apps', need: 'admin', build: deliveryGroup },
-  // Full screen and the local server are this PC's own (not on a phone or tablet).
+  // Start with Windows, full screen and the local server are this PC's own (not on a phone or tablet).
   { id: 'devices', icon: 'monitor', title: 'Devices & display', need: 'admin', build: devicesGroup },
   { id: 'data', icon: 'database', title: 'Backup & data', need: 'admin', build: dataGroup,
     subs: { backups: { title: 'All backups', build: () => backupsPage('full') }, menus: { title: 'All menu backups', build: () => backupsPage('menu') } } },
@@ -4812,7 +4816,7 @@ const MANAGE_INDEX = [
   ['p:users', 'Staff', 'staff users people pin password roles manager admin waiter', 'admin'],
   ['g:printers', 'Printers', 'printer printers receipt kitchen bar ticket copies paper thai image test cash drawer windows usb network', 'admin'],
   ['g:printers#receipt', 'Receipt printer', 'receipt bill printer copies paper 58 80 mm item names thai english bold image mode raster slow send test', 'admin'],
-  ['g:printers#kitchen', 'Kitchen printer', 'kitchen printer tickets copies starters mains prepare added later additional large text font call mains table image mode raster slow send test', 'admin'],
+  ['g:printers#kitchen', 'Kitchen printer', 'kitchen printer tickets copies starters mains all courses together call mains again prepare added later additional large text font table image mode raster slow send test', 'admin'],
   ['g:printers#addroute', 'Add kitchen printer', 'bar dessert drinks extra other second printer route team', 'admin'],
   ['g:printers#drawer', 'Cash drawer', 'cash drawer open test', 'admin'],
   ['g:payments', 'Payments & receipts', 'pay payment payments cash card tips split exact receipt bill service charge', 'admin'],
@@ -4873,6 +4877,7 @@ const MANAGE_INDEX = [
   ['g:devices', 'Devices & display', 'theme dark light button size large full screen display local server network tablet phone wifi', 'admin'],
   ['g:devices#theme', 'Theme', 'theme light or dark mode night auto colours', 'admin'],
   ['g:devices#buttons', 'Menu button size', 'button size large big tiles', 'admin'],
+  ['g:devices#autostart', 'Start with Windows', 'start with windows startup boot automatically open pc switched on login', 'admin', true],
   ['g:devices#start_fullscreen', 'Full screen at start', 'full screen start open window display', 'admin', true],
   ['g:devices#fullscreen', 'Full screen', 'full screen display window f11', 'admin', true],
   ['g:devices#server', 'Local server', 'local server network tablet phone browser wifi port start stop', 'admin', true],
@@ -4904,7 +4909,9 @@ function searchManage(typed) {
   // Names that start with what was typed first, then the groups and pages themselves.
   const rank = (e) => (e.label.toLowerCase().startsWith(ws[0]) ? 0 : 2) + (e.row ? 1 : 0);
   shown.sort((a, b) => rank(a) - rank(b));
-  return { shown: shown.slice(0, 30), locked: !shown.length && found.some((e) => !can(e)) };
+  // "Admin only" is for what a better role would show; the main till's own rows
+  // (Start with Windows, Full screen…) are not in a browser for anyone.
+  return { shown: shown.slice(0, 30), locked: !shown.length && found.some((e) => !(e.local && state.remote) && !can(e)) };
 }
 
 // ---------- Manage building blocks ----------
@@ -5539,6 +5546,7 @@ async function printerSheet(kind, cfg, { rc, routes, teams, index = null }) {
     app_font: cfg.app_font ?? true, call_table_only: cfg.call_table_only ?? true, slow_send: cfg.slow_send ?? true,
     image_mode: IMAGE_MODES.some(([v]) => v === cfg.image_mode) ? cfg.image_mode : 'raster',
     starter_copies: cfg.starter_copies ?? null, mains_copies: cfg.mains_copies ?? null, prep_copies: cfg.prep_copies ?? null, additional_copies: cfg.additional_copies ?? null,
+    all_courses_copies: cfg.all_courses_copies ?? null, call_again_copies: cfg.call_again_copies ?? null,
     label: cfg.label ?? '', drinks: !!cfg.drinks, desserts: !!cfg.desserts, team_ids: [...(cfg.team_ids ?? [])],
   };
   if (route && f.kind === 'none') f.kind = 'network';
@@ -5577,7 +5585,8 @@ async function printerSheet(kind, cfg, { rc, routes, teams, index = null }) {
     // Not set = the printer's usual names: left unset unless changed.
     if (!route && (cfg.names != null || f.names !== NAMES[0][0])) c.names = f.names;
     if (kitchen) Object.assign(c, { large_text: f.large_text, app_font: f.app_font, call_table_only: f.call_table_only,
-      starter_copies: f.starter_copies, mains_copies: f.mains_copies, prep_copies: f.prep_copies, additional_copies: f.additional_copies });
+      starter_copies: f.starter_copies, mains_copies: f.mains_copies, prep_copies: f.prep_copies, additional_copies: f.additional_copies,
+      all_courses_copies: f.all_courses_copies, call_again_copies: f.call_again_copies });
     if (route) Object.assign(c, { label: f.label.trim(), drinks: f.drinks, desserts: f.desserts, team_ids: f.team_ids });
     if (f.kind === 'network') Object.assign(c, { host: f.host.trim(), port: Number(f.port) || 9100 });
     if (f.kind === 'windows') c.name = f.name;
@@ -5598,7 +5607,12 @@ async function printerSheet(kind, cfg, { rc, routes, teams, index = null }) {
   imageMode.value = f.image_mode;
   imageMode.addEventListener('change', () => { f.image_mode = imageMode.value; });
   const imageRow = srow({ id: 'image', label: 'Image mode', tip: IMAGE_TIP, cls: 'image-row', stacked: true, ctl: [imageMode, thai] });
-  const copySteps = (key, label) => srow({ label, tip: key === 'starter_copies' ? 'Dine-in. Starters: sent first. Mains: Call mains, or the first mains after starters. Same = Copies.' : null,
+  const COPY_TIPS = {
+    starter_copies: 'Dine-in. Starters: sent first. Mains: Call mains, or the first mains after starters. Same = Copies.',
+    all_courses_copies: 'Dine-in sent with “All courses together”: starters and mains on one ticket. Same = Copies.',
+    call_again_copies: 'The table called again once the mains are in the kitchen. Same = Mains copies.',
+  };
+  const copySteps = (key, label) => srow({ label, tip: COPY_TIPS[key] ?? null,
     ctl: stepper({ value: f[key], min: 1, max: 9, allowEmpty: true, label, onChange: (v) => { f[key] = v; } }) });
   const sw = (key, label, hint) => switchRow({ label, hint, value: f[key], onChange: (v) => { f[key] = v; } });
   const nameRow = route && srow({ label: 'Name', cls: 'text-row', ctl: field('label', { placeholder: 'e.g. Bar', 'aria-label': 'Name' }) });
@@ -5619,7 +5633,8 @@ async function printerSheet(kind, cfg, { rc, routes, teams, index = null }) {
         srow({ label: 'Item names', ctl: sseg(NAMES, f.names, (v) => { f.names = v; }, 'Item names'), stacked: NAMES.length > 2 }),
         sw('bold', 'Bold text'),
         kitchen && sw('large_text', 'Large text', 'Fewer letters per line'),
-        advanced(kind, kitchen ? [copySteps('starter_copies', 'Starters copies'), copySteps('mains_copies', 'Mains copies'), copySteps('prep_copies', 'Prepare copies'),
+        advanced(kind, kitchen ? [copySteps('starter_copies', 'Starters copies'), copySteps('mains_copies', 'Mains copies'),
+          copySteps('all_courses_copies', 'All courses together copies'), copySteps('call_again_copies', 'Call mains again copies'), copySteps('prep_copies', 'Prepare copies'),
           srow({ label: 'Added-later copies', ctl: stepper({ value: f.additional_copies ?? 1, min: 1, max: 9, label: 'Added-later copies', onChange: (v) => { f.additional_copies = v === 1 ? null : v; } }) }),
           sw('app_font', 'Print in the app’s font'), sw('call_table_only', '“Call mains again” shows table only'), imageRow, slow] : [imageRow, slow]))),
   ];

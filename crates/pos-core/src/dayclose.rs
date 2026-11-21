@@ -291,6 +291,6 @@ impl Pos {
         let store = self.setting("store_name")?.unwrap_or_else(|| "POS".into());
         let layout = d.layout(&store, &cfg.currency, cfg.printer.width, &self.payment_names()?);
         let bytes = render_escpos_in(&layout, cfg.printer.width, cfg.printer.bold, false, cfg.printer.image_mode);
-        Ok(Some(PrintJob::new(cfg.printer.target, bytes).paced(cfg.printer.slow_send).about("Day report")))
+        Ok(Some(PrintJob::new(cfg.printer.target, bytes).paced(cfg.printer.slow_send).for_mode(cfg.printer.image_mode).about("Day report")))
     }
 }

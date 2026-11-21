@@ -11,9 +11,10 @@ use pos_core::*;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_updater::UpdaterExt;
 
-use commands::{auto_backup, dispatch, require_updates, unique_backup_path, App, LOCAL};
+use commands::{auto_backup, dispatch, require_updates, unique_backup_path, with_device_settings, App, LOCAL};
 
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The daily backup starts this long after the window opens, so the first
@@ -139,6 +140,48 @@ fn toggle_fullscreen(window: tauri::WebviewWindow) -> Result<bool> {
     Ok(on)
 }
 
+// ---- start with Windows (desktop only) ----
+
+/// The name of the entry in the user's start-up list (on Windows the value
+/// under HKCU\Software\Microsoft\Windows\CurrentVersion\Run). Fixed, so
+/// renaming the app never leaves an old entry behind.
+const AUTOSTART_NAME: &str = "POS";
+
+fn autostart_error(e: tauri_plugin_autostart::Error) -> PosError {
+    PosError::Internal(format!("start with Windows: {e}"))
+}
+
+/// Whether the POS opens by itself when this Windows user logs in (also
+/// false when it was turned off in Task Manager > Startup apps).
+#[tauri::command(async)]
+fn get_autostart(app: Cmd<'_>, handle: AppHandle) -> Result<bool> {
+    app.with_session(LOCAL, |_, _| Ok(()))?;
+    handle.autolaunch().is_enabled().map_err(autostart_error)
+}
+
+/// Settings > Devices & display > "Start with Windows" (admins only).
+/// Returns whether it is now on.
+#[tauri::command(async)]
+fn set_autostart(app: Cmd<'_>, handle: AppHandle, enabled: bool) -> Result<bool> {
+    with_device_settings(&app, LOCAL, |pos, s| {
+        let auto = handle.autolaunch();
+        let changed = if enabled { auto.enable() } else { auto.disable() };
+        changed.map_err(autostart_error)?;
+        // Windows can keep its own say: an entry for every user of the PC
+        // (made by a copy of the app run as administrator) or a "Disabled"
+        // in Task Manager. Say so rather than show a switch that is wrong.
+        if auto.is_enabled().map_err(autostart_error)? != enabled {
+            return Err(PosError::Validation(if enabled {
+                "Windows has POS turned off in Task Manager > Startup apps: turn it on there".into()
+            } else {
+                "POS is set to start for every user of this PC: turn it off in Task Manager > Startup apps".into()
+            }));
+        }
+        pos.audit_event(s, "device.autostart", if enabled { "on" } else { "off" })?;
+        Ok(enabled)
+    })
+}
+
 /// "Close POS" on the lock screen: quit the app (the exit handler stops the
 /// local server and tidies the database).
 #[tauri::command(async)]
@@ -194,14 +237,33 @@ async fn install_update(app: Cmd<'_>, handle: AppHandle) -> Result<()> {
     // An automatic backup still copying finishes first, and none starts
     // while the update replaces the app (it would be cut off half way).
     app.stop_auto_backups();
-    update.download_and_install(|_, _| {}, || {}).await.map_err(update_error)?;
+    let bytes = update.download(|_, _| {}, || {}).await.map_err(update_error)?;
+    // On Windows `install` starts the installer and ends this process at once
+    // (no exit handler runs), so tickets still printing finish first, and the
+    // single-instance lock is let go: the installer reopens the app when done.
     pos_core::wait_for_prints(PRINTS_FINISH);
+    #[cfg(windows)]
+    tauri_plugin_single_instance::destroy(&handle);
+    update.install(bytes).map_err(update_error)?;
+    // Elsewhere: restart (Tauri lets go of the lock just before it starts the new copy).
     handle.restart()
 }
 
 fn main() {
     let app = tauri::Builder::default()
+        // First, as its docs ask: a second copy of the POS (opened again, or by
+        // "Start with Windows" while already open) ends here, before it opens
+        // the database or the local server, and the open window comes forward.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Off until an admin turns it on: the plugin itself changes nothing.
+        .plugin(tauri_plugin_autostart::Builder::new().app_name(AUTOSTART_NAME).build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let backup_dir = data_dir.join("backups");
@@ -224,6 +286,17 @@ fn main() {
                 }
             }
             app.manage(ServerState::default());
+            // "Start with Windows" is on: point it at this copy of the app, so
+            // it still opens if the app was installed again in another folder.
+            // Release builds only: a developer's debug build never takes it over.
+            #[cfg(not(debug_assertions))]
+            if let Some(auto) = app.try_state::<tauri_plugin_autostart::AutoLaunchManager>() {
+                if auto.is_enabled().unwrap_or(false) {
+                    if let Err(e) = auto.enable() {
+                        eprintln!("start with Windows: {e}");
+                    }
+                }
+            }
             // The daily backup, in the background: a big database must not
             // keep the window from opening (see `commands::auto_backup`).
             let handle = app.handle().clone();
@@ -244,6 +317,8 @@ fn main() {
             server_status,
             set_server,
             toggle_fullscreen,
+            get_autostart,
+            set_autostart,
             open_backup_folder,
             quit_app,
             check_update,

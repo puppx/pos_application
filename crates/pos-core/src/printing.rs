@@ -7,8 +7,8 @@
 //! [`PrintJob::send`], so a slow or offline printer never blocks the till.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -76,6 +76,15 @@ pub struct PrinterConfig {
     /// None = 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_copies: Option<u8>,
+    /// Kitchen only: copies of the ticket of a dine-in order sent with all
+    /// courses together (starters and mains at once). None = as without it:
+    /// `copies` for a new order (see [`Pos::kitchen_job`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_courses_copies: Option<u8>,
+    /// Kitchen only: copies of the "Call mains again" ticket (MAIN COURSE).
+    /// None = `mains_copies`, else `copies`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_again_copies: Option<u8>,
     /// Kitchen only: print ticket text in the app's font (Sarabun, the same
     /// as the team bars) instead of the printer's own (on by default).
     #[serde(default = "yes")]
@@ -191,6 +200,8 @@ impl Default for PrinterConfig {
             mains_copies: None,
             prep_copies: None,
             additional_copies: None,
+            all_courses_copies: None,
+            call_again_copies: None,
             app_font: true,
             call_table_only: true,
             image_mode: ImageMode::Raster,
@@ -204,7 +215,7 @@ impl PrinterConfig {
         if !(24..=64).contains(&self.width) {
             return invalid("paper width must be between 24 and 64 characters");
         }
-        if [Some(self.copies), self.starter_copies, self.mains_copies, self.prep_copies, self.additional_copies].into_iter().flatten().any(|c| !(1..=9).contains(&c)) {
+        if [Some(self.copies), self.starter_copies, self.mains_copies, self.prep_copies, self.additional_copies, self.all_courses_copies, self.call_again_copies].into_iter().flatten().any(|c| !(1..=9).contains(&c)) {
             return invalid("copies must be between 1 and 9");
         }
         if self.copy_delay_secs > 30 {
@@ -238,11 +249,32 @@ pub struct PrintJob {
     pub urgent: bool,
     /// What it is, for a failure message: "Kitchen ticket #94".
     pub what: String,
+    /// Every copy over one connection, in one turn of the printer's line
+    /// (the wait between copies included), and the connection then ended
+    /// cleanly ([`Conn::finish`]): for printers in the "Compatible (older
+    /// printers)" image mode ([`PrintJob::for_mode`]). An old printer
+    /// reported that copies arriving on new connections, while it was still
+    /// busy with the first, only came out when the next job came.
+    pub one_connection: bool,
 }
 
 impl PrintJob {
     pub fn new(target: PrinterTarget, bytes: Vec<u8>) -> PrintJob {
-        PrintJob { target, parts: vec![bytes], gap: Duration::ZERO, more: Vec::new(), slow: false, urgent: false, what: String::new() }
+        PrintJob { target, parts: vec![bytes], gap: Duration::ZERO, more: Vec::new(), slow: false, urgent: false, what: String::new(), one_connection: false }
+    }
+
+    /// Sent as a printer in image `mode` needs it: in the compatible mode
+    /// (older printers) every copy over one connection, ended cleanly (see
+    /// [`PrintJob::one_connection`]); the other modes as before.
+    pub fn for_mode(mut self, mode: ImageMode) -> PrintJob {
+        self.one_connection = mode == ImageMode::Column;
+        self
+    }
+
+    /// True when this job goes over one connection (see
+    /// [`PrintJob::one_connection`]): network printers and ports / paths.
+    pub fn is_one_connection(&self) -> bool {
+        self.one_connection && matches!(self.target, PrinterTarget::Network { .. } | PrinterTarget::File { .. })
     }
 
     /// This job sent slowly or not (the printer's "Send slowly" setting).
@@ -279,7 +311,7 @@ impl PrintJob {
         first.extend_from_slice(&doc);
         let mut parts = vec![first];
         parts.extend(std::iter::repeat_n(doc, usize::from(copies.max(1)) - 1));
-        PrintJob { target, parts, gap: Duration::from_secs(delay_secs.into()), more: Vec::new(), slow: false, urgent: false, what: String::new() }
+        PrintJob { target, parts, gap: Duration::from_secs(delay_secs.into()), more: Vec::new(), slow: false, urgent: false, what: String::new(), one_connection: false }
     }
 
     /// Everything the printers receive, in order (this printer, then the others).
@@ -302,6 +334,14 @@ impl PrintJob {
     /// Send every part, waiting `gap` between them, then the other printers.
     /// Waits for all of it, paced pieces included.
     pub fn send(&self) -> Result<()> {
+        if self.is_one_connection() {
+            let _turn = Ticket::new(&self.target, self.urgent).wait();
+            send_whole(open(&self.target), &self.target, &self.parts, self.gap, self.is_paced())?;
+            for m in &self.more {
+                m.send()?;
+            }
+            return Ok(());
+        }
         for (i, part) in self.parts.iter().enumerate() {
             if i > 0 {
                 std::thread::sleep(self.gap);
@@ -349,8 +389,10 @@ impl PrintJob {
     }
 
     fn send_one(self) -> Result<()> {
-        if self.is_paced() {
-            return self.send_one_paced();
+        // One connection (the compatible mode), sent slowly or not: in the
+        // printer's line too, so no other job ever connects while it is open.
+        if self.is_paced() || self.is_one_connection() {
+            return self.send_one_queued();
         }
         let mut parts = self.parts.into_iter();
         if let Some(first) = parts.next() {
@@ -374,8 +416,10 @@ impl PrintJob {
         Ok(())
     }
 
-    /// [`PrintJob::send_one`] for a paced job.
-    fn send_one_paced(self) -> Result<()> {
+    /// [`PrintJob::send_one`] for a paced or a one-connection job: in the
+    /// printer's line, on a background thread.
+    fn send_one_queued(self) -> Result<()> {
+        let (together, paced) = (self.is_one_connection(), self.is_paced());
         let PrintJob { target, parts, gap, urgent, what, .. } = self;
         // Free now: connect here, so the error (if any) reaches the till.
         // Busy: take a place in the printer's line now (so jobs keep the
@@ -388,8 +432,12 @@ impl PrintJob {
         let sending = SENDING.start();
         std::thread::spawn(move || {
             let _sending = sending;
-            let mut parts = parts.into_iter();
-            let Some(first) = parts.next() else { return };
+            if parts.is_empty() {
+                return;
+            }
+            // One connection: every copy now, in this turn. Otherwise the
+            // first copy now and each other one on its own connection.
+            let (now, later) = parts.split_at(if together { parts.len() } else { 1 });
             let (turn, conn) = match place {
                 Place::Now(turn, conn) => (turn, Ok(conn)),
                 Place::Queued(ticket) => {
@@ -398,14 +446,18 @@ impl PrintJob {
                     (turn, conn)
                 }
             };
-            let mut result = conn.and_then(|mut c| write_paced(&mut c, &first, SLOW_CHUNK, SLOW_PAUSE).map_err(|e| PosError::Printer(e.to_string())));
+            let mut result = if together {
+                send_whole(conn, &target, now, gap, paced)
+            } else {
+                conn.and_then(|c| write_parts(c, now, gap, true, false).map_err(printer_error))
+            };
             drop(turn);
-            for part in parts {
+            for part in later {
                 if result.is_err() {
                     break;
                 }
                 std::thread::sleep(gap);
-                result = send_paced(&target, &part, false);
+                result = send_paced(&target, part, false);
             }
             if let Err(e) = result {
                 record_failure(&what, &target, &e.to_string());
@@ -435,6 +487,61 @@ pub fn write_paced(w: &mut impl Write, bytes: &[u8], chunk: usize, pause: Durati
     Ok(())
 }
 
+/// How long [`Conn::finish`] waits at most for the printer to take the last
+/// of a job and close its side.
+const FINISH_WAIT: Duration = Duration::from_secs(5);
+
+/// Write `parts` over `conn`, `gap` apart, each in paced pieces or at once;
+/// then end the connection cleanly when `finish` ([`Conn::finish`]), or
+/// just close it.
+fn write_parts(mut conn: Conn, parts: &[Vec<u8>], gap: Duration, paced: bool, finish: bool) -> std::io::Result<()> {
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            std::thread::sleep(gap);
+        }
+        if paced {
+            write_paced(&mut conn, part, SLOW_CHUNK, SLOW_PAUSE)?;
+        } else {
+            conn.write_all(part)?;
+            conn.flush()?;
+        }
+    }
+    if finish {
+        conn.finish()?;
+    }
+    Ok(())
+}
+
+fn printer_error(e: std::io::Error) -> PosError {
+    PosError::Printer(e.to_string())
+}
+
+/// How long a new connection is watched, before anything is sent, for a
+/// printer that turns it away (resets or closes it at once: busy with
+/// another connection, e.g. from another till).
+const CONNECT_CHECK: Duration = Duration::from_millis(150);
+/// Turned away: tries again this many times, this far apart. Nothing has
+/// been sent yet, so trying again never prints anything twice.
+const REFUSED_RETRIES: usize = 3;
+const REFUSED_PAUSE: Duration = Duration::from_secs(1);
+
+/// A one-connection job ([`PrintJob::one_connection`]): over `conn` (or a
+/// new connection if the printer turned it away), every part `gap` apart,
+/// then ended cleanly ([`Conn::finish`]).
+fn send_whole(conn: Result<Conn>, target: &PrinterTarget, parts: &[Vec<u8>], gap: Duration, paced: bool) -> Result<()> {
+    let mut conn = conn?;
+    let mut tries = 0;
+    while conn.turned_away() {
+        if tries == REFUSED_RETRIES {
+            return Err(PosError::Printer("the printer refused the connection (busy with another one?)".into()));
+        }
+        tries += 1;
+        std::thread::sleep(REFUSED_PAUSE);
+        conn = open(target)?;
+    }
+    write_parts(conn, parts, gap, paced, true).map_err(printer_error)
+}
+
 /// How long the whole of `len` bytes takes to send slowly (the pauses).
 pub fn paced_duration(len: usize) -> Duration {
     SLOW_PAUSE * u32::try_from(len.div_ceil(SLOW_CHUNK).saturating_sub(1)).unwrap_or(u32::MAX)
@@ -444,6 +551,57 @@ pub fn paced_duration(len: usize) -> Duration {
 enum Conn {
     Tcp(TcpStream),
     File(std::fs::File),
+}
+
+impl Conn {
+    /// End a job cleanly: say it is the end (TCP half-close), then wait, at
+    /// most [`FINISH_WAIT`], until the printer has read it all and closes its
+    /// side, reading (and dropping) any status bytes it sends meanwhile.
+    /// The next job then never connects while the printer is still taking
+    /// this one in, and unread status bytes never turn the close into a
+    /// reset that can lose the end of the job.
+    ///
+    /// A reset meanwhile is an error: the printer may not have printed it all.
+    fn finish(self) -> std::io::Result<()> {
+        let Conn::Tcp(mut s) = self else { return Ok(()) };
+        s.shutdown(Shutdown::Write)?;
+        let end = Instant::now() + FINISH_WAIT;
+        let mut buf = [0u8; 256];
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(());
+            }
+            s.set_read_timeout(Some(left))?;
+            match s.read(&mut buf) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(e) if is_reset(&e) => return Err(e),
+                Err(_) => return Ok(()),
+            }
+        }
+    }
+
+    /// True when the printer turns this new connection away: resets or
+    /// closes it within [`CONNECT_CHECK`], before anything was sent. Status
+    /// bytes it sends are left to be read (see [`Conn::finish`]).
+    fn turned_away(&self) -> bool {
+        let Conn::Tcp(s) = self else { return false };
+        if s.set_read_timeout(Some(CONNECT_CHECK)).is_err() {
+            return false;
+        }
+        let away = match s.peek(&mut [0u8; 1]) {
+            Ok(n) => n == 0,
+            Err(e) => is_reset(&e),
+        };
+        let _ = s.set_read_timeout(None);
+        away
+    }
+}
+
+fn is_reset(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+    matches!(e.kind(), ConnectionReset | ConnectionAborted | BrokenPipe)
 }
 
 impl Write for Conn {
@@ -1207,6 +1365,36 @@ impl Course {
     }
 }
 
+/// Copies of a kitchen ticket titled `title` on `cfg`'s printer: one for a
+/// reprint; else the setting for the kind of ticket (`all_courses`: a
+/// dine-in send with all courses together; `starters`: only starters),
+/// "Same" (None) meaning the printer's copies, or one for ADDITIONAL.
+pub(crate) fn kitchen_copies(cfg: &PrinterConfig, title: &str, reprint: bool, all_courses: bool, starters: bool) -> u8 {
+    let usual = if title == "MAINS AWAY" {
+        cfg.mains_copies.unwrap_or(cfg.copies)
+    } else if title == "ADDITIONAL" {
+        // More ordered later: one copy unless set otherwise.
+        cfg.additional_copies.unwrap_or(1)
+    } else if starters {
+        // Starters: ahead of the mains, or all the table ordered for now.
+        cfg.starter_copies.unwrap_or(cfg.copies)
+    } else {
+        cfg.copies
+    };
+    if reprint {
+        1
+    } else if all_courses {
+        cfg.all_courses_copies.unwrap_or(usual)
+    } else {
+        usual
+    }
+}
+
+/// Copies of the "Call mains again" ticket (MAIN COURSE) on `cfg`'s printer.
+pub(crate) fn call_again_copies(cfg: &PrinterConfig) -> u8 {
+    cfg.call_again_copies.or(cfg.mains_copies).unwrap_or(cfg.copies)
+}
+
 /// The ESC/POS bytes of several tickets one after another (each ends with a cut).
 fn escpos_all(tickets: &[KitchenTicket], cfg: &PrinterConfig) -> Vec<u8> {
     tickets.iter().flat_map(|t| t.escpos_for(cfg)).collect()
@@ -1516,6 +1704,8 @@ impl Pos {
             mains_copies: None,
             prep_copies: None,
             additional_copies: Some(r.copies),
+            all_courses_copies: None,
+            call_again_copies: None,
             image_mode: r.image_mode,
             slow_send: r.slow_send,
             ..self.kitchen_printer()?
@@ -1833,7 +2023,7 @@ impl Pos {
             base.title = title.to_string();
             base.footer = None;
             let tickets = self.split_for_kitchen(base, &group)?;
-            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs).paced(cfg.slow_send));
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs).paced(cfg.slow_send).for_mode(cfg.image_mode));
         }
         Ok(PrintJob::join(jobs).map(|j| j.about(format!("{title} ticket #{order_id}"))))
     }
@@ -2090,6 +2280,12 @@ impl Pos {
         let whole = self.kitchen_ticket(s, order_id, items, reprint)?;
         let title = whole.title.as_str();
         let food = self.drinks_apart(items)?.1;
+        // "All courses together": a dine-in send with starters and mains at
+        // once (sent course by course, starters always go alone).
+        let all_courses = !reprint
+            && self.get_order(s, order_id)?.order_type == OrderType::DineIn
+            && food.iter().any(|i| i.starter)
+            && food.iter().any(|i| !i.starter && !i.is_set);
         let mut jobs = Vec::new();
         for (cfg, group) in self.route_items(items)? {
             if cfg.target == PrinterTarget::None {
@@ -2099,20 +2295,8 @@ impl Pos {
             let mut base = self.ticket_for(s, order_id, &group, reprint, whole.by_course)?;
             base.title = whole.title.clone();
             let tickets = self.split_for_kitchen(base, &group)?;
-            let copies = if reprint {
-                1
-            } else if title == "MAINS AWAY" {
-                cfg.mains_copies.unwrap_or(cfg.copies)
-            } else if title == "ADDITIONAL" {
-                // More ordered later: one copy unless set otherwise.
-                cfg.additional_copies.unwrap_or(1)
-            } else if !food.is_empty() && food.iter().all(|i| i.starter) {
-                // Starters: ahead of the mains, or all the table ordered for now.
-                cfg.starter_copies.unwrap_or(cfg.copies)
-            } else {
-                cfg.copies
-            };
-            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send));
+            let copies = kitchen_copies(&cfg, title, reprint, all_courses, !food.is_empty() && food.iter().all(|i| i.starter));
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send).for_mode(cfg.image_mode));
         }
         Ok(PrintJob::join(jobs).map(|j| j.about(format!("Kitchen ticket #{order_id}"))))
     }
@@ -2129,7 +2313,7 @@ impl Pos {
             let names = cfg.names.unwrap_or(PrintNames::Both);
             let tickets = self.split_by_team(base, &group, names)?;
             let copies = cfg.prep_copies.unwrap_or(cfg.copies);
-            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send));
+            jobs.push(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send).for_mode(cfg.image_mode));
         }
         Ok(PrintJob::join(jobs).map(|j| j.about(format!("PREPARE NOW ticket #{order_id}"))))
     }
@@ -2187,8 +2371,8 @@ impl Pos {
         } else {
             self.split_by_team(base, mains, names)?
         };
-        let copies = cfg.mains_copies.unwrap_or(cfg.copies);
-        Ok(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send))
+        let copies = call_again_copies(cfg);
+        Ok(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, cfg), copies, cfg.copy_delay_secs).paced(cfg.slow_send).for_mode(cfg.image_mode))
     }
 
     fn main_course_ticket(&self, o: &Order, mains: &[OrderItem]) -> Result<KitchenTicket> {
@@ -2268,7 +2452,7 @@ impl Pos {
                 }
             })
             .collect();
-        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs).paced(cfg.slow_send).about("Sample team tickets")))
+        Ok(Some(PrintJob::copies(cfg.target.clone(), &[], escpos_all(&tickets, &cfg), 1, cfg.copy_delay_secs).paced(cfg.slow_send).for_mode(cfg.image_mode).about("Sample team tickets")))
     }
 
     /// A sample ticket to check a printer configuration before saving it.
@@ -2314,7 +2498,7 @@ impl Pos {
             banner: None,
             by_course: false,
         };
-        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.escpos_for(cfg), cfg.copies, cfg.copy_delay_secs).paced(cfg.slow_send).about("Test ticket"))
+        Ok(PrintJob::copies(cfg.target.clone(), &[], ticket.escpos_for(cfg), cfg.copies, cfg.copy_delay_secs).paced(cfg.slow_send).for_mode(cfg.image_mode).about("Test ticket"))
     }
 
     /// "Test Thai printing": one short page with the Thai sample in every
@@ -2322,7 +2506,7 @@ impl Pos {
     pub fn thai_test_job(&self, s: &Session, cfg: &PrinterConfig) -> Result<PrintJob> {
         s.require(Permission::ManageSettings)?;
         cfg.validate()?;
-        Ok(PrintJob::new(cfg.target.clone(), thai_test_page(cfg.width)).paced(cfg.slow_send).about("Thai test page"))
+        Ok(PrintJob::new(cfg.target.clone(), thai_test_page(cfg.width)).paced(cfg.slow_send).for_mode(cfg.image_mode).about("Thai test page"))
     }
 }
 
@@ -2869,6 +3053,181 @@ mod tests {
         let job = PrintJob::new(PrinterTarget::Network { host: "127.0.0.1".into(), port }, vec![1; 5000]).paced(true);
         assert!(job.clone().send_in_background().is_err());
         assert!(job.send().is_err());
+    }
+
+    /// The tickets in a stream of ESC/POS bytes as the POS sends them, read
+    /// command by command (so image data is never taken for a command):
+    /// each from its init (ESC @) to its cut, with what follows the last cut.
+    /// Panics on a command it does not know, an image stripe not ended by
+    /// LF, or a ticket that starts before the one before it was cut.
+    fn tickets_in(b: &[u8]) -> (Vec<&[u8]>, &[u8]) {
+        let (mut tickets, mut start, mut i) = (Vec::new(), None, 0);
+        while i < b.len() {
+            let len = match (b[i], b.get(i + 1).copied().unwrap_or(0)) {
+                (0x1B, b'@') => {
+                    assert!(start.is_none(), "a ticket starts at {i} before the last one was cut");
+                    start = Some(i);
+                    2
+                }
+                (0x1B, b'2') | (0x1C, b'.') => 2,
+                (0x1B, b't' | b'R' | b'a' | b'E' | b'd' | b'3') | (0x1D, b'!') => 3,
+                (0x1B, b'*') => {
+                    assert_eq!(b[i + 2], 33);
+                    let n = usize::from(b[i + 3]) | usize::from(b[i + 4]) << 8;
+                    assert_eq!(b.get(i + 5 + 3 * n), Some(&b'\n'), "stripe at {i} not ended by LF");
+                    5 + 3 * n + 1
+                }
+                (0x1D, b'v') => {
+                    let rb = usize::from(b[i + 4]) | usize::from(b[i + 5]) << 8;
+                    let h = usize::from(b[i + 6]) | usize::from(b[i + 7]) << 8;
+                    8 + rb * h
+                }
+                (0x1D, b'V') => {
+                    assert_eq!(b[i + 2], 66);
+                    let from = start.take().expect("a cut without a ticket");
+                    tickets.push(&b[from..i + 4]);
+                    4
+                }
+                (0x1B | 0x1C | 0x1D | 0x10, c) => panic!("unknown command {:#x} {c:#x} at {i}", b[i]),
+                _ => 1,
+            };
+            i += len;
+        }
+        let tail = match tickets.last() {
+            Some(last) => &b[last.as_ptr() as usize - b.as_ptr() as usize + last.len()..],
+            None => b,
+        };
+        (tickets, tail)
+    }
+
+    /// Ends with the feed past the cutter and the partial cut.
+    fn fed_and_cut(t: &[u8]) -> bool {
+        t.ends_with(&[0x1B, b'd', 4, 0x1D, b'V', 66, 0])
+    }
+
+    #[test]
+    fn compatible_mode_sends_every_copy_complete_over_one_connection() {
+        // A ticket with Thai, the app's font and a team bar: column images.
+        let mut t = ticket();
+        t.banner = Some("CURRY / แกง".into());
+        let cfg = PrinterConfig { image_mode: ImageMode::Column, copies: 3, ..PrinterConfig::default() };
+        let doc = t.escpos_for(&cfg);
+        // Sent slowly below, the printer's own font (a short job, so other
+        // tests waiting for the prints in flight do not wait for this one).
+        let short = t.escpos_for(&PrinterConfig { app_font: false, ..cfg.clone() });
+        for d in [&doc, &short] {
+            assert!(d.windows(3).any(|w| w == [0x1B, b'*', 33]));
+            let (one, tail) = tickets_in(d);
+            assert!(one.len() == 1 && tail.is_empty() && fed_and_cut(one[0]));
+        }
+        assert!(short.len() < 6 * SLOW_CHUNK, "{}", short.len());
+        let doc_paced = short;
+
+        // Compatible: all three copies on one connection, the wait between
+        // them included, each a whole ticket fed and cut; nothing after the
+        // last cut, and the connection ended (the printer read to its end).
+        let (port, reader) = slow_printer(1);
+        let target = PrinterTarget::Network { host: "127.0.0.1".into(), port };
+        let job = PrintJob::copies(target.clone(), &[], doc_paced.clone(), 3, 0).paced(true).for_mode(cfg.image_mode);
+        assert!(job.is_one_connection() && job.is_paced());
+        job.clone().send_in_background().unwrap();
+        let got = reader.join().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, doc_paced.repeat(3));
+        let (copies, tail) = tickets_in(&got[0].0);
+        assert_eq!(copies.len(), 3);
+        assert!(copies.iter().all(|c| fed_and_cut(c) && *c == doc_paced.as_slice()), "every copy whole, fed and cut");
+        assert!(tail.is_empty(), "nothing left after the last cut: {tail:?}");
+        assert!(wait_for_prints(Duration::from_secs(10)));
+
+        // Not paced (send slowly off): the same, one connection.
+        let (port, reader) = slow_printer(1);
+        let target = PrinterTarget::Network { host: "127.0.0.1".into(), port };
+        let job = PrintJob::copies(target, &[], doc.clone(), 3, 0).paced(false).for_mode(ImageMode::Column);
+        assert!(job.is_one_connection() && !job.is_paced());
+        job.send_in_background().unwrap();
+        assert_eq!(reader.join().unwrap(), vec![(doc.repeat(3), false)]);
+        assert!(wait_for_prints(Duration::from_secs(10)));
+
+        // Waiting for every copy (PrintJob::send): one connection too.
+        let (port, reader) = slow_printer(1);
+        let target = PrinterTarget::Network { host: "127.0.0.1".into(), port };
+        PrintJob::copies(target, &[], doc_paced.clone(), 2, 0).paced(true).for_mode(ImageMode::Column).send().unwrap();
+        assert_eq!(reader.join().unwrap(), vec![(doc_paced.repeat(2), false)]);
+    }
+
+    #[test]
+    fn standard_and_small_modes_still_send_each_copy_on_its_own_connection() {
+        for mode in [ImageMode::Raster, ImageMode::RasterSmall] {
+            let cfg = PrinterConfig { image_mode: mode, copies: 3, ..PrinterConfig::default() };
+            let doc = ticket().escpos_for(&cfg);
+            let (port, reader) = slow_printer(3);
+            let target = PrinterTarget::Network { host: "127.0.0.1".into(), port };
+            let job = PrintJob::copies(target, &[], doc.clone(), 3, 0).paced(false).for_mode(mode);
+            assert!(!job.one_connection && !job.is_one_connection());
+            job.send_in_background().unwrap();
+            let got = reader.join().unwrap();
+            assert_eq!(got, vec![(doc.clone(), false); 3], "{mode:?}");
+            let (copies, tail) = tickets_in(&got[0].0);
+            assert!(copies.len() == 1 && fed_and_cut(copies[0]) && tail.is_empty());
+        }
+        // Windows printers: never one connection (each copy its own spooler job).
+        let job = PrintJob::new(PrinterTarget::Windows { name: "Kitchen".into() }, vec![1]).for_mode(ImageMode::Column);
+        assert!(job.one_connection && !job.is_one_connection());
+        assert!(PrintJob::new(PrinterTarget::File { path: "COM3".into() }, vec![1]).for_mode(ImageMode::Column).is_one_connection());
+    }
+
+    #[test]
+    fn copies_of_each_kind_of_kitchen_ticket() {
+        // (title, reprint, all courses together, only starters)
+        let new_order = ("NEW ORDER", false, false, false);
+        let starters = ("NEW ORDER", false, false, true);
+        let mains_away = ("MAINS AWAY", false, false, false);
+        let added = ("ADDITIONAL", false, false, false);
+        let together = ("NEW ORDER", false, true, false);
+        let together_after_drinks = ("MAINS AWAY", false, true, false);
+        let together_added = ("ADDITIONAL", false, true, false);
+        let reprint = ("REPRINT", true, false, false);
+        let n = |cfg: &PrinterConfig, (title, re, all, st): (&str, bool, bool, bool)| kitchen_copies(cfg, title, re, all, st);
+
+        // Nothing set ("Same" everywhere): as before.
+        let plain = PrinterConfig { copies: 3, ..PrinterConfig::default() };
+        let want = [(new_order, 3), (starters, 3), (mains_away, 3), (added, 1), (together, 3), (together_after_drinks, 3), (together_added, 1), (reprint, 1)];
+        for (kind, copies) in want {
+            assert_eq!(n(&plain, kind), copies, "{kind:?}");
+        }
+        assert_eq!(call_again_copies(&plain), 3);
+
+        // The older settings still apply as before.
+        let old = PrinterConfig { starter_copies: Some(2), mains_copies: Some(4), additional_copies: Some(5), ..plain.clone() };
+        let want = [(new_order, 3), (starters, 2), (mains_away, 4), (added, 5), (together, 3), (together_after_drinks, 4), (together_added, 5), (reprint, 1)];
+        for (kind, copies) in want {
+            assert_eq!(n(&old, kind), copies, "{kind:?}");
+        }
+        assert_eq!(call_again_copies(&old), 4, "Same = Mains copies");
+
+        // The new settings: only their own tickets change.
+        let new = PrinterConfig { all_courses_copies: Some(1), call_again_copies: Some(2), ..old.clone() };
+        let want = [(new_order, 3), (starters, 2), (mains_away, 4), (added, 5), (together, 1), (together_after_drinks, 1), (together_added, 1), (reprint, 1)];
+        for (kind, copies) in want {
+            assert_eq!(n(&new, kind), copies, "{kind:?}");
+        }
+        assert_eq!(call_again_copies(&new), 2);
+        let five = PrinterConfig { all_courses_copies: Some(5), ..plain.clone() };
+        assert_eq!(n(&five, together), 5);
+        assert_eq!(n(&five, together_added), 5);
+        assert_eq!(n(&five, reprint), 1, "reprints stay at one");
+
+        // Saved without them: "Same"; saved as set; checked like the others.
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("all_courses_copies") && !json.contains("call_again_copies"), "{json}");
+        let back: PrinterConfig = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!((back.all_courses_copies, back.call_again_copies), (Some(1), Some(2)));
+        for bad in [0, 10] {
+            assert!(PrinterConfig { all_courses_copies: Some(bad), ..plain.clone() }.validate().is_err());
+            assert!(PrinterConfig { call_again_copies: Some(bad), ..plain.clone() }.validate().is_err());
+        }
+        assert!(new.validate().is_ok());
     }
 
     #[test]

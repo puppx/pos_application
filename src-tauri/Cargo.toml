@@ -16,6 +16,10 @@ tauri-build = { version = "2", features = [] }
 pos-core = { path = "../crates/pos-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-updater = "2"
+# "Start with Windows" (Settings > Devices & display): the HKCU Run key on Windows.
+tauri-plugin-autostart = "2.7"
+# A second start (a double-click, or autostart while already open) shows the open window instead.
+tauri-plugin-single-instance = "2.5"
 serde.workspace = true
 serde_json.workspace = true
 tiny_http = "0.12"

@@ -606,7 +606,7 @@ impl Pos {
         let r = self.receipt(s, order_id)?;
         // A bill handed over before payment: no second copy at payment.
         self.conn.execute("UPDATE orders SET bill_printed_at = unixepoch() WHERE id = ?1 AND status = 'open'", [order_id])?;
-        Ok(PrintJob::new(cfg.printer.target.clone(), r.escpos_for(&cfg.printer)).paced(cfg.printer.slow_send).about(format!("Bill #{order_id}")))
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.escpos_for(&cfg.printer)).paced(cfg.printer.slow_send).for_mode(cfg.printer.image_mode).about(format!("Bill #{order_id}")))
     }
 
     /// Reprint the staff copy of a paid order.
@@ -616,7 +616,7 @@ impl Pos {
             return invalid("no receipt printer is set up (Settings → Receipt printer)");
         }
         let r = self.receipt(s, order_id)?;
-        Ok(PrintJob::new(cfg.printer.target.clone(), r.staff_escpos_for(&cfg.printer)).paced(cfg.printer.slow_send).about(format!("Staff copy #{order_id}")))
+        Ok(PrintJob::new(cfg.printer.target.clone(), r.staff_escpos_for(&cfg.printer)).paced(cfg.printer.slow_send).for_mode(cfg.printer.image_mode).about(format!("Staff copy #{order_id}")))
     }
 
     /// What to print right after a payment: the receipt (if automatic,
@@ -640,20 +640,29 @@ impl Pos {
             .unwrap_or(false);
         // Sent slowly, the drawer pulse goes on its own, ahead of kitchen
         // tickets still waiting for a shared printer; the receipt follows.
-        let apart = drawer && p.slow_send;
+        // Not in the compatible mode (older printers): a printer that takes
+        // one connection at a time could turn the receipt's away, so the
+        // pulse starts the receipt's connection, the first bytes sent (the
+        // drawer opens even if the receipt then fails), and that job goes
+        // ahead of the waiting kitchen tickets instead.
+        let one_connection = p.image_mode == crate::ImageMode::Column;
+        let apart = drawer && p.slow_send && !one_connection;
         let lead: &[u8] = if apart { &[] } else { lead };
         let mut job = match &r {
-            Some(r) if cfg.auto_print && !bill_given => Some(PrintJob::copies(p.target.clone(), lead, r.escpos_for(p), p.copies, p.copy_delay_secs).paced(p.slow_send)),
+            Some(r) if cfg.auto_print && !bill_given => Some(PrintJob::copies(p.target.clone(), lead, r.escpos_for(p), p.copies, p.copy_delay_secs).paced(p.slow_send).for_mode(p.image_mode)),
             _ if apart => None,
-            _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec()).paced(p.slow_send).urgent()),
+            _ => drawer.then(|| PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec()).paced(p.slow_send).for_mode(p.image_mode).urgent()),
         };
         // The staff copy follows the customer's, as one more part of the job.
         if let (Some(r), true) = (&r, cfg.staff_copy && order.status == "paid") {
             let staff = r.staff_escpos_for(p);
             match &mut job {
                 Some(j) => j.parts.push(staff),
-                None => job = Some(PrintJob::new(p.target.clone(), staff).paced(p.slow_send)),
+                None => job = Some(PrintJob::new(p.target.clone(), staff).paced(p.slow_send).for_mode(p.image_mode)),
             }
+        }
+        if drawer && one_connection {
+            job = job.map(PrintJob::urgent);
         }
         if apart {
             let mut pulse = PrintJob::new(p.target.clone(), DRAWER_KICK.to_vec()).paced(true).urgent();
@@ -674,7 +683,7 @@ impl Pos {
             return invalid("no receipt printer is set up, so the drawer cannot be opened");
         }
         self.audit(Some(s.user_id), "drawer.open", "no sale")?;
-        Ok(PrintJob::new(cfg.printer.target, DRAWER_KICK.to_vec()).paced(cfg.printer.slow_send).urgent().about("Cash drawer"))
+        Ok(PrintJob::new(cfg.printer.target, DRAWER_KICK.to_vec()).paced(cfg.printer.slow_send).for_mode(cfg.printer.image_mode).urgent().about("Cash drawer"))
     }
 
     /// Check the settings: a sample receipt (with the configured copies), or
@@ -683,7 +692,7 @@ impl Pos {
         s.require(Permission::ManageSettings)?;
         cfg.validate()?;
         if drawer_only {
-            return Ok(PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()).paced(cfg.printer.slow_send).urgent().about("Cash drawer"));
+            return Ok(PrintJob::new(cfg.printer.target.clone(), DRAWER_KICK.to_vec()).paced(cfg.printer.slow_send).for_mode(cfg.printer.image_mode).urgent().about("Cash drawer"));
         }
         let thai = matches!(cfg.printer.names, Some(PrintNames::Both | PrintNames::Thai));
         let alt = |t: &str| thai.then(|| t.to_string());
@@ -715,7 +724,7 @@ impl Pos {
             show_staff: cfg.show_staff,
         };
         let p = &cfg.printer;
-        Ok(PrintJob::copies(p.target.clone(), &[], r.escpos_for(p), p.copies, p.copy_delay_secs).paced(p.slow_send).about("Test receipt"))
+        Ok(PrintJob::copies(p.target.clone(), &[], r.escpos_for(p), p.copies, p.copy_delay_secs).paced(p.slow_send).for_mode(p.image_mode).about("Test receipt"))
     }
 }
 

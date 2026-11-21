@@ -785,6 +785,22 @@ td.short, strong.short { color: var(--danger); }
 /* Phones: the filter chips scroll sideways in one row. */
 @media (max-width: 700px) { .kds-bar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; } .kds-bar > * { flex: none; } }
 .kds-done { margin: 10px; min-height: 52px; font-size: 18px; }
+/* A dish cancelled after it was sent: struck through, muted, a dark pill; a card of only those has a striped head. */
+.kds-item.cancelled { cursor: default; background: var(--surface-2); }
+.kds-item.cancelled .kds-qty, .kds-item.cancelled .kds-name { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 2px; }
+.kds-item.cancelled .kds-name small.kds-note { background: transparent; color: var(--muted); padding: 0; }
+.kds-pill { margin-left: auto; flex: none; align-self: center; padding: 3px 9px; border-radius: 999px; background: var(--ink-2); color: var(--surface); font-size: 13px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; }
+/* Cancelled ≠ late: a dark striped head and a dashed border, never red (red means late).
+   Dark mode, chosen or from the device (Auto), is <html data-theme="dark">, set by app.js. */
+.kds-card.cancelled { border: 2px dashed var(--muted); }
+.kds-card.cancelled .kds-head {
+  background: repeating-linear-gradient(-45deg, #475467 0 14px, #344054 14px 28px);
+  color: #fff;
+}
+:root[data-theme="dark"] .kds-card.cancelled .kds-head {
+  background: repeating-linear-gradient(-45deg, #3a4558 0 14px, #2a3242 14px 28px);
+}
+.kds-card.cancelled .kds-head .kds-age { font-size: 20px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .kds-item { justify-content: flex-start; }
 
 /* Finish & Pay: everything on one screen. The header (close) and the footer

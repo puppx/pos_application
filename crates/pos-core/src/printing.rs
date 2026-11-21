@@ -2145,13 +2145,21 @@ impl Pos {
             } else {
                 vec![OrderItem { qty: gone, ..cur.clone() }]
             };
+            // The kitchen screen shows the same dishes struck through for a
+            // while; read now, while they are still on the order, and kept
+            // once the change is made.
+            let shown: Vec<(i64, Option<i64>)> = kitchen_only(&lines).iter().map(|i| (i.id, Some(i.qty))).collect();
+            let shown = self.kds_cancel_snapshot(order_id, &shown)?;
             // Removed altogether: the ticket is made first, while the set's
             // line (its name heads its dishes) is still on the order.
             if upd.qty == 0 {
                 let job = self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?;
-                return Ok((self.update_item_approved(s, approver, item_id, upd)?, job));
+                let order = self.update_item_approved(s, approver, item_id, upd)?;
+                self.kds_note_cancelled(shown);
+                return Ok((order, job));
             }
             let order = self.update_item_approved(s, approver, item_id, upd)?;
+            self.kds_note_cancelled(shown);
             let job = self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?;
             return Ok((order, job));
         }
@@ -2245,7 +2253,12 @@ impl Pos {
             let lines: Vec<OrderItem> = o.items.into_iter().filter(|i| cooking.contains(&i.id)).collect();
             self.kitchen_change_job(s, order_id, "CANCELLED", &lines)?
         };
+        // The same dishes stay on the kitchen screen a while, struck through
+        // (whether or not the ticket prints: the screen is not paper).
+        let shown: Vec<(i64, Option<i64>)> = cooking.iter().map(|&id| (id, None)).collect();
+        let shown = self.kds_cancel_snapshot(order_id, &shown)?;
         self.cancel_order_logged(s, by, note, order_id, reason)?;
+        self.kds_note_cancelled(shown);
         Ok(job)
     }
 

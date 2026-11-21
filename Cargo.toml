@@ -5,7 +5,7 @@ members = ["crates/pos-core", "src-tauri"]
 exclude = ["vendor/tiny_http"]
 
 [workspace.package]
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 license = "UNLICENSED"
 

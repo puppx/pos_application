@@ -542,7 +542,7 @@ impl Pos {
         let counts = MenuCounts { categories: cats.len(), items: backup.items.len(), option_groups: groups.len() };
         tx.execute(
             "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'menu.restore', ?2)",
-            params![s.user_id, format!("{} items", counts.items)],
+            params![s.user_id, crate::plural(counts.items as i64, "item", "items")],
         )?;
         tx.commit()?;
         Ok(counts)

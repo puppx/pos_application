@@ -2190,7 +2190,20 @@ impl Pos {
     pub fn cancel_order_confirmed_hashed(&mut self, s: &Session, order_id: i64, reason: &str, pin: Option<&crate::HashedPin>) -> Result<Option<PrintJob>> {
         match pin.filter(|p| !p.is_empty()) {
             None => {
-                s.require(Permission::CancelWithoutPin)?;
+                // A mistake order (nothing sent, nothing paid) is anyone's
+                // to cancel with a confirm; once the kitchen has a dish or a
+                // payment is taken, staff need a PIN as before.
+                if !s.role.can(Permission::CancelWithoutPin) {
+                    let (sent, paid): (bool, bool) = self.conn.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM order_items WHERE order_id = ?1 AND (sent_at IS NOT NULL OR prep_sent_at IS NOT NULL)),
+                                EXISTS (SELECT 1 FROM payments WHERE order_id = ?1)",
+                        [order_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    if sent || paid {
+                        return Err(crate::PosError::Forbidden);
+                    }
+                }
                 let note = format!("(no PIN, {})", s.role.as_str());
                 self.cancel_for_kitchen_logged(s, s, &note, order_id, reason)
             }
@@ -2316,7 +2329,7 @@ impl Pos {
             let mut t = base.clone();
             t.items = Vec::new();
             for (banner, group) in groups {
-                let mut part = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names, base.by_course)? };
+                let mut part = if base.brief { self.brief_items(&group, names)? } else { self.ticket_items(&group, names, base.by_course)? };
                 for it in &mut part {
                     it.team = banner.clone();
                 }
@@ -2328,22 +2341,22 @@ impl Pos {
             .into_iter()
             .map(|(banner, group)| {
                 let mut t = base.clone();
-                t.items = if base.brief { self.brief_items(&group, names) } else { self.ticket_items(&group, names, base.by_course)? };
+                t.items = if base.brief { self.brief_items(&group, names)? } else { self.ticket_items(&group, names, base.by_course)? };
                 t.banner = banner;
                 Ok(t)
             })
             .collect()
     }
 
-    /// Dishes for the short "main course" ticket: no options or notes.
-    fn brief_items(&self, items: &[OrderItem], names: PrintNames) -> Vec<TicketItem> {
-        items
-            .iter()
-            .map(|i| {
-                let (name, name_alt) = names.pick(&i.name, i.name_alt.as_deref());
-                TicketItem { team: None, set: None, category: None, qty: i.qty, name: name.to_string(), name_alt: name_alt.map(str::to_string), options: vec![], note: None, set_note: None }
-            })
-            .collect()
+    /// Dishes for the short "main course" ticket: laid out as on the full
+    /// tickets (a set's dishes under its name and its note, each dish with
+    /// its note), without the options.
+    fn brief_items(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<TicketItem>> {
+        let mut out = self.ticket_items(items, names, false)?;
+        for it in &mut out {
+            it.options.clear();
+        }
+        Ok(out)
     }
 
     /// Print job for `items`, or None when no kitchen printer is set up.
@@ -2467,7 +2480,7 @@ impl Pos {
             order_id: o.id,
             time: chrono::Local::now().format("%H:%M").to_string(),
             staff: String::new(),
-            items: self.brief_items(mains, names),
+            items: self.brief_items(mains, names)?,
             footer: None,
             brief: true,
             large: self.kitchen_printer()?.large_text,

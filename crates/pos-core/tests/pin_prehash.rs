@@ -32,8 +32,20 @@ fn a_pin_hashed_ahead_logs_in_and_approves_like_a_typed_one() {
     assert_eq!(pos.pin_owner_hashed(&hasher.hash("3333"), Some(s.user_id)).unwrap().role, Role::Manager);
     assert_eq!(pos.pin_owner_hashed(&HashedPin::later("3333"), Some(s.user_id)).unwrap().role, Role::Manager);
     assert!(matches!(pos.pin_owner_hashed(&hasher.hash("4444"), Some(s.user_id)), Err(PosError::InvalidPin)));
+    // An order the kitchen has: staff need a PIN to cancel it (one with nothing
+    // sent or paid is anyone's to cancel with a confirm, so it would prove nothing).
+    let soup = pos
+        .create_product(&admin, NewProduct {
+            category_id: None, sku: None, barcode: None, name: "Soup".into(), price_cents: 500, cost_cents: 0, tax_rate_bp: Some(0),
+            stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+        })
+        .unwrap();
     let o = pos.open_order(&s, &NewOrder { order_type: OrderType::Takeaway, table_id: None, channel_id: None, details: Default::default() }).unwrap();
+    pos.add_item(&s, o.id, soup.id, 1, None, None, &[]).unwrap();
+    pos.send_to_kitchen(&s, o.id).unwrap();
     assert!(matches!(pos.cancel_order_confirmed_hashed(&s, o.id, "", None), Err(PosError::Forbidden)));
+    // Sam's own PIN is not enough once it is in the kitchen; the manager's, hashed ahead, is.
+    assert!(matches!(pos.cancel_order_confirmed_hashed(&s, o.id, "", Some(&hasher.hash("2222"))), Err(PosError::Forbidden)));
     pos.cancel_order_confirmed_hashed(&s, o.id, "", Some(&hasher.hash("3333"))).unwrap();
     assert_eq!(pos.get_order(&admin, o.id).unwrap().status, "cancelled");
 }

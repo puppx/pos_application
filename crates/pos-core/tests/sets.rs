@@ -312,3 +312,29 @@ fn removing_a_sent_set_tells_the_kitchen_which_dishes_are_cancelled() {
     let (_, job) = k.pos.update_item_for_kitchen(&k.s, soup, &remove).unwrap();
     assert!(job.is_none());
 }
+
+#[test]
+fn calling_mains_again_prints_the_set_note_and_the_dish_notes() {
+    let mut k = setup();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    let o = k.pos.add_set(&k.s, o.id, k.set.id, &picks(&k, k.soup.id), Some("no peanuts in anything")).unwrap();
+    let curry = o.items.iter().find(|i| i.product_id == k.curry.id).unwrap().clone();
+    k.pos.update_item(&k.s, curry.id, &ItemUpdate { qty: 1, discount_cents: 0, note: Some("extra hot".into()) }).unwrap();
+    let o = k.pos.add_item(&k.s, o.id, k.satay.id, 2, Some("sauce on the side"), None, &[]).unwrap();
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    k.pos.call_mains(&k.s, o.id).unwrap();
+    let text = String::from_utf8_lossy(&k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes()).to_string();
+    assert!(text.contains("MAIN COURSE"), "{text}");
+    // As on the full tickets: the set under its name with its note, each dish with its note.
+    let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s} missing: {text}"));
+    assert!(at("SET: DINNER SET") < at("** no peanuts in") && at("** no peanuts in") < at("1 x Green curry"), "{text}");
+    assert!(at("1 x Green curry") < at("** extra hot") && at("** extra hot") < at("1 x Jasmine rice"), "{text}");
+    assert!(at("2 x Satay") < at("** sauce on the"), "{text}");
+    assert!(!text.contains("Soup"), "the starter is not called again: {text}");
+    // Just the table: still no dishes and no notes.
+    let mut cfg = k.pos.kitchen_printer().unwrap();
+    cfg.call_table_only = true;
+    k.pos.set_kitchen_printer(&k.s, &cfg).unwrap();
+    let text = String::from_utf8_lossy(&k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes()).to_string();
+    assert!(text.contains("MAIN COURSE") && !text.contains("Green curry") && !text.contains("peanuts") && !text.contains("extra hot"), "{text}");
+}

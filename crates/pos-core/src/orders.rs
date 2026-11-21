@@ -164,6 +164,37 @@ pub struct ItemUpdate {
     pub note: Option<String>,
 }
 
+/// What a till knew about a line when it changed it ([`Pos::resolve_item_update`]),
+/// so a change made on a stale screen never undoes one made on another till.
+/// Every field is optional: left out, the update is taken as it comes.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ItemCheck {
+    /// The quantity the till showed: refused with [`ITEM_CHANGED`] when the
+    /// line now has another.
+    #[serde(default)]
+    pub expected_qty: Option<i64>,
+    /// The discount the till showed, likewise.
+    #[serde(default)]
+    pub expected_discount_cents: Option<i64>,
+    /// One more (+1) or one less (-1) than the line has now (the order
+    /// screen's + and −): the update's own quantity, discount and note are
+    /// ignored; the line's note stays and its discount keeps its share when
+    /// it gets fewer. Taps made faster than the till hears back all count.
+    /// 0: a new note alone (the update's note), on the line's quantity and
+    /// discount as they are now: a note never conflicts with another till's
+    /// change of quantity.
+    #[serde(default)]
+    pub qty_delta: Option<i64>,
+}
+
+/// The answer when a line is not as the till showed it ([`ItemCheck`]).
+pub const ITEM_CHANGED: &str = "This dish changed on another till";
+/// The answer when a payment's `expected_left_cents` is not what is left to
+/// pay now ([`Pos::add_payment_checked`]).
+pub const BILL_CHANGED: &str = "The bill changed on another till";
+/// The answer for a change that would make the bill less than its payments.
+pub const BELOW_PAID: &str = "That would make the bill less than what is already paid. Take a payment back first";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderItem {
     pub id: i64,
@@ -695,6 +726,22 @@ fn drop_if_empty(tx: &Transaction, order_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// After a change in `tx`: refused ([`BELOW_PAID`]) when the order's total
+/// is now less than its payments (dishes removed or discounted, service or
+/// tax cut after a part payment), so it never closes overpaid.
+fn check_covers_paid(tx: &Transaction, order_id: i64) -> Result<()> {
+    let paid: i64 = tx.query_row("SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE order_id = ?1", [order_id], |r| r.get(0))?;
+    if paid == 0 {
+        return Ok(());
+    }
+    let (service_bp, tax_incl): (i64, bool) =
+        tx.query_row("SELECT service_bp, tax_incl FROM orders WHERE id = ?1", [order_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if totals(&load_items(tx, order_id)?, service_bp, tax_incl).total < paid {
+        return invalid(BELOW_PAID);
+    }
+    Ok(())
+}
+
 /// Close an order its payments cover: totals, the payment summary (one
 /// method, or NULL when mixed) and stock for tracked items.
 fn close_paid(tx: &Transaction, s: &Session, order_id: i64, t: &Totals) -> Result<()> {
@@ -939,6 +986,33 @@ impl Pos {
         Ok(o)
     }
 
+    /// [`Pos::update_order_details`] changing only `fields` (customer_name,
+    /// customer_phone, delivery_address, notes, external_ref, customer_id):
+    /// the others keep what they have now, so two tills editing different
+    /// details never undo each other. None: every field, as before.
+    pub fn update_order_details_fields(&self, s: &Session, id: i64, details: &OrderDetails, fields: Option<&[String]>) -> Result<Order> {
+        let Some(fields) = fields else { return self.update_order_details(s, id, details) };
+        s.require(Permission::Sell)?;
+        require_open(&self.conn, id)?;
+        let mut d: OrderDetails = self.conn.query_row(
+            "SELECT customer_name, customer_phone, delivery_address, notes, external_ref, customer_id FROM orders WHERE id = ?1",
+            [id],
+            |r| Ok(OrderDetails { customer_name: r.get(0)?, customer_phone: r.get(1)?, delivery_address: r.get(2)?, notes: r.get(3)?, external_ref: r.get(4)?, customer_id: r.get(5)? }),
+        )?;
+        for f in fields {
+            match f.as_str() {
+                "customer_name" => d.customer_name = details.customer_name.clone(),
+                "customer_phone" => d.customer_phone = details.customer_phone.clone(),
+                "delivery_address" => d.delivery_address = details.delivery_address.clone(),
+                "notes" => d.notes = details.notes.clone(),
+                "external_ref" => d.external_ref = details.external_ref.clone(),
+                "customer_id" => d.customer_id = details.customer_id,
+                other => return invalid(format!("unknown order detail {other}")),
+            }
+        }
+        self.update_order_details(s, id, &d)
+    }
+
     pub fn update_order_details(&self, s: &Session, id: i64, details: &OrderDetails) -> Result<Order> {
         s.require(Permission::Sell)?;
         require_open(&self.conn, id)?;
@@ -960,6 +1034,37 @@ impl Pos {
         )?;
         tx.commit()?;
         self.get_order(s, id)
+    }
+
+    /// Where an order that no longer exists went: the open bill its dishes
+    /// were last joined or moved onto (the till says "Moved to Table 5"),
+    /// or None.
+    pub fn moved_to(&self, s: &Session, order_id: i64) -> Result<Option<Order>> {
+        s.require(Permission::Sell)?;
+        let gone: bool = self.conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM orders WHERE id = ?1)", [order_id], |r| r.get(0))?;
+        if !gone {
+            return Ok(None);
+        }
+        let detail: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT detail FROM audit_log WHERE order_id = ?1 AND action IN ('order.merge', 'order.move_items') ORDER BY id DESC LIMIT 1",
+                [order_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let prefix = format!("{order_id} -> order ");
+        let target = detail
+            .as_deref()
+            .and_then(|d| d.strip_prefix(&prefix))
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|n| n.parse::<i64>().ok());
+        let Some(target) = target else { return Ok(None) };
+        match self.get_order(s, target) {
+            Ok(o) if o.status == "open" => Ok(Some(o)),
+            Ok(_) | Err(PosError::NotFound) | Err(PosError::Forbidden) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Move a dine-in order to another (free) table, on any floor.
@@ -1043,7 +1148,7 @@ impl Pos {
         take_order_tax(&tx, order_id, target, &ids)?;
         let by = move_approval(&tx, s, approver, order_id, target, tax_lowered(&before, &priced_rates(&tx, &ids)?))?;
         drop_if_empty(&tx, order_id)?;
-        audit_tx(&tx, s.user_id, "order.move_items", &format!("{order_id} -> order {target}: {moved} dish(es){}", move_note(s, by)))?;
+        audit_tx(&tx, s.user_id, "order.move_items", &format!("{order_id} -> order {target}: {}{}", crate::plural(moved, "dish", "dishes"), move_note(s, by)))?;
         tx.commit()?;
         self.get_order(s, target)
     }
@@ -1368,6 +1473,34 @@ impl Pos {
             .ok_or(PosError::NotFound)
     }
 
+    /// The update to make to line `item_id` given what the till knew
+    /// ([`ItemCheck`]): refused with [`ITEM_CHANGED`] (a conflict) when the
+    /// line's quantity or discount is not what the till showed; with a
+    /// `qty_delta`, the line as it is now with that many more or fewer.
+    /// Call it under the same lock as the update itself (the commands do).
+    pub fn resolve_item_update(&self, item_id: i64, upd: &ItemUpdate, check: &ItemCheck) -> Result<ItemUpdate> {
+        let (qty, discount, note): (i64, i64, Option<String>) = self
+            .conn
+            .prepare_cached("SELECT qty, discount_cents, note FROM order_items WHERE id = ?1")?
+            .query_row([item_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?
+            .ok_or(PosError::NotFound)?;
+        if check.expected_qty.is_some_and(|q| q != qty) || check.expected_discount_cents.is_some_and(|d| d != discount) {
+            return Err(PosError::Conflict(ITEM_CHANGED.into()));
+        }
+        let Some(delta) = check.qty_delta else { return Ok(upd.clone()) };
+        if !(-MAX_QTY..=MAX_QTY).contains(&delta) {
+            return invalid("that is too many at once");
+        }
+        if delta == 0 {
+            return Ok(ItemUpdate { qty, discount_cents: discount, note: upd.note.clone() });
+        }
+        let new = (qty + delta).max(0);
+        // Fewer: the discount keeps its share of the line (as the till works it out).
+        let discount = if new > 0 && new < qty { discount * new / qty } else { discount };
+        Ok(ItemUpdate { qty: new, discount_cents: discount, note })
+    }
+
     /// Change quantity, discount or note on a line; qty 0 removes it.
     /// Lines already sent to the kitchen (food that has been made) can only
     /// be reduced or removed by a manager or an admin, or by staff with one's
@@ -1490,6 +1623,7 @@ impl Pos {
         if upd.discount_cents != cur.discount_cents && upd.qty > 0 {
             audit_tx(&tx, s.user_id, "order.discount", &format!("order {order_id} {} {}", cur.name, upd.discount_cents))?;
         }
+        check_covers_paid(&tx, order_id)?;
         tx.commit()?;
         self.get_order(s, order_id)
     }
@@ -1649,6 +1783,7 @@ impl Pos {
             let by = if rate_bp < was { approved_by(s, approver, MONEY_APPROVAL, SERVICE_NEEDS_PIN)? } else { s };
             tx.execute("UPDATE orders SET service_bp = ?2 WHERE id = ?1", params![order_id, rate_bp])?;
             audit_tx(&tx, s.user_id, "order.service", &format!("{order_id} {rate_bp} (was {was}) {}", approval_note(s, by)))?;
+            check_covers_paid(&tx, order_id)?;
         }
         tx.commit()?;
         self.get_order(s, order_id)
@@ -1702,6 +1837,7 @@ impl Pos {
                 )?,
             };
             audit_tx(&tx, s.user_id, "order.tax", &format!("{order_id} {rate_bp:?} (was {was:?}) {}", approval_note(s, by)))?;
+            check_covers_paid(&tx, order_id)?;
         }
         tx.commit()?;
         self.get_order(s, order_id)
@@ -1725,19 +1861,22 @@ impl Pos {
     /// Other on an order that is not from a delivery app (no money comes
     /// into the till for it). The audit log says who approved it.
     pub fn add_payment_approved(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, p: &PaymentInput) -> Result<Order> {
+        self.add_payment_checked(s, approver, order_id, p, None)
+    }
+
+    /// [`Pos::add_payment_approved`] from a pay dialog that showed
+    /// `expected_left` as left to pay: refused with [`BILL_CHANGED`] (a
+    /// conflict, nothing taken) when another till has changed the bill
+    /// since, so the payment is never for more or less than the till showed.
+    /// None: no check, as before.
+    ///
+    /// A bill with nothing to pay (every dish free or fully discounted, a
+    /// total of 0) closes as paid with no payment, logged as
+    /// `order.closed_nothing_to_pay`.
+    pub fn add_payment_checked(&mut self, s: &Session, approver: Option<&Session>, order_id: i64, p: &PaymentInput, expected_left: Option<i64>) -> Result<Order> {
         s.require(Permission::Sell)?;
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_open(&tx, order_id)?;
-        let other_by = if p.method == PaymentMethod::Other {
-            let channel: Option<i64> = tx.query_row("SELECT channel_id FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
-            if channel.is_none() {
-                Some(approved_by(s, approver, MONEY_APPROVAL, OTHER_PAY_NEEDS_PIN)?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
         let items = load_items(&tx, order_id)?;
         if items.is_empty() {
             return invalid("the order is empty");
@@ -1748,12 +1887,34 @@ impl Pos {
         let earlier = load_payments(&tx, order_id)?;
         let paid: i64 = earlier.iter().map(|p| p.amount_cents).sum();
         let left = t.total - paid;
-        // Already covered (dishes taken off after a part payment): just close.
-        if left <= 0 && !earlier.is_empty() {
+        if expected_left.is_some_and(|e| e != left.max(0)) {
+            return Err(PosError::Conflict(BILL_CHANGED.into()));
+        }
+        // Already covered (dishes taken off after a part payment), or nothing
+        // to pay at all (a total of 0): just close.
+        if left <= 0 && (!earlier.is_empty() || t.total == 0) {
+            // Closed with no payment: a tip would have nothing to go on, so it is
+            // refused rather than dropped.
+            if p.tip_cents != 0 {
+                return invalid("Nothing to pay on this bill, so a tip cannot be taken with it");
+            }
             close_paid(&tx, s, order_id, &t)?;
+            if earlier.is_empty() {
+                audit_tx(&tx, s.user_id, "order.closed_nothing_to_pay", &format!("order {order_id}: closed with nothing to pay"))?;
+            }
             tx.commit()?;
             return self.get_order(s, order_id);
         }
+        let other_by = if p.method == PaymentMethod::Other {
+            let channel: Option<i64> = tx.query_row("SELECT channel_id FROM orders WHERE id = ?1", [order_id], |r| r.get(0))?;
+            if channel.is_none() {
+                Some(approved_by(s, approver, MONEY_APPROVAL, OTHER_PAY_NEEDS_PIN)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut chosen: Option<String> = None;
         let amount = if let Some(sel) = &p.items {
             let mut paid_qty: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
@@ -1783,12 +1944,18 @@ impl Pos {
             let mut list: Vec<(i64, i64)> = picked.into_iter().collect();
             list.sort();
             chosen = Some(serde_json::to_string(&list).map_err(|e| PosError::Internal(e.to_string()))?);
-            if everything || all == 0 {
+            let share = if everything || all == 0 {
                 left
             } else {
                 ((t.total as i128 * part as i128 + all as i128 / 2) / all as i128) as i64
             }
-            .min(left)
+            .min(left);
+            // The share the pay dialog showed (sent by tills from 0.14.1 on): the
+            // dishes' share now is another amount = the bill changed since.
+            if p.amount_cents.is_some_and(|shown| shown != share) {
+                return Err(PosError::Conflict(BILL_CHANGED.into()));
+            }
+            share
         } else {
             p.amount_cents.unwrap_or(left)
         };

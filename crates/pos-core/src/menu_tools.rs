@@ -75,7 +75,7 @@ impl Pos {
             &format!("UPDATE products AS p SET tax_rate_bp = {RATE}, updated_at = unixepoch() WHERE {UNTAXED}"),
             [default],
         )?;
-        self.audit(Some(s.user_id), "menu.apply_default_tax", &format!("{changed} items, default {default}"))?;
+        self.audit(Some(s.user_id), "menu.apply_default_tax", &format!("{}, default {default}", crate::plural(changed as i64, "item", "items")))?;
         Ok(changed)
     }
 
@@ -243,7 +243,7 @@ impl Pos {
         }
         tx.execute(
             "INSERT INTO audit_log (user_id, action, detail) VALUES (?1, 'menu.import', ?2)",
-            params![s.user_id, format!("{} items, {} new categories", report.items, report.new_categories.len())],
+            params![s.user_id, format!("{}, {}", crate::plural(report.items as i64, "item", "items"), crate::plural(report.new_categories.len() as i64, "new category", "new categories"))],
         )?;
         tx.commit()?;
         Ok(report)

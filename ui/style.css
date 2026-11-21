@@ -2533,3 +2533,27 @@ body.h12 .ract .arow { grid-template-columns: 64px 28px minmax(0, 1fr) auto; }
 .tdup .sseg { flex: 0 1 auto; }
 @media (max-width: 700px) { .tdup .sseg { flex: 1 1 100%; display: flex; } .tdup .sseg button { flex: 1 1 0; } }
 .ract .arow.look { box-shadow: none; }
+/* 1024x600 (short screens tighten taps to 42px): these stay at 44px. */
+.dialog.help-dialog .icon-btn { min-width: 44px; min-height: 44px; }
+.dialog.help-dialog > button.primary { min-height: 44px; }
+.mside-search input { min-height: 44px; }
+/* Recovery screen (main till) and "needs attention" (browsers). */
+.lock-card.recovery { max-width: 580px; width: 100%; text-align: left; gap: 14px; }
+.lock-card.recovery .eic { display: inline-grid; place-items: center; width: 60px; height: 60px; border-radius: 50%; background: var(--surface-2); }
+.lock-card.recovery .eic.bad { background: var(--danger-soft, var(--warn-soft)); color: var(--danger, inherit); }
+.lock-card.recovery > button { min-height: 52px; justify-content: center; }
+.recovery-status { display: flex; align-items: center; gap: 10px; min-height: 24px; }
+.recovery-status .spin { width: 18px; height: 18px; }
+.lock-card.recovery details { overflow-wrap: anywhere; }
+/* A toast while a sheet or dialog is open (or a note not about the page): the very top. */
+#toast.top { top: 8px; bottom: auto; max-width: min(440px, calc(100vw - 32px)); }
+/* Pay dialog: what happened to the last Confirm, above the Confirm row (until the next Confirm). */
+.pay-note { grid-column: 1 / -1; order: -1; margin: 0 0 10px; padding: 10px 14px; border-radius: 10px; font-weight: 600; font-size: 15px; line-height: 1.35; }
+.pay-note.ok { background: var(--go-soft); color: var(--ink); }
+.pay-note.warn { background: var(--warn-soft); color: var(--ink); border: 1px solid var(--amber-line); }
+.pay-note.bad { background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger); }
+.pay-ok .spin { width: 18px; height: 18px; margin-right: 8px; }
+.dialog > .pay-note { margin: 0; }
+.unsent-list { margin: 6px 0 0; padding-left: 20px; font-weight: 600; color: var(--ink); }
+.recovery-age .spin { display: inline-block; vertical-align: -2px; margin-right: 6px; }
+#modal .unsent-acts button { min-height: 44px; }

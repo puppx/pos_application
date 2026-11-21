@@ -243,6 +243,14 @@ fn old_paid_orders_get_their_payment_on_upgrade() {
         .unwrap();
     }
     let mut pos = Pos::open(&path).unwrap();
+    {
+        // The tickets come back as 0034 rebuilds them: ids never reused.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let sql: String = conn.query_row("SELECT sql FROM sqlite_schema WHERE name = 'ticket_messages'", [], |r| r.get(0)).unwrap();
+        assert!(sql.contains("AUTOINCREMENT") && sql.contains("REFERENCES \"tickets\""), "{sql}");
+        let seq: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_sequence WHERE name IN ('tickets', 'ticket_messages')", [], |r| r.get(0)).unwrap();
+        assert_eq!(seq, 2);
+    }
     let admin = pos.login("1111").unwrap();
     let o = pos.get_order(&admin, 1).unwrap();
     assert_eq!(o.payments.len(), 1);

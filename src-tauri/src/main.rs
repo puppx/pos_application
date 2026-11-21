@@ -16,6 +16,31 @@ use tauri_plugin_updater::UpdaterExt;
 
 use commands::{auto_backup, dispatch, require_updates, unique_backup_path, with_device_settings, App, Job, LOCAL};
 
+// ---- recovery (desktop only) ----
+
+/// "Choose a backup…" on the recovery screen (the data is damaged): the
+/// native file picker, then the file is checked and kept in the backup
+/// folder as "pos-imported-<time>.db". None if the picker was cancelled.
+#[tauri::command(async)]
+fn pick_recovery_backup(app: Cmd<'_>, handle: AppHandle) -> Result<Option<Value>> {
+    use tauri_plugin_dialog::DialogExt;
+    // Refused before the picker opens when the data is not damaged.
+    dispatch(&app, LOCAL, "recovery_status", Value::Null)?;
+    let Some(picked) = handle.dialog().file().set_title("Choose a POS backup").add_filter("POS backup", &["db"]).blocking_pick_file() else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| PosError::Validation(format!("cannot use that file: {e}")))?;
+    let found = commands::recovery_import(&app, &path)?;
+    serde_json::to_value(found).map(Some).map_err(|e| PosError::Internal(e.to_string()))
+}
+
+/// Restart the app (after a restore from the recovery screen, so the
+/// local server and the automatic backups start with the restored data).
+#[tauri::command(async)]
+fn restart_app(handle: AppHandle) {
+    handle.restart();
+}
+
 const AUTO_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The daily backup starts this long after the window opens, so the first
 /// screens load without competing for the disk.
@@ -332,7 +357,21 @@ fn main() {
             // Prints that fail after the till was told they were sent.
             pos_core::set_print_error_log(Some(data_dir.join("print-errors.log")));
             let db = data_dir.join("pos.db");
-            let mut pos = Pos::open(&db)?;
+            // Damaged so badly it does not open: start with only the
+            // recovery screen on this window (see `App::cannot_open`).
+            let mut pos = match Pos::open(&db) {
+                Ok(pos) => Some(pos),
+                Err(e) if is_corrupt(&e) => {
+                    eprintln!("the database cannot be opened: {e}");
+                    let state = App::cannot_open(e.to_string(), backup_dir.clone())?;
+                    state.set_db_path(db.clone());
+                    app.manage(state);
+                    app.manage(ServerState::default());
+                    None
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let Some(mut pos) = pos.take() else { return Ok(()) };
             // Left over from the last run: it did not close properly.
             let marker = data_dir.join("pos.running");
             let unclean = marker.exists();
@@ -353,8 +392,14 @@ fn main() {
                 state.set_db_path(db.clone());
                 commands::mark_unchanged(&state);
                 // After a crash: check the data and take an emergency backup
-                // before anyone sells (or, if damaged, none at all).
-                commands::startup_check(&state, unclean);
+                // before anyone sells (or, if damaged, none at all). After a
+                // proper close: a quick check, in the background.
+                if unclean {
+                    commands::startup_check(&state, true);
+                } else {
+                    let handle = app.handle().clone();
+                    std::thread::spawn(move || commands::startup_check(&handle.state::<App>(), false));
+                }
             }
             if fullscreen {
                 if let Some(w) = app.get_webview_window("main") {
@@ -420,6 +465,8 @@ fn main() {
             quit_app,
             check_update,
             install_update,
+            pick_recovery_backup,
+            restart_app,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start POS");

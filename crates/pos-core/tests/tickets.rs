@@ -196,3 +196,88 @@ fn void_and_cancel_rows_carry_the_orders_table_and_total() {
     let cancel = of("order.cancel");
     assert_eq!((cancel.table_name.as_deref(), cancel.status.as_str()), (Some("17"), "cancelled"));
 }
+
+fn ids(c: &rusqlite::Connection, sql: &str) -> Vec<i64> {
+    let mut stmt = c.prepare(sql).unwrap();
+    stmt.query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap()
+}
+
+#[test]
+fn ticket_and_message_ids_are_never_used_again() {
+    let mut k = setup();
+    let a = k.pos.create_ticket(&k.sam, &ticket("printer", "normal", "jam", None)).unwrap();
+    let a = k.pos.reply_ticket(&k.quinn, a.id, "on my way", None).unwrap();
+    let last_msg = a.messages.last().unwrap().id;
+    k.pos.delete_ticket(&k.admin, a.id).unwrap();
+    let b = k.pos.create_ticket(&k.sam, &ticket("other", "normal", "hello", None)).unwrap();
+    assert!(b.id > a.id, "a deleted ticket's id is not handed out again");
+    assert!(b.messages[0].id > last_msg, "nor its messages' ids");
+}
+
+/// A 0.14.0 database (ids could be reused) is rebuilt with AUTOINCREMENT,
+/// keeping every ticket, message and read marker, and the next ids come
+/// after any the log or a till may still know.
+#[test]
+fn a_0_14_0_database_gets_ids_that_are_never_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pos.db");
+    let (kept, gone) = {
+        let mut pos = Pos::open(&path).unwrap();
+        let admin = pos.setup_first_admin("Owner", "1234").unwrap();
+        pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+        let sam = pos.login_as(None, "2222", &mut Default::default()).unwrap();
+        let kept = pos.create_ticket(&sam, &ticket("printer", "urgent", "jam", None)).unwrap();
+        pos.reply_ticket(&admin, kept.id, "coming", None).unwrap();
+        pos.get_ticket(&sam, kept.id).unwrap();
+        let gone = pos.create_ticket(&sam, &ticket("menu", "normal", "price", None)).unwrap();
+        pos.reply_ticket(&admin, gone.id, "fixed", None).unwrap();
+        pos.delete_ticket(&admin, gone.id).unwrap();
+        (kept.id, gone.id)
+    };
+    {
+        // Back to 0.14.0: the tables as 0032 made them, no sequence.
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF;
+             BEGIN;
+             CREATE TABLE t2 AS SELECT * FROM tickets; CREATE TABLE m2 AS SELECT * FROM ticket_messages; CREATE TABLE r2 AS SELECT * FROM ticket_reads;
+             DROP TABLE ticket_reads; DROP TABLE ticket_messages; DROP TABLE tickets;
+             {}
+             INSERT INTO tickets SELECT * FROM t2; INSERT INTO ticket_messages SELECT * FROM m2; INSERT INTO ticket_reads SELECT * FROM r2;
+             DROP TABLE t2; DROP TABLE m2; DROP TABLE r2;
+             DELETE FROM sqlite_sequence WHERE name IN ('tickets', 'ticket_messages');
+             COMMIT;
+             PRAGMA user_version = 33;",
+            include_str!("../src/migrations/0032_tickets.sql")
+        ))
+        .unwrap();
+        assert!(!c.query_row("SELECT sql FROM sqlite_schema WHERE name = 'tickets'", [], |r| r.get::<_, String>(0)).unwrap().contains("AUTOINCREMENT"));
+    }
+    let before = rusqlite::Connection::open(&path).unwrap();
+    let msgs = ids(&before, "SELECT id FROM ticket_messages ORDER BY id");
+    let reads = ids(&before, "SELECT last_read_id FROM ticket_reads ORDER BY ticket_id, user_id");
+    drop(before);
+    let mut pos = Pos::open(&path).unwrap();
+    let c = rusqlite::Connection::open(&path).unwrap();
+    for t in ["tickets", "ticket_messages"] {
+        let sql: String = c.query_row("SELECT sql FROM sqlite_schema WHERE name = ?1", [t], |r| r.get(0)).unwrap();
+        assert!(sql.contains("AUTOINCREMENT"), "{sql}");
+    }
+    assert_eq!(ids(&c, "SELECT id FROM tickets"), [kept]);
+    assert_eq!(ids(&c, "SELECT id FROM ticket_messages ORDER BY id"), msgs, "every message kept");
+    assert_eq!(ids(&c, "SELECT last_read_id FROM ticket_reads ORDER BY ticket_id, user_id"), reads, "and every read marker");
+    let indexes = ids(&c, "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name IN ('tickets_status', 'tickets_creator', 'tickets_closed', 'ticket_messages_ticket')");
+    assert_eq!(indexes, [4]);
+    let fk: Vec<i64> = ids(&c, "SELECT COUNT(*) FROM pragma_foreign_key_check");
+    assert_eq!(fk, [0]);
+    let admin = pos.login("1234").unwrap();
+    let sam = pos.login_as(None, "2222", &mut Default::default()).unwrap();
+    // The deleted ticket's number (only in the log now) is not used again.
+    let new = pos.create_ticket(&sam, &ticket("other", "normal", "hi", None)).unwrap();
+    assert!(new.id > gone, "{} after {gone}", new.id);
+    assert!(new.messages[0].id > *msgs.iter().max().unwrap());
+    // Deleting a ticket still takes its messages and read markers with it.
+    pos.delete_ticket(&admin, kept).unwrap();
+    assert_eq!(ids(&c, &format!("SELECT COUNT(*) FROM ticket_messages WHERE ticket_id = {kept}")), [0]);
+    assert_eq!(ids(&c, &format!("SELECT COUNT(*) FROM ticket_reads WHERE ticket_id = {kept}")), [0]);
+}

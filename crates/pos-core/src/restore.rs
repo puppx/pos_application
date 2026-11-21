@@ -92,6 +92,25 @@ fn damaged<T>() -> Result<T> {
     invalid(DAMAGED)
 }
 
+/// True for SQLite saying the database file is damaged ("database disk
+/// image is malformed") or is not a database at all.
+/// The `backup.restore` audit row's text, the same for every way of restoring:
+/// "714 orders, 13 menu items, 4 staff, by Owner (…), from Demo Bistro".
+pub fn restore_audit_detail(summary: &BackupSummary, by: &str) -> String {
+    format!(
+        "{}, {}, {} staff, by {}{}",
+        crate::plural(summary.orders, "order", "orders"),
+        crate::plural(summary.menu_items, "menu item", "menu items"),
+        summary.staff,
+        by,
+        summary.store_name.as_deref().map(|n| format!(", from {n}")).unwrap_or_default(),
+    )
+}
+
+pub fn is_corrupt(e: &PosError) -> bool {
+    matches!(e, PosError::Db(d) if matches!(d.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)))
+}
+
 /// True for "disk full" from the OS (Linux ENOSPC, Windows ERROR_DISK_FULL
 /// and ERROR_HANDLE_DISK_FULL) or SQLite.
 pub fn is_disk_full(e: &PosError) -> bool {
@@ -317,7 +336,65 @@ fn summarize(conn: &Connection, schema_version: i32) -> Result<BackupSummary> {
     })
 }
 
+impl PreparedRestore {
+    /// The name of the backup's active admin whose PIN this is, if any. For
+    /// restoring when the live data cannot be read (its staff list may be
+    /// the damaged part): the admin proves they are an admin of the data
+    /// being put back, which is who runs the till afterwards.
+    pub fn admin_with_pin(&self, pin: &str) -> Result<Option<String>> {
+        let Ok(hash) = crate::auth::argon_hash(pin, &self.salt, &crate::auth::default_params()) else { return Ok(None) };
+        let conn = Connection::open_with_flags(&self.work, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        Ok(conn
+            .query_row("SELECT name FROM users WHERE role = 'admin' AND active = 1 AND pin_hash = ?1 ORDER BY id LIMIT 1", [hash], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Put the backup in place of the database file `db` when it cannot be
+    /// opened at all (no connection to it is open): its WAL and shared
+    /// memory files go first (never replayed onto the backup), then the
+    /// checked copy is written beside it and renamed over it.
+    pub fn install_as(&self, db: &Path) -> Result<()> {
+        let side = |suffix: &str| {
+            let mut p = db.as_os_str().to_owned();
+            p.push(suffix);
+            PathBuf::from(p)
+        };
+        for suffix in ["-wal", "-shm", "-journal"] {
+            match std::fs::remove_file(side(suffix)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io_error(&e, "cannot remove the damaged data")),
+                _ => {}
+            }
+        }
+        let tmp = side(".restore-tmp");
+        let copied = std::fs::copy(&self.work, &tmp).and_then(|_| std::fs::File::open(&tmp)?.sync_all()).and_then(|()| std::fs::rename(&tmp, db));
+        if let Err(e) = copied {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io_error(&e, "cannot put the backup in place"));
+        }
+        Ok(())
+    }
+}
+
 impl Pos {
+    /// `PRAGMA quick_check` of the database file at `path` through a
+    /// connection of its own (no lock on the till's): None when sound, else
+    /// what is wrong. A few hundred ms on a big database.
+    pub fn quick_check_file(path: impl AsRef<Path>) -> Result<Option<String>> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let ok: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        Ok((ok != "ok").then_some(ok))
+    }
+
+    /// The name of the live database's active admin whose PIN this is.
+    pub fn admin_with_pin(&self, pin: &str) -> Result<Option<String>> {
+        let Ok(hash) = self.hash_pin(pin) else { return Ok(None) };
+        Ok(self
+            .conn
+            .query_row("SELECT name FROM users WHERE role = 'admin' AND active = 1 AND pin_hash = ?1 ORDER BY id LIMIT 1", [hash], |r| r.get(0))
+            .optional()?)
+    }
+
     /// A backup file just written is a whole, readable POS database
     /// (`PRAGMA quick_check`), before it counts as a backup or is copied on.
     pub fn verify_backup_file(path: impl AsRef<Path>) -> Result<()> {
@@ -339,6 +416,18 @@ impl Pos {
         Ok(prepare(src.as_ref(), work.as_ref(), None)?.summary.clone())
     }
 
+    /// [`Pos::prepare_restore`] when the live database cannot be opened
+    /// (see [`PreparedRestore::install_as`]): the backup keeps its page size.
+    pub fn prepare_restore_file(src: impl AsRef<Path>, work: impl AsRef<Path>) -> Result<PreparedRestore> {
+        prepare(src.as_ref(), work.as_ref(), None)
+    }
+
+    /// The `backup.restore` row of a restore by [`PreparedRestore::install_as`]
+    /// (`detail` from [`restore_audit_detail`], as every restore writes it).
+    pub fn audit_restored(&self, detail: &str) -> Result<()> {
+        self.audit(None, "backup.restore", detail)
+    }
+
     /// Check `src` and get it ready to restore into this database; nothing
     /// live is touched. `work` is a scratch file the caller picks.
     pub fn prepare_restore(&self, src: impl AsRef<Path>, work: impl AsRef<Path>) -> Result<PreparedRestore> {
@@ -358,6 +447,13 @@ impl Pos {
     pub fn restore(&mut self, s: &Session, prepared: PreparedRestore) -> Result<BackupSummary> {
         s.require(Permission::ManageSettings)?;
         s.require(Permission::Backup)?;
+        self.restore_by(&s.name, prepared)
+    }
+
+    /// [`Pos::restore`] by `by` (an admin's name) without a session: the
+    /// recovery on the main till, when the live data is too damaged to log
+    /// in. The caller has checked an admin PIN.
+    pub fn restore_by(&mut self, by: &str, prepared: PreparedRestore) -> Result<BackupSummary> {
         let src = Connection::open_with_flags(&prepared.work, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         // Another program holding the database: give up soon, not after 5 s.
         self.conn.busy_timeout(std::time::Duration::from_secs(1))?;
@@ -384,20 +480,15 @@ impl Pos {
         self.pin_salt = prepared.salt;
         self.conn.flush_prepared_statement_cache();
         self.throttle = Default::default();
-        let detail = format!(
-            "{} orders, {} menu items, {} staff, by {}{}",
-            prepared.summary.orders,
-            prepared.summary.menu_items,
-            prepared.summary.staff,
-            s.name,
-            prepared.summary.store_name.as_deref().map(|n| format!(", from {n}")).unwrap_or_default(),
-        );
-        let steps: [(&str, &AfterCopy); 6] = [
+        self.log_counts = Default::default();
+        let detail = restore_audit_detail(&prepared.summary, by);
+        let steps: [(&str, &AfterCopy); 7] = [
             // Keep WAL for a file database (in memory it stays "memory").
             ("journal mode", &|p| Ok(p.conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?)),
             ("migrate", &|p| migrate(&p.conn)),
             ("triggers", &|p| Ok(p.conn.execute_batch(receipt::BILL_STALE_TRIGGERS)?)),
             ("activity triggers", &|p| Ok(p.conn.execute_batch(crate::orders::ACTIVITY_TRIGGERS)?)),
+            ("log triggers", &|p| Ok(p.conn.execute_batch(crate::activity::LOG_CHANGE_TRIGGERS)?)),
             ("audit", &|p| p.audit(None, "backup.restore", &detail)),
             // Fold the copied pages back into the main file now.
             ("checkpoint", &|p| Ok(p.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?)),

@@ -7,7 +7,7 @@
 const TAURI = window.__TAURI__?.core;
 /// Commands only the desktop window has (they act on this PC itself).
 const DESKTOP_ONLY = new Set(['check_update', 'install_update', 'server_status', 'set_server', 'toggle_fullscreen', 'open_backup_folder',
-  'get_autostart', 'set_autostart', 'pick_backup_copy_folder']);
+  'get_autostart', 'set_autostart', 'pick_backup_copy_folder', 'pick_recovery_backup', 'restart_app']);
 /// A browser's own random id: its login belongs to this id only.
 const terminalId = (() => {
   const make = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -293,10 +293,12 @@ const addressText = (c) => [c.address_line1, c.address_line2, c.town, c.postcode
 let toastTimer;
 /// `ms`: how long it stays (longer messages need longer). `action`: { label, onclick },
 /// one button in the toast (e.g. Open), which also hides it.
-function toast(msg, err = false, ms = err ? 4000 : 2500, action = null) {
+/// `top`: at the top of the screen, wherever the page is (a note not about what is being done).
+function toast(msg, err = false, ms = err ? 4000 : 2500, action = null, { top = false } = {}) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = err ? 'err' : '';
+  t.dataset.top = top ? '1' : '';
   if (action) {
     t.classList.add('has-act');
     t.replaceChildren(h('span', {}, msg), h('button', { class: 'toast-act', onclick: () => { t.hidden = true; clearTimeout(toastTimer); action.onclick(); } }, action.label));
@@ -307,11 +309,13 @@ function toast(msg, err = false, ms = err ? 4000 : 2500, action = null) {
   toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
-/// Over an open sheet a toast sits above the sheet's foot (Send, the reply box), not on it.
+/// With a sheet or dialog open, a toast goes to the very top of the screen (over the
+/// title), never on the sheet's body or foot (Send, Normal/Urgent, quick-text chips).
+/// Notes not about the page (`toast(..., { top: true })`) go there too.
 function placeToast() {
   const t = document.getElementById('toast');
-  const foot = !t.hidden && !document.body.classList.contains('kb-open') && document.querySelector('#modal.sheet-host:not([hidden]) .sheet-foot');
-  t.style.bottom = foot ? `${Math.max(24, innerHeight - foot.getBoundingClientRect().top + 12)}px` : '';
+  const top = !t.hidden && !document.body.classList.contains('kb-open') && (t.dataset.top === '1' || !document.getElementById('modal').hidden);
+  t.classList.toggle('top', !!top);
 }
 
 /// Saving a setting can change the order screen ("Starter or Main?", tax,
@@ -319,6 +323,17 @@ function placeToast() {
 const SETTINGS_WRITES = new Set(['set_setting', 'set_service_settings', 'set_receipt_settings', 'save_teams']);
 /// The server's answer for anything done to an order that is no longer open (orders.rs `require_open`).
 const ORDER_CLOSED = 'this order is already closed';
+/// A dish not as this screen showed it (pos_core::ITEM_CHANGED), and a pay dialog whose
+/// "left to pay" is out of date (pos_core::BILL_CHANGED): nothing was saved or taken.
+const ITEM_CHANGED = /dish changed on another till/i;
+const ITEM_CHANGED_TEXT = 'This dish changed on another till';
+const BILL_CHANGED = /bill changed on another till/i;
+/// The answer when this device could not reach the main till at all (invoke): a
+/// money action may or may not have arrived, so the till checks before a retry.
+const UNREACHABLE = /cannot reach the pos/i;
+/// A random id for one tap or one confirm (add_item, add_payment): sent again
+/// after a lost answer, the main till does not do it twice.
+const onceKey = () => [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, '0')).join('');
 /// True when `msg` (from a call made on the order screen) means the order on
 /// screen is gone: paid, cancelled, or merged into another bill on another till.
 function isDeadOrder(msg, args = {}, cmd = null) {
@@ -344,11 +359,21 @@ const SWEPT_TEXT = 'This empty order was closed automatically';
 /// Leave a dead order instead of failing on every tap. Says why: closed on
 /// another till, or (empty for a long time) closed automatically.
 function leaveDeadOrder(msg = '') {
+  const gone = state.orderId;
   state.onModalClose = null;
   closeModal();
   state.orderEmpty = null;
   closeOrder();
-  toast(SWEPT.test(msg) ? SWEPT_TEXT : 'This order was closed on another till', true);
+  if (SWEPT.test(msg)) return toast(SWEPT_TEXT, true);
+  // Gone (not closed): joined onto another table's bill, or all its dishes moved there.
+  if (msg === 'not found' || msg === '') {
+    return invoke('order_moved_to', { orderId: gone }).then((o) => {
+      if (!o) return toast('This order was closed on another till', true);
+      toast(`Moved to ${orderTitle(o)}`, false, 4000);
+      if (state.session && state.orderId == null) openOrder(o.id);
+    }, () => toast('This order was closed on another till', true));
+  }
+  toast('This order was closed on another till', true);
 }
 /// `quiet`: no toast for an error (the caller shows it, e.g. in a settings row).
 async function call(cmd, args = {}, { quiet = false } = {}) {
@@ -361,6 +386,9 @@ async function call(cmd, args = {}, { quiet = false } = {}) {
     // Logged out on the server (idle, or a backup was restored on any till):
     // forget everything from the old session before showing the login.
     if (msg === 'please log in') { forgetSession(); start(); }
+    // Damaged data on the main till: browsers stop with "The main till needs attention".
+    // Not an admin (they may restore from Backup & data), and not "Back up now" (it says why).
+    else if (DATA_DAMAGED.test(msg) && state.remote && !isAdmin() && cmd !== 'backup_now') renderAttention();
     else if (isDeadOrder(msg, args, cmd) || await deniedForDeadOrder(msg, args, cmd)) leaveDeadOrder(msg);
     else if (!quiet) toast(msg, true);
     const err = new Error(msg);
@@ -404,7 +432,7 @@ function forgetSession() {
   Object.assign(state, {
     session: null, orderId: null, orderOpen: false, orderEmpty: null, view: 'floor', returnTo: 'floor', floorId: null,
     menu: null, cats: null, catId: null, subId: null, itemGroups: null, itemVariants: null, service: null, defaultTax: null,
-    quickNotes: null, starterChoice: null, day: null,
+    quickNotes: null, starterChoice: null, day: null, unsentAsk: null,
   });
   resetManage();
 }
@@ -421,6 +449,123 @@ function dataChanged(st) {
 }
 /// "Restored backup…": shown again after the reload that follows a restore.
 const FLASH_KEY = 'pos.flash';
+/// The server's answer for any command while the data is damaged (commands.rs).
+const DATA_DAMAGED = /POS data is damaged/i;
+
+/// Browsers on the network while the main till's data is damaged: nothing works
+/// here; the main till has the recovery screen.
+function renderAttention() {
+  forgetSession();
+  document.getElementById('bar').hidden = true;
+  lockScreen(h('div', { class: 'lock-card stack recovery' },
+    h('span', { class: 'eic bad' }, icon('alert', 34)),
+    h('h2', {}, 'The main till needs attention'),
+    h('p', {}, 'The POS data on the main till is damaged, so this device cannot work. Ask a manager to check the main till: it shows how to restore a backup.'),
+    h('button', { class: 'primary lg', onclick: () => location.reload() }, 'Try again')));
+}
+
+/// The recovery screen (main till only): the data is damaged or would not open.
+/// "Restore the newest good backup" checks the newest backups and offers the first
+/// good one; "Choose a backup…" picks any (the list here, or a file on a USB stick).
+/// RESTORE and an admin PIN from that backup confirm it, in the usual danger sheet.
+function renderRecovery(rec) {
+  state.session = null;
+  document.getElementById('bar').hidden = true;
+  const status = h('div', { class: 'recovery-status', role: 'status', 'aria-live': 'polite' });
+  const working = (text) => setKids(status, text && h('span', { class: 'spin', 'aria-hidden': 'true' }), text);
+  const failed = (e) => { working(null); setKids(status, h('div', { class: 'warn-box' }, String(e?.message ?? e))); };
+  const buttons = [];
+  const busy = (on) => { for (const b of buttons) b.disabled = on; };
+  const check = async (name = null) => {
+    busy(true);
+    working(name ? 'Checking that backup…' : 'Looking for the newest good backup… (this can take a few seconds)');
+    try {
+      const found = await invoke('recovery_check', name ? { name } : {});
+      working(null);
+      recoveryRestoreSheet(found.file, found.summary);
+    } catch (e) { failed(e); } finally { busy(false); }
+  };
+  // The newest good backup, looked for as soon as the screen shows: the button and
+  // the text say how old it is (what restoring it means for today's orders).
+  let good = null;
+  const newest = h('button', { class: 'primary lg', onclick: () => (good ? recoveryRestoreSheet(good.file, good.summary) : check()) },
+    icon('database', 20), 'Restore the newest good backup');
+  const age = h('p', { class: 'recovery-age' }, h('span', { class: 'spin', 'aria-hidden': 'true' }), ' Looking for the newest good backup…');
+  invoke('recovery_check', {}).then((found) => {
+    good = found;
+    const at = found.summary.last_used_at ?? found.file.modified;
+    setKids(newest, icon('database', 20), `Restore backup from ${friendlyTime(at)}`);
+    setKids(age, h('strong', {}, `Newest good backup: ${friendlyTime(at)}`), ` (${ago(at)} ago). Orders after that are not in it. `,
+      rec.reason === 'cannot_open' ? 'Nothing else works until a backup is restored.' : 'The damaged data is kept as a safety copy.');
+  }, (e) => setKids(age, String(e?.message ?? e)));
+  const choose = h('button', { class: 'lg', onclick: () => chooseBackup() }, 'Choose a backup…');
+  buttons.push(newest, choose);
+  async function chooseBackup() {
+    let st;
+    try { st = await invoke('recovery_status'); } catch (e) { return failed(e); }
+    const fromFile = TAURI && h('button', { onclick: async () => {
+      s.close();
+      busy(true); working('Checking the file…');
+      try {
+        const found = await invoke('pick_recovery_backup');
+        working(null);
+        if (found) recoveryRestoreSheet(found.file, found.summary);
+      } catch (e) { failed(e); } finally { busy(false); }
+    } }, 'From a file (USB stick, second folder)…');
+    const rows = st.backups.map((f) => srow({ label: friendlyTime(f.modified).replace(/^./, (c) => c.toUpperCase()),
+      hint: `${backupKind(f.name)} · ${fileSize(f.size ?? 0)}`, cls: 'brow', ctl: h('button', { onclick: () => { s.close(); check(f.name); } }, 'Check')}));
+    const s = sheet({ title: 'Choose a backup', body: [
+      ssec(null, rows.length ? rows : [h('p', { class: 'snote' }, `No backups in ${st.folder}.`)]),
+      fromFile && ssec('Somewhere else', [h('div', { class: 'row' }, fromFile)]),
+    ] });
+  }
+  lockScreen(h('div', { class: 'lock-card stack recovery' },
+    h('span', { class: 'eic bad' }, icon('alert', 34)),
+    h('h2', {}, rec.message || 'The POS data is damaged'),
+    age,
+    newest, choose, status,
+    rec.can_log_in && h('button', { class: 'ghost', onclick: () => { state.skipRecovery = true; renderLogin(); } }, 'Try logging in'),
+    rec.detail && h('details', { class: 'muted small' }, h('summary', {}, 'Details for support'), rec.detail)));
+}
+
+/// What a backup holds, then RESTORE and an admin PIN from that backup (the danger sheet).
+function recoveryRestoreSheet(f, sm) {
+  const when = sm.last_used_at ?? f.modified;
+  const word = h('input', { placeholder: 'RESTORE', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', 'aria-label': 'Type RESTORE' });
+  const pin = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'off', 'aria-label': 'Admin PIN' });
+  const fact = (k, v) => h('div', {}, h('span', { class: 'muted' }, k), h('strong', {}, String(v)));
+  const whenText = when ? friendlyTime(when) : '?';
+  const sh = sheet({ title: 'Restore this backup?', danger: true, saveLabel: 'Restore now', body: [
+    h('div', { class: 'restore-facts' },
+      fact('Restaurant', sm.store_name ?? '(no name)'), fact('Last used', whenText),
+      fact('Orders', sm.open_orders ? `${sm.orders} (${sm.open_orders} open)` : sm.orders), fact('Menu items', sm.menu_items),
+      fact('Customers', sm.customers), fact('Staff', sm.staff)),
+    h('p', { class: 'snote' }, `${backupKind(f.name)} · ${fileSize(f.size ?? 0)}`),
+    h('div', { class: 'warn-box' }, h('strong', {}, `Orders after ${whenText.replace(/^today /, '')} are not in this backup.`),
+      ' The damaged data is replaced by it (kept as a safety copy first).'),
+    ssec('Confirm', [srow({ label: 'Type RESTORE', cls: 'text-row', ctl: word }), srow({ label: 'Admin PIN', cls: 'text-row', ctl: pin })]),
+    h('p', { class: 'snote' }, "An admin PIN from this backup (the PIN they had on the backup's date)."),
+  ], onSave: async () => {
+    let r;
+    try { r = await invoke('recovery_restore', { name: f.name, pin: pin.value, confirm: word.value.trim() }); } catch (e) { return String(e?.message ?? e); }
+    const n = r.summary;
+    const msg = `Restored backup from ${whenText}: ${n.orders} orders, ${n.menu_items} menu items, ${n.staff} staff. Log in with a PIN from the backup.`;
+    if (r.restart_needed) {
+      setTimeout(() => lockScreen(h('div', { class: 'lock-card stack recovery' },
+        h('span', { class: 'eic' }, icon('check', 34)), h('h2', {}, 'Restored. Restart POS to finish.'), h('p', {}, msg),
+        h('button', { class: 'primary lg', onclick: act(async () => { try { sessionStorage.setItem(FLASH_KEY, msg); } catch {} await invoke('restart_app'); }) }, 'Restart POS'))));
+      return true;
+    }
+    try { sessionStorage.setItem(FLASH_KEY, msg); } catch {}
+    forgetSession();
+    location.reload();
+    return false;
+  } });
+  const ok = () => { sh.save.disabled = !(word.value.trim() === 'RESTORE' && /^\d{4,8}$/.test(pin.value)); };
+  word.addEventListener('input', ok);
+  pin.addEventListener('input', ok);
+  ok();
+}
 
 async function start() {
   const st = await invoke('app_status');
@@ -431,6 +576,9 @@ async function start() {
   state.version = st.version;
   state.remote = st.remote;
   document.title = st.store_name || 'PuppxPOS';
+  // The main till only: the data is damaged (or would not open). Recovery first;
+  // "Try logging in" (when it may still work) goes on to the login.
+  if (st.recovery && !(st.recovery.can_log_in && state.skipRecovery)) return renderRecovery(st.recovery);
   if (st.needs_setup) return renderSetup();
   if (!st.session) return renderLogin();
   await loadUiSettings();
@@ -568,7 +716,7 @@ function renderLogin() {
   invoke('login_users').then((list) => {
     users = list;
     if (users.length) pickStep(); else pinStep(null);
-  }).catch(() => pinStep(null));
+  }).catch((e) => { if (DATA_DAMAGED.test(String(e?.message ?? e)) && state.remote) renderAttention(); else pinStep(null); });
   pinStep(null);
 }
 
@@ -653,6 +801,11 @@ const inManage = (view) => !VIEWS.find(([id]) => id === view)?.[3];
 
 function go(view) {
   if (!leaveOk()) return;
+  // Leaving an order with dishes not yet sent: ask first.
+  if (state.orderId != null && state.unsentAsk) {
+    askUnsent().then((ok) => { if (ok) go(view); });
+    return;
+  }
   // The Manage tab: the last page or group opened (the list on a phone).
   if (view === 'settings') { state.settingsTab = null; clearBack(); }
   state.view = view;
@@ -714,6 +867,8 @@ function startUpdateChecks() {
 }
 
 function renderShell() {
+  // Logged out meanwhile (e.g. "The main till needs attention" took over): nothing to draw.
+  if (!state.session) return;
   document.body.classList.remove('locked');
   lastActivity = Date.now();
   loadUiSettings();
@@ -827,6 +982,7 @@ function openOrder(id) {
 }
 
 function closeOrder() {
+  state.unsentAsk = null;
   const left = state.orderId;
   state.orderId = null;
   state.orderOpen = false;
@@ -847,6 +1003,7 @@ async function dropEmptyOrder(id) {
 }
 
 async function logOut(message = null) {
+  state.unsentAsk = null;
   closeModal();
   hideIdleWarn();
   await dropEmptyOrder(state.orderId);
@@ -862,6 +1019,7 @@ document.getElementById('logout').onclick = act(async () => {
   // A list or form with a save bar (Delivery apps, Teams, the floor plan, a staff member or
   // customer being edited): log out only once its changes are let go.
   if (state.dirty && !await discardDialog()) return;
+  if (!await askUnsent()) return;
   await logOut();
 });
 
@@ -1004,13 +1162,18 @@ async function renderFloor() {
       if (t.held_count) el.append(h('span', { class: 'flag' }, roomy ? 'mains waiting' : 'mains'));
       else if (t.unsent_count && roomy) el.append(h('span', { class: 'flag bad' }, 'not sent'));
       el.onclick = act(async () => {
-        if (t.order_id) return openOrder(t.order_id);
+        // The table as it is now: the floor may be a few seconds old (paid or
+        // moved on another till), so an old bill is never opened again.
+        const cur = await call('table_order', { tableId: t.id });
+        if (cur) return openOrder(cur.id);
         try {
-          const o = await call('open_order', { order: { order_type: 'dine_in', table_id: t.id } });
+          const o = await invoke('open_order', { order: { order_type: 'dine_in', table_id: t.id } });
           openOrder(o.id);
-        } catch {
-          const o = await invoke('table_order', { tableId: t.id }); // someone else just opened it
-          if (o) openOrder(o.id);
+        } catch (e) {
+          // Another till opened it a moment ago: join that order, quietly.
+          const o = await invoke('table_order', { tableId: t.id }).catch(() => null);
+          if (o) return openOrder(o.id);
+          throw e;
         }
       });
       return el;
@@ -1245,11 +1408,15 @@ async function renderOrder() {
   // Customer details, service charge, tax: a card under the dishes.
   const extra = h('div', { class: 'ticket-extra' });
   let editing = null;
+  // Changes sent from this screen: a refresh asked for before one of them is not shown.
+  let changes = 0;
 
   // `course`: true = starter, false = main, null = as on the menu.
   // `team`: the team that makes it (team id), null = the menu's.
   async function addItem(productId, optionIds = [], variantId = null, course = null, team = null) {
-    order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds, starter: course, teamId: team });
+    changes += 1;
+    // A key per tap: asked again after a lost answer, the dish is not added twice.
+    order = await call('add_item', { orderId, productId, qty: 1, note: null, variantId, optionIds, starter: course, teamId: team, idempotencyKey: onceKey() });
     editing = null; // a dish added: the totals and Send come back
     draw();
   }
@@ -1443,14 +1610,41 @@ async function renderOrder() {
     if (!p.attempted && needPrinter) return toast('No kitchen printer is set up (Manage → Kitchen printer)', true);
     toast(p.attempted ? `${msg} · ticket printed` : msg);
   }
+  // A dish changed, removed or moved on another till since this screen showed it:
+  // nothing was saved; show the order as it is now and say what changed.
+  async function lineChanged(it) {
+    let now;
+    try { now = await invoke('get_order', { id: orderId }); } catch (e) {
+      const m = String(e?.message ?? e);
+      if (m === 'please log in') { forgetSession(); start(); } else if (isDeadOrder(m, { id: orderId }, 'get_order')) leaveDeadOrder(m);
+      return;
+    }
+    if (state.orderId !== orderId) return;
+    if (now.status !== 'open') return leaveDeadOrder(ORDER_CLOSED);
+    order = now;
+    draw();
+    const fresh = now.items.find((i) => i.id === it.id);
+    toast(!fresh ? `${it.name} was removed or moved on another till: nothing changed`
+      : `${it.name} changed on another till (now ${fresh.qty}${fresh.discount_cents ? `, −${money(fresh.discount_cents)}` : ''}): nothing changed. Check it and try again.`, true, 6000);
+  }
   // `pin`: a manager's PIN already typed for this change (the price, in the dish pop-up).
-  async function setLine(it, changes, pin = null) {
+  // `delta`: the order screen's + (1) and − (-1): one more or fewer than the dish has
+  // on the server now, so taps made faster than the answers come back all count.
+  // Otherwise the change is checked against the dish as this screen shows it: if
+  // another till changed it meanwhile, nothing is saved and the order is shown again.
+  // `noteOnly`: only the note changes (qtyDelta 0: the dish's quantity and discount stay as they are now).
+  async function setLine(it, edit, pin = null, { delta = 0, noteOnly = false } = {}) {
+    changes += 1;
     // Fewer of a discounted dish: the discount shrinks with it (the same share off),
     // so − never gives more off or asks for a manager PIN.
-    if (changes.qty > 0 && changes.qty < it.qty && it.discount_cents && !('discount_cents' in changes)) {
-      changes = { ...changes, discount_cents: Math.floor(it.discount_cents * changes.qty / it.qty) };
+    if (edit.qty > 0 && edit.qty < it.qty && it.discount_cents && !('discount_cents' in edit)) {
+      edit = { ...edit, discount_cents: Math.floor(it.discount_cents * edit.qty / it.qty) };
     }
-    const args = { orderId, itemId: it.id, update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...changes } };
+    const args = { orderId, itemId: it.id, update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...edit } };
+    if (delta) args.qtyDelta = delta;
+    if (noteOnly) args.qtyDelta = 0;
+    // A − on a dish the kitchen has (a CANCELLED ticket) is for the number on screen only.
+    else if (!delta || (delta < 0 && it.sent_at)) Object.assign(args, { expectedQty: it.qty, expectedDiscountCents: it.discount_cents });
     try {
       order = await invoke('update_item', pin ? { ...args, pin } : args);
     } catch (e) {
@@ -1459,15 +1653,16 @@ async function renderOrder() {
       if (!/needs a manager/i.test(msg)) {
         if (msg === 'please log in') { forgetSession(); start(); }
         else if (isDeadOrder(msg)) leaveDeadOrder(msg);
-        // The dish is gone (removed or moved on another till): show the order as it is now.
-        else if (msg === 'not found') { order = await call('get_order', { id: orderId }); draw(); toast(`${it.name} was changed on another till`, true); }
+        // The dish is gone or not as shown (changed, removed or moved on another till): show the order as it is now.
+        else if (msg === 'not found' || ITEM_CHANGED.test(msg)) await lineChanged(it);
         else toast(msg, true);
         const err = new Error(msg); err.handled = true; throw err;
       }
       // Over the discount limit, more of a dish whose price was made cheaper, or fewer of a
       // dish already sent to the kitchen (orders.rs update_item_approved).
       const what = /changed price/i.test(msg) ? 'more' : /sent to the kitchen/i.test(msg) ? 'void' : 'discount';
-      const q = changes.qty ?? it.qty;
+      const q = edit.qty ?? it.qty;
+      let stale = false;
       const ok = await pinDialog({
         title: 'Manager PIN',
         hint: what === 'more'
@@ -1481,10 +1676,15 @@ async function renderOrder() {
             const m = String(e2?.message ?? e2);
             if (m === 'please log in') { setTimeout(() => { forgetSession(); start(); }); return 'Logged out: log in again'; }
             if (isDeadOrder(m)) { setTimeout(() => leaveDeadOrder(m)); return 'This order is closed'; }
+            if (m === 'not found' || ITEM_CHANGED.test(m)) { stale = true; setTimeout(closeModal); return 'Changed on another till'; }
             return /invalid pin/i.test(m) ? 'Wrong PIN, try again' : /needs a manager/i.test(m) ? 'That PIN cannot approve it: a manager or admin PIN is needed' : m;
           }
         },
       });
+      if (stale) {
+        await lineChanged(it);
+        const err = new Error(ITEM_CHANGED_TEXT); err.handled = true; throw err;
+      }
       if (!ok) {
         const err = new Error(what === 'more' || what === 'void' ? `Not changed: ${it.name} stays at ${it.qty}` : 'Discount not approved');
         err.handled = true;
@@ -1517,39 +1717,78 @@ async function renderOrder() {
     if (order.status !== 'open') return renderShell();
     draw();
   };
+  // After a payment whose answer never came: "Checking…", then the order as the main till
+  // has it. Taken (one more payment than before, by this method): carry on as if the answer
+  // had come. Not taken: the dialog shows the payments so far and Take can be tapped again
+  // (with the same key, so it is still taken only once).
+  // Messages go in the pay dialog's strip (err.note), never in a toast over it.
+  const notSaved = (payment, text) => { const err = new Error('not saved'); err.handled = true; err.note = { kind: 'bad', text }; return err; };
+  const card = (payment) => payment.method === 'card';
+  async function checkPayment(payment, before) {
+    for (let i = 0; i < 4; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 1500));
+      let now;
+      try { now = await invoke('get_order', { id: orderId }); } catch (e) {
+        if (UNREACHABLE.test(String(e?.message ?? e))) continue;
+        throw e;
+      }
+      order = now;
+      const p = now.payments.at(-1);
+      if (now.payments.length > before && p?.method === payment.method) return { order: now, print: { attempted: false } };
+      if (now.status !== 'open') { const err = new Error('closed'); err.handled = true; leaveDeadOrder(ORDER_CLOSED); throw err; }
+      draw();
+      const err = notSaved(payment, card(payment)
+        ? "Not saved: the main till didn't get it. Don't charge the card again. Tap Confirm to save it."
+        : "Not saved: the main till didn't get it. Tap Confirm again.");
+      err.order = now;
+      throw err;
+    }
+    throw notSaved(payment, "Still cannot reach the main till. Check the Wi-Fi, then tap Confirm again (it won't be counted twice)."
+      + (card(payment) ? " Don't charge the card again." : ''));
+  }
   const finish = act(async () => {
     order = await call('get_order', { id: orderId });
     if (order.status !== 'open') return renderShell();
     draw();
     if (!order.items.length) return toast('The order is empty', true);
-    let sentFirst = false;
     let printError = null;
-    await payDialog(order, reload, async (payment) => {
-      // Anything not yet sent (mains waiting included) goes to the kitchen with the first payment.
-      if (!sentFirst && order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
-      sentFirst = true;
+    await payDialog(order, reload, async (payment, { expectedLeftCents, idempotencyKey, closes, before, checking }) => {
+      // Anything not yet sent (mains waiting included) goes to the kitchen with the payment
+      // that closes the bill. A part payment sends nothing: mains held for "Call mains" stay held.
+      if (closes && order.items.some((i) => !i.sent_at)) printError = (await call('send_to_kitchen', { orderId, allCourses: true })).print.error;
+      // What the dialog showed as left to pay: if another till changed the bill since,
+      // the server takes nothing ("The bill changed on another till") and the dialog shows it again.
+      const args = { orderId, payment, expectedLeftCents, idempotencyKey };
       // Other on an order not from a delivery app: staff need a manager's or admin's PIN
       // (orders.rs add_payment_approved); the PIN pad takes the pay dialog's place for a moment.
       let paid;
-      if (payment.method === 'other') {
-        const r = await managerRetry('add_payment', { orderId, payment }, {
-          hint: `${money(payment.amount_cents ?? order.total_cents - (order.paid_cents ?? 0))} by Other: no money comes into the till. A manager or admin enters their PIN to approve it.`,
-          okLabel: 'Approve payment', before: () => { state.onModalClose = null; } });
-        if (!r?.result) {
-          if (r?.declined) toast('Not paid (no manager PIN)', true);
-          const err = new Error('not paid'); err.handled = true; err.redraw = !!r?.declined; throw err;
-        }
-        paid = r.result;
-      } else paid = await call('add_payment', { orderId, payment });
+      try {
+        if (payment.method === 'other' && !order.channel_id) {
+          const r = await managerRetry('add_payment', args, {
+            hint: `${money(payment.amount_cents ?? order.total_cents - (order.paid_cents ?? 0))} by Other: no money comes into the till. A manager or admin enters their PIN to approve it.`,
+            okLabel: 'Approve payment', before: () => { state.onModalClose = null; } });
+          if (!r?.result) {
+            const err = new Error('not paid'); err.handled = true; err.redraw = !!r?.declined;
+            if (r?.declined) err.note = { kind: 'bad', text: 'Not paid (no manager PIN).' };
+            throw err;
+          }
+          paid = r.result;
+        } else paid = await call('add_payment', args, { quiet: true });
+      } catch (e) {
+        if (!UNREACHABLE.test(String(e?.message ?? e))) throw e;
+        // The answer was lost (Wi-Fi): the payment may or may not have been taken. Look before any retry.
+        checking();
+        paid = await checkPayment(payment, before);
+      }
       const { order: res, print: receipt } = paid;
       if (res.status !== 'paid') {
         order = res;
         draw();
-        toast(`Paid ${money(res.payments.at(-1).amount_cents)} · ${money(res.total_cents - res.paid_cents)} left to pay`);
         return res;
       }
       const last = res.payments.at(-1);
-      const msg = `Order #${res.id} paid: ${money(res.total_cents)}` + (res.tip_cents ? ` + tip ${money(res.tip_cents)}` : '') +
+      const msg = !res.payments.length ? `Order #${res.id} closed (nothing to pay)`
+        : `Order #${res.id} paid: ${money(res.total_cents)}` + (res.tip_cents ? ` + tip ${money(res.tip_cents)}` : '') +
         (last?.change_cents ? ` · change ${money(last.change_cents)}` : '');
       closeOrder();
       // History is for managers and admins: staff ask one of them to reprint.
@@ -1565,12 +1804,13 @@ async function renderOrder() {
   // how many, the price each, starter or main, the team, a note, a discount,
   // print again, remove. Nothing is saved until Save (Remove and the course
   // and team buttons act at once, as before).
-  function openLineEditor(it) {
+  // `typed`: what was typed before (the note), kept when the pop-up opens again.
+  function openLineEditor(it, typed = {}) {
     const sent = !!it.sent_at;
     let qty = it.qty;
     const priceOk = !it.parent_id && !(order.paid_cents > 0);
     const price = h('input', { inputmode: 'decimal', value: money(it.unit_price_cents), 'aria-label': 'Price each', class: 'price-input' });
-    const note = h('input', { value: it.note ?? '', placeholder: 'Note for the kitchen, e.g. no onions', 'aria-label': 'Note' });
+    const note = h('input', { value: typed.note ?? it.note ?? '', placeholder: 'Note for the kitchen, e.g. no onions', 'aria-label': 'Note' });
     const disc = h('input', { value: it.discount_cents ? money(it.discount_cents) : '', placeholder: '0.00 or 10%', title: 'An amount (2.50) or a percentage (10%)', 'aria-label': 'Discount' });
     const qtyEl = h('strong', { class: 'qty-big' });
     const total = h('strong', { class: 'line-total' });
@@ -1692,12 +1932,19 @@ async function renderOrder() {
       const now = order.items.find((i) => i.id === it.id) ?? it;
       const cents = discFor(now.unit_price_cents);
       if (qty !== now.qty || cents !== now.discount_cents || newNote !== (now.note ?? null)) {
+        // Only the note: it never conflicts with a change of quantity on another till,
+        // so it goes on the dish as it is now (qtyDelta 0), not checked against this screen.
+        const noteOnly = qty === now.qty && cents === now.discount_cents;
         try {
-          await setLine(now, { qty, note: newNote, discount_cents: cents }, pin);
+          await setLine(now, { qty, note: newNote, discount_cents: cents }, pin, { noteOnly });
         } catch (e) {
           if (!state.session || state.orderId !== orderId) return;
+          // Changed on another till: the dish pop-up opens again on it as it is now,
+          // with the note as typed, to save again.
+          const fresh = order.items.find((i) => i.id === it.id);
+          if (ITEM_CHANGED.test(String(e?.message ?? e)) && fresh && newNote !== (fresh.note ?? null)) openLineEditor(fresh, { note: newNote ?? '' });
           // setLine has shown its own error; add what did or did not happen to the price.
-          if (said.length) toast(`${said.join(' · ')} · ${e?.message ?? e}`, true);
+          else if (said.length) toast(`${said.join(' · ')} · ${e?.message ?? e}`, true);
           return;
         }
         if (sent && qty < it.qty) said.push(`${it.name} −${it.qty - qty} · CANCELLED ticket sent to the kitchen`);
@@ -1775,14 +2022,14 @@ async function renderOrder() {
           it.discount_cents ? h('div', { class: 'muted' }, `discount -${money(it.discount_cents)}`) : ''),
         h('td', { class: 'qty' }, h('div', { class: 'stepper' },
           h('button', { onclick: act(async () => {
-            await setLine(it, { qty: it.qty - 1 });
+            await setLine(it, { qty: it.qty - 1 }, null, { delta: -1 });
             if (sent) toast(`${it.name} −1 · CANCELLED ticket sent to the kitchen`);
           }) }, '−'),
           h('span', {}, it.qty),
           h('button', { onclick: act(() => (sent
             ? (it.is_set ? openSetPicker(state.menu.find((p) => p.id === it.product_id) ?? { id: it.product_id, name: it.name, price_cents: it.unit_price_cents })
               : addItem(it.product_id, it.options.map((o) => o.option_id), it.variant_id, null, it.team_id ?? null))
-            : setLine(it, { qty: it.qty + 1 }))) }, '+'))),
+            : setLine(it, { qty: it.qty + 1 }, null, { delta: 1 }))) }, '+'))),
         h('td', { class: 'num' }, money(it.line_total_cents)),
         h('td', {}, h('button', { class: 'icon-btn edit-btn', title: 'Change: how many, price, note, discount, remove', 'aria-label': `Change ${it.name}`,
           onclick: toggleEdit }, '✎')));
@@ -1899,9 +2146,14 @@ async function renderOrder() {
   });
   const showDetails = () => {
     const f = customerFields(order.order_type, order);
+    const was = f.value();
     setKids(extra, h('div', { class: 'stack card' }, f.el, h('div', { class: 'row' },
       h('button', { class: 'primary', onclick: act(async () => {
-        order = await call('update_order_details', { id: orderId, details: f.value() });
+        // Only the details changed here: another till's edit of the others stays.
+        const details = f.value();
+        const fields = Object.keys(details).filter((k) => details[k] !== was[k]);
+        if (!fields.length) { setKids(extra); return; }
+        order = await call('update_order_details', { id: orderId, details, fields });
         setKids(extra); header(); toast('Saved');
       }) }, 'Save'),
       h('button', { onclick: () => setKids(extra) }, 'Close'))));
@@ -1968,8 +2220,10 @@ async function renderOrder() {
   // the same box: their own, or a manager's or admin's once the kitchen has
   // the order. The server checks the same rules (cancel_order).
   const cancelBtn = () => h('button', { class: 'danger', onclick: act(async () => {
-    const sent = order.items.some((i) => i.sent_at);
-    const noPin = isManager();
+    const sent = order.items.some((i) => i.sent_at || i.prep_sent_at);
+    // Nothing sent and nothing paid (a mistake order): anyone confirms, with no PIN.
+    const mistake = !sent && !order.payments?.length;
+    const noPin = isManager() || mistake;
     // Settings → Orders → Cancelling an order: CANCELLED ticket on (default) or off.
     const prints = await invoke('get_setting', { key: 'print_cancelled_order' }).then((v) => v !== '0').catch(() => true);
     const kitchenNote = prints ? 'A CANCELLED ticket is printed for any dishes still cooking.' : 'Nothing is printed for the kitchen.';
@@ -1978,7 +2232,8 @@ async function renderOrder() {
       try { r = await invoke('cancel_order', { orderId, reason: '', pin }); } catch (e) {
         const msg = String(e?.message ?? e);
         if (isDeadOrder(msg, { orderId })) { setTimeout(() => leaveDeadOrder(msg)); return 'This order is closed'; }
-        if (/permission/i.test(msg)) return noPin ? 'You can no longer cancel without a PIN: log in again' : sent ? 'This order is already in the kitchen: a manager or admin PIN is needed' : 'A PIN is needed';
+        if (/permission/i.test(msg)) return isManager() ? 'You can no longer cancel without a PIN: log in again'
+          : mistake ? 'This order was sent or paid on another till: close this and cancel it again with a PIN' : sent ? 'This order is already in the kitchen: a manager or admin PIN is needed' : 'A PIN is needed';
         return /invalid pin/i.test(msg) ? 'Wrong PIN, try again' : msg;
       }
     };
@@ -2014,7 +2269,7 @@ async function renderOrder() {
     const dine = order.order_type === 'dine_in';
     const title = orderTitle(order);
     setKids(head, h('div', { class: 'row nowrap' },
-      h('button', { class: 'icon-btn back-ticket', onclick: closeOrder, title: 'Back', 'aria-label': 'Back' }, icon('back')),
+      h('button', { class: 'icon-btn back-ticket', onclick: act(async () => { if (await askUnsent()) closeOrder(); }), title: 'Back', 'aria-label': 'Back' }, icon('back')),
       h('div', { class: 'grow' },
         h('div', { class: 'row nowrap head-title' }, h('strong', { class: 'big-id' }, title), title !== TYPE[order.order_type] && typeChip(order.order_type)),
         h('div', { class: 'muted small head-sub' }, [
@@ -2053,6 +2308,62 @@ async function renderOrder() {
   screen(layout);
   draw();
   if (!matchMedia('(pointer: coarse)').matches) search.focus();
+  // Leaving with dishes not yet sent (Back, the side bar, Log out): "Send N dishes to the
+  // kitchen?". Auto logout and a bill that closes do not ask (paying sends them).
+  state.unsentAsk = async () => {
+    if (state.orderId !== orderId || !layout.isConnected || order.status !== 'open') return true;
+    const waiting = order.items.filter((i) => !i.is_set && !i.sent_at && !i.held);
+    const n = waiting.reduce((x, i) => x + i.qty, 0);
+    if (!n) return true;
+    return new Promise((resolve) => {
+      const done = (v) => { state.onModalClose = null; closeModal(); resolve(v); };
+      showModal(h('h3', {}, `Send ${n} dish${n === 1 ? '' : 'es'} to the kitchen?`),
+        h('div', { class: 'stack confirm-hint' }, `${orderTitle(order)}: ${n === 1 ? 'it has' : 'they have'} not been sent yet.`,
+          n <= 3 && h('ul', { class: 'unsent-list' }, waiting.map((i) => h('li', {}, `${i.qty}× ${i.name}`)))),
+        h('button', { class: 'send ready paybig', onclick: async () => {
+          state.onModalClose = null; closeModal();
+          try { await send(allCourses.checked); resolve(true); } catch (e) { if (!e?.handled) toast(String(e?.message ?? e), true); resolve(false); }
+        } }, 'Send to kitchen'),
+        h('div', { class: 'row unsent-acts' }, h('button', { onclick: () => done(false) }, 'Stay here'), h('span', { class: 'grow' }),
+          h('button', { class: 'danger-outline', onclick: () => done(true) }, 'Leave unsent')));
+      state.onModalClose = () => resolve(false);
+      document.removeEventListener('keydown', state.modalKeys);
+      state.modalKeys = (e) => { if (e.key === 'Escape') closeModal(); };
+      document.addEventListener('keydown', state.modalKeys);
+      document.querySelector('#modal .send')?.focus();
+    });
+  };
+  // Changes made on other tills show here within a few seconds: every 5 s, while
+  // nothing is open on top (a dialog, a picker, the details card) and no change of
+  // this screen is on its way.
+  live(async () => {
+    if (state.orderId !== orderId || !layout.isConnected || document.hidden) return;
+    if (!document.getElementById('modal').hidden || !picker.hidden || extra.childElementCount) return;
+    const asked = changes;
+    let now;
+    try { now = await invoke('get_order', { id: orderId }); } catch (e) {
+      const m = String(e?.message ?? e);
+      if (m === 'please log in') { forgetSession(); start(); } else if (isDeadOrder(m, { id: orderId }, 'get_order')) leaveDeadOrder(m);
+      return;
+    }
+    if (asked !== changes || state.orderId !== orderId || !layout.isConnected || !document.getElementById('modal').hidden) return;
+    if (now.status !== 'open') return leaveDeadOrder(ORDER_CLOSED);
+    if (JSON.stringify(now) === JSON.stringify(order)) return;
+    const moved = now.table_id !== order.table_id;
+    order = now;
+    header();
+    draw();
+    if (moved) toast(`Moved to ${orderTitle(now)}`);
+  }, 5000);
+}
+
+/// Before leaving the order on screen: true to go (see `state.unsentAsk`).
+async function askUnsent() {
+  const ask = state.unsentAsk;
+  if (!ask || state.orderId == null) return true;
+  const ok = await ask();
+  if (ok) state.unsentAsk = null;
+  return ok;
 }
 
 // ---------- payment dialog ----------
@@ -2267,6 +2578,8 @@ async function payDialog(order, refresh, pay) {
     return everything ? left() : Math.min(left(), Math.round(order.total_cents * sel / (all || 1)));
   };
   const evenAmount = () => (even.n - even.done <= 1 ? left() : Math.round(left() / (even.n - even.done)));
+  /// Nothing left to pay (every dish free or fully discounted, or already covered): one button closes it.
+  const nothingToPay = () => left() === 0 && order.items.length > 0;
   const due = () => ({ all: left(), even: evenAmount(), amount: Math.min(parse(typed.amount) ?? 0, left()), dishes: share() }[mode]);
   const tip = () => (tipMode === 'other' ? parse(typed.tip) ?? 0 : Math.round(due() * tipMode / 10000));
   const target = () => due() + tip();
@@ -2294,17 +2607,35 @@ async function payDialog(order, refresh, pay) {
   const field = (name, label, value, hint, bad = false) => h('button', { class: `pay-field ${focus === name ? 'focus' : ''}`, onclick: () => { focus = name; draw(); } },
     h('span', { class: 'muted' }, label), h('strong', {}, value), hint && h('small', { class: bad ? 'bad' : '' }, hint));
 
+  // One key per payment: a retry of the same payment after a lost answer keeps it.
+  let pending = null;
+  // The message strip above Confirm ({ kind: 'ok' | 'warn' | 'bad', text }), until the next Confirm.
+  let note = null;
+  // The answer was lost: Confirm shows a spinner while the main till is asked.
+  let checking = false;
   const take = async () => {
     if (busy) return;
     const d = due();
-    if (d <= 0) return toast(mode === 'dishes' ? 'Tap the dishes this person pays for' : 'Enter an amount to pay', true);
+    const nothing = nothingToPay();
+    if (d <= 0 && !nothing) return toast(mode === 'dishes' ? 'Tap the dishes this person pays for' : 'Enter an amount to pay', true);
     if (method === 'cash' && (cash() ?? 0) < target()) return toast(`Not enough cash: ${money(target())} to pay`, true);
     busy = true;
+    note = null;
     try {
-      const input = { method, tendered_cents: method === 'cash' ? cash() : 0, tip_cents: tip(),
-        amount_cents: mode === 'all' || mode === 'dishes' ? null : d, items: mode === 'dishes' ? [...pick.entries()] : null };
+      // The amount shown is the amount sent; for dishes the server checks it is their share now.
+      const input = nothing ? { method: 'cash', tendered_cents: 0, tip_cents: 0, amount_cents: null, items: null }
+        : { method, tendered_cents: method === 'cash' ? cash() : 0, tip_cents: tip(),
+          amount_cents: d, items: mode === 'dishes' ? [...pick.entries()] : null };
       const before = order.payments?.length ?? 0;
-      const res = await pay(input);
+      const sig = JSON.stringify([order.id, before, left(), input]);
+      if (pending?.sig !== sig) pending = { sig, key: onceKey() };
+      const res = await pay(input, { expectedLeftCents: left(), idempotencyKey: pending.key, closes: nothing || d >= left(), before,
+        checking: () => { checking = true; draw(); } });
+      checking = false;
+      pending = null;
+      if (res.status !== 'paid' && res.payments.length > before) {
+        note = { kind: 'ok', text: `Paid ${money(res.payments.at(-1).amount_cents)} · ${money(Math.max(0, res.total_cents - res.paid_cents))} left to pay` };
+      }
       const p = res.payments?.[before] ?? res.payments?.at(-1);
       order = res;
       // A fast second tap right after a part payment must not pay the rest too.
@@ -2325,13 +2656,54 @@ async function payDialog(order, refresh, pay) {
       } else next();
     } catch (e) {
       busy = false;
-      if (!e?.handled) toast(String(e?.message ?? e), true);
-      // The PIN pad (Other) was closed: the pay dialog comes back.
-      if (e?.redraw) { draw(); state.onModalClose = reload; }
+      checking = false;
+      const msg = String(e?.message ?? e);
+      // Another till changed the bill since this dialog opened: nothing was taken.
+      // Show the bill as it is now, to check and confirm again.
+      if (BILL_CHANGED.test(msg)) {
+        const was = left(), wasDue = due();
+        try { order = await invoke('get_order', { id: order.id }); } catch { /* shown as it was */ }
+        if (order.status !== 'open') { state.onModalClose = null; closeModal(); reload(); return; }
+        if (mode === 'even' && even.done) even = { n: even.n, done: 0 };
+        typed.amount = ''; typed.cash = '';
+        if (mode === 'dishes') {
+          // The same dishes stay picked where they still can be: their share now shows.
+          for (const [id, q] of [...pick]) {
+            const it = bill().find((i) => i.id === id);
+            const n = it ? Math.min(q, it.qty - it.paid_qty) : 0;
+            if (n > 0) pick.set(id, n); else pick.delete(id);
+          }
+          note = { kind: 'warn', text: `Bill changed on another till: ${pick.size ? `these dishes now come to ${money(share())}` : 'those dishes are no longer on it'} (was ${money(wasDue)}). Nothing taken.` };
+        } else {
+          pick.clear();
+          note = { kind: 'warn', text: `Bill changed on another till: now ${money(left())} (was ${money(was)}). Nothing taken.` };
+        }
+        draw(); state.onModalClose = reload;
+        return;
+      }
+      // Logged out or the order closed elsewhere: call() already left the dialog.
+      if (!state.session || document.getElementById('modal').hidden) return;
+      note = e?.note ?? (e?.redraw || msg === 'not paid' ? null : { kind: 'bad', text: `Not paid: ${msg}` });
+      // Checked after a lost answer: the dialog shows the payments as they are now.
+      if (e?.order) order = e.order;
+      draw(); state.onModalClose = reload;
     }
   };
 
+  const strip = () => note && h('div', { class: `pay-note ${note.kind}`, role: note.kind === 'ok' ? 'status' : 'alert' }, note.text);
   function draw() {
+    if (nothingToPay()) {
+      showModal(
+        h('div', { class: 'pay-head' },
+          h('div', { class: 'grow' }, h('h3', {}, orderTitle(order)), h('div', { class: 'muted small' }, `Order #${order.id}`)),
+          h('div', { class: 'pay-total' }, h('span', { class: 'muted' }, 'Total'), h('span', { class: 'big' }, money(order.total_cents))),
+          h('button', { class: 'icon-btn ghost', title: 'Close (Esc)', 'aria-label': 'Close', onclick: closeModal }, icon('x'))),
+        h('p', { class: 'muted' }, order.paid_cents ? 'The payments already cover this bill.' : 'Nothing to pay on this bill (every dish is free or fully discounted).'),
+        strip(),
+        h('button', { class: 'primary paybig pay-ok', disabled: checking, onclick: take }, checking ? [h('span', { class: 'spin', 'aria-hidden': 'true' }), ' Checking…'] : 'Close bill (nothing to pay)'));
+      setKeys((e) => { if (e.key === 'Enter') take(); else if (e.key === 'Escape') closeModal(); });
+      return;
+    }
     if (method !== 'cash' && focus === 'cash') focus = mode === 'amount' ? 'amount' : tipMode === 'other' ? 'tip' : 'cash';
     const d = due(), t = tip(), tg = d + t, c = cash();
     const methods = [['cash', payName('cash')], ['card', payName('card')], ...(order.channel_id ? [['other', order.channel_name]] : [])];
@@ -2404,8 +2776,9 @@ async function payDialog(order, refresh, pay) {
           method !== 'cash' && !keypadOn && h('div', { class: 'muted pay-hint' }, method === 'card'
             ? `Take ${money(tg)} on the card machine, then confirm below.` : `${order.channel_name} has collected the payment.`),
           keypadOn && h('div', { class: 'keypad' }, ['7', '8', '9', '4', '5', '6', '1', '2', '3', '.', '0', '⌫'].map((k) => h('button', { onclick: () => key(k) }, k))))),
-      h('div', { class: 'pay-foot' }, sum('in-foot'),
-        h('button', { class: 'primary paybig pay-ok', disabled: d <= 0 || !enough, onclick: take }, okLabel)));
+      h('div', { class: 'pay-foot' }, sum('in-foot'), strip(),
+        h('button', { class: 'primary paybig pay-ok', disabled: checking || d <= 0 || !enough, onclick: take },
+          checking ? [h('span', { class: 'spin', 'aria-hidden': 'true' }), ' Checking…'] : okLabel)));
     document.querySelector('#modal .dialog')?.classList.add('pay-wide');
     const body = document.querySelector('#modal .pay-one');
     // Phones: the method side keeps the height Cash needed, so switching to the
@@ -2824,9 +3197,23 @@ async function renderHistory() {
   const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   // Rows are drawn 200 at a time: a busy week stays quick to open and scroll.
   const CHUNK = 200;
+  // An order number typed in the search ("523" or "#523") finds that order on any date.
+  let byId = null, lookups = 0;
+  async function findNumber(q) {
+    const mine = ++lookups;
+    let o = null;
+    try { o = await invoke('get_order', { id: Number(q) }); } catch { /* none, or not this user's */ }
+    if (mine !== lookups) return;
+    const fine = o && o.status !== 'open' && !(o.status === 'cancelled' && o.close_reason === 'empty');
+    byId = fine ? { ...o, item_count: o.items.filter((i) => !i.parent_id).reduce((n, i) => n + i.qty, 0), unsent_count: 0, held_count: 0, elsewhere: true } : { id: Number(q), none: true };
+    drawList();
+  }
   function drawList() {
     const q = find.value.trim().toLowerCase().replace(/^#/, '');
-    const rows = q ? shown.filter((o) => String(o.id).startsWith(q) || where(o).toLowerCase().includes(q) || (o.customer_phone ?? '').includes(q)) : shown;
+    let rows = q ? shown.filter((o) => String(o.id).startsWith(q) || where(o).toLowerCase().includes(q) || (o.customer_phone ?? '').includes(q)) : shown;
+    if (/^\d{1,9}$/.test(q) && !shown.some((o) => String(o.id) === q)) {
+      if (byId?.id !== Number(q)) { findNumber(q); } else if (!byId.none) rows = [byId, ...rows];
+    }
     const draw = (n) => {
       setKids(list, rows.slice(0, n).map(orderRow),
         rows.length > n && h('button', { class: 'ghost olist-more', onclick: () => draw(n + CHUNK) }, `Show more (${rows.length - n})`));
@@ -2842,7 +3229,7 @@ async function renderHistory() {
       onclick: (e) => { if (!e.target.closest('.more-btn')) show(o.id); },
       onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); show(o.id); } } },
     h('span', { class: 'o-main' },
-      h('span', { class: 'o-l1' }, h('strong', {}, `#${o.id}`), h('span', { class: 'o-time' }, severalDays ? friendlyTime(o.opened_at) : hm(o.opened_at)), typeChip(o.order_type)),
+      h('span', { class: 'o-l1' }, h('strong', {}, `#${o.id}`), h('span', { class: 'o-time' }, severalDays || o.elsewhere ? friendlyTime(o.opened_at) : hm(o.opened_at)), typeChip(o.order_type)),
       h('span', { class: 'o-l2' }, st, h('span', { class: 'o-where' }, where(o)))),
     h('strong', { class: 'o-total' }, money(o.total_cents)),
     moreMenu(`#${o.id}`, () => [
@@ -4142,10 +4529,11 @@ async function renderKitchen() {
 /// Shift & cash: open with a float, money in / out, close by counting.
 /// `shown`: a report to show straight away (the shift just closed).
 async function renderShift() {
-  const [cur, past] = await Promise.all([call('current_shift'), call('list_shifts', { limit: 20 }).catch(() => [])]);
+  let [cur, past] = await Promise.all([call('current_shift'), call('list_shifts', { limit: 20 }).catch(() => [])]);
   const moneyIn = (label, placeholder = '0.00') => h('input', { inputmode: 'decimal', placeholder, 'aria-label': label, class: 'money-in' });
   const cents = (el) => { try { return el.value.trim() ? parseMoney(el.value) : null; } catch { return null; } };
   let main;
+  let refreshNow = async () => true;
   if (!cur) {
     // No shift: one card to open it with the float.
     const float = moneyIn('Cash in the drawer', 'e.g. 100.00');
@@ -4190,6 +4578,7 @@ async function renderShift() {
       diff.textContent = d === 0 ? 'Exactly right' : d < 0 ? `Short ${money(-d)}` : `Over ${money(d)}`;
     };
     count.addEventListener('input', showDiff);
+    const expected = h('span', { class: 'muted small' }, `Expected ${money(cur.expected_cents)}`);
     const closeBtn = h('button', { class: 'primary lg' }, icon('printer', 18), 'Close shift & print');
     let sureTimer;
     const unsure = () => { clearTimeout(sureTimer); delete closeBtn.dataset.sure; closeBtn.classList.remove('danger', 'solid'); closeBtn.classList.add('primary'); setKids(closeBtn, icon('printer', 18), 'Close shift & print'); };
@@ -4197,6 +4586,14 @@ async function renderShift() {
     const close = act(async () => {
       const c = cents(count);
       if (c == null) { nudge(count); return toast('Type the cash you counted', true); }
+      // The drawer as it is now: a payment taken on another till since this page
+      // was drawn changes what should be there. Changed: shown, and asked again.
+      const was = cur.expected_cents;
+      if (!await refreshNow()) return;
+      if (cur.expected_cents !== was) {
+        unsure();
+        return toast(`Expected cash changed to ${money(cur.expected_cents)} (was ${money(was)}): a payment or money move since. Check the count, then close again.`, true, 7000);
+      }
       // Short: a second tap closes it, so a typing slip is not printed as missing cash.
       if (c < cur.expected_cents && !closeBtn.dataset.sure) {
         closeBtn.dataset.sure = '1';
@@ -4211,8 +4608,7 @@ async function renderShift() {
       await renderShift();
       reportSheet('Shift closed', r.text, r.shift?.id ? () => call('print_shift', { id: r.shift.id }) : null);
     });
-    main = h('div', { class: 'shift-grid' },
-      h('section', { class: 'scard' },
+    const nowCard = () => h('section', { class: 'scard' },
         h('div', { class: 'scard-title' }, h('h3', {}, 'Drawer now'), h('span', { class: 'pill ok' }, 'Open')),
         h('div', { class: 'muted small' }, `Since ${friendlyTime(cur.opened_at)} · ${cur.opened_by_name} · ${cur.payment_count} payment${cur.payment_count === 1 ? '' : 's'}`),
         h('div', { class: 'kpi-big' }, h('small', {}, 'Should be in the drawer'), h('strong', {}, money(cur.expected_cents))),
@@ -4227,11 +4623,29 @@ async function renderShift() {
           cur.other_cents ? line('Delivery apps / other', cur.other_cents) : null),
         cur.moves.length > 0 && h('div', { class: 'moves' }, cur.moves.map((m) => h('div', { class: 'move' },
           h('span', {}, [m.kind === 'in' ? 'Money in' : 'Money out', m.reason, m.user_name].filter(Boolean).join(' · ')),
-          h('strong', {}, `${m.kind === 'in' ? '' : '−'}${money(m.amount_cents)}`))))),
+          h('strong', {}, `${m.kind === 'in' ? '' : '−'}${money(m.amount_cents)}`)))));
+    let nowSec = nowCard();
+    // The figures again from the server (every 10 s while this page shows, and
+    // right before closing). False when the shift was closed elsewhere (redrawn).
+    refreshNow = async () => {
+      const fresh = await call('current_shift');
+      if (!fresh || fresh.id !== cur.id) { toast('This shift was closed on another till', true); renderShift(); return false; }
+      if (JSON.stringify(fresh) !== JSON.stringify(cur)) {
+        cur = fresh;
+        const next = nowCard();
+        nowSec.replaceWith(next);
+        nowSec = next;
+        expected.textContent = `Expected ${money(cur.expected_cents)}`;
+        showDiff();
+      }
+      return true;
+    };
+    main = h('div', { class: 'shift-grid' },
+      nowSec,
       h('section', { class: 'scard' },
         h('div', { class: 'scard-title' }, h('h3', {}, 'Close shift')),
         h('label', { class: 'money-field' }, h('span', {}, 'Cash counted'), count),
-        h('div', { class: 'diff-row' }, h('span', { class: 'muted small' }, `Expected ${money(cur.expected_cents)}`), diff),
+        h('div', { class: 'diff-row' }, expected, diff),
         note,
         closeBtn));
     closeBtn.onclick = close;
@@ -4248,6 +4662,7 @@ async function renderShift() {
             h('button', { onclick: act(async () => printResult(await call('print_shift', { id: p.shift.id }), 'Shift report printed')) }, 'Print')])] });
     }))));
   if (!cur && wideQ.matches) main.querySelector('input')?.focus();
+  if (cur) live(async () => { if (document.getElementById('modal').hidden && !document.hidden && main.isConnected) await refreshNow(); }, 10000);
 }
 
 async function renderReports() {
@@ -7043,6 +7458,11 @@ function actText(r) {
     case 'order.cancel': {
       if (/^\d+ empty$/.test(d)) return x('orders', 'other', r.user_id == null ? `Closed automatically · #${o} (empty)` : `Closed empty order #${o}`);
       if (/empty order\(s\) at day close/.test(d)) return x('orders', 'other', `Closed ${d}`, who, null);
+      // The automatic sweep: "5 empty order(s) untouched for over 30 minutes" (or "left open over…").
+      if ((m = /^(\d+) empty order\(s\) (?:untouched|left open) for over (\d+) minutes?/.exec(d))) {
+        const n = Number(m[1]);
+        return x('orders', 'other', `Closed ${n} empty order${n === 1 ? '' : 's'} (left open over ${m[2]} min)`, r.user_id == null ? 'automatic' : who, null);
+      }
       const reason = plain.replace(/^\d+\s*/, '');
       return x('ban', 'void', `Cancelled order #${o}${at}`, `${who}${reason ? ` · reason: ${reason}` : ''}`);
     }
@@ -7055,6 +7475,7 @@ function actText(r) {
       return x('coin', 'money', m ? `Took back a ${m[1]} payment of ${c(m[2])} · #${o}` : `Took back a payment · #${o}`, `${who}${m ? ` · taken by ${m[4]}` : ''}`);
     case 'order.payment_other': m = /^order \d+ (-?\d+)/.exec(plain); return x('coin', 'money', `Other payment ${m ? c(m[1]) : ''} · #${o}`);
     case 'order.part_payment': m = /^order \d+ (\w+) (-?\d+)/.exec(d); return x('coin', 'money', m ? `Part payment ${c(m[2])} (${m[1]}) · #${o}` : `Part payment · #${o}`);
+    case 'order.closed_nothing_to_pay': return x('check', 'money', `Closed with nothing to pay · #${o}${at}`);
     case 'order.discount': m = /^order \d+ (.+) (-?\d+)$/.exec(d); return x('tag', 'money', m ? `Discount ${c(m[2])} on ${m[1]} · #${o}` : `Discount · #${o}`, `${who}${at}`);
     case 'order.discount_approved': m = /^order \d+ (.+) (-?\d+) for (.+)$/.exec(d);
       return x('tag', 'money', m ? `Discount ${c(m[2])} on ${m[1]} · #${o}` : `Discount · #${o}`);
@@ -7074,7 +7495,7 @@ function actText(r) {
       : x('drawer', 'money', `Drawer opened for cash · #${o}`);
     case 'order.move': return x('move', 'other', `Moved #${o} to ${ref ? `table ${ref}` : 'another table'}`);
     case 'order.merge': m = /-> order (\d+)/.exec(d); return x('move', 'other', `Joined #${o} onto #${m?.[1] ?? '?'}`, who, m ? { order: +m[1] } : order);
-    case 'order.move_items': m = /-> order (\d+): (\d+) dish/.exec(d); return x('move', 'other', m ? `Moved ${m[2]} dishes from #${o} to #${m[1]}` : `Moved dishes from #${o}`, who, m ? { order: +m[1] } : order);
+    case 'order.move_items': m = /-> order (\d+): (\d+) dish/.exec(d); return x('move', 'other', m ? `Moved ${m[2]} ${m[2] === '1' ? 'dish' : 'dishes'} from #${o} to #${m[1]}` : `Moved dishes from #${o}`, who, m ? { order: +m[1] } : order);
     case 'kitchen.main_course': return x('chef', 'other', `Called mains · #${o}`);
     case 'login': case 'logout': return x('user', 'login', `${a === 'login' ? 'Logged in' : 'Logged out'}${r.fold > 1 ? ` ×${r.fold}` : ''}`,
       [who, term, r.fold > 1 && `first ${hm(r.foldEnd)}`].filter(Boolean).join(' · '), null);
@@ -7130,7 +7551,7 @@ function actText(r) {
       try { j = JSON.parse(d); } catch {}
       const day = (t) => (t ? new Date((typeof t === 'number' ? t : Date.parse(t) / 1000) * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '?');
       const n = Number(j.count ?? 0).toLocaleString();
-      if (a === 'log.auto_cleared') return { ic: 'lock', g: 'cleared', cleared: true, text: `Cleared ${n} entries older than ${day(j.cutoff)} automatically${j.tickets ? ` · ${j.tickets} done tickets` : ''}`,
+      if (a === 'log.auto_cleared') return { ic: 'lock', g: 'cleared', cleared: true, text: `Cleared ${n} entries older than ${day(j.cutoff)} automatically${j.tickets ? ` · ${j.tickets} done ticket${j.tickets === 1 ? '' : 's'}` : ''}`,
         sub: `System${j.days ? ` · keep for ${j.days} days` : ''} · cannot be deleted`, opens: null };
       return { ic: 'lock', g: 'cleared', cleared: true, text: j.kind === 'selected' ? `Deleted ${n} selected ${j.count === 1 ? 'entry' : 'entries'}` : `Cleared ${n} log entries · ${day(j.from)} to ${day(j.to)}`,
         sub: `${who}${j.csv ? ' · CSV saved first' : ''} · cannot be deleted`, opens: null };
@@ -7531,9 +7952,10 @@ function backupAlert(al) {
       h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: closeModal }, 'Later')));
   }
   if (al.kind === 'unclean') {
-    return toast(al.message || 'POS did not close properly last time.', false, 12000, { label: 'OK', onclick: () => invoke('dismiss_backup_alert').catch(() => {}) });
+    // At the top of the screen: never over Send or Finish & Pay.
+    return toast(al.message || 'POS did not close properly last time.', false, 12000, { label: 'OK', onclick: () => invoke('dismiss_backup_alert').catch(() => {}) }, { top: true });
   }
-  toast(al.message || 'Second copy failed', true, 10000, { label: 'Fix', onclick: () => toData('backup_copy') });
+  toast(al.message || 'Second copy failed', true, 10000, { label: 'Fix', onclick: () => toData('backup_copy') }, { top: true });
 }
 
 // ---------- Backup & data: automatic backups, a second copy, Keep for (admins) ----------
@@ -7585,7 +8007,7 @@ async function retentionSection() {
   const keep = raw == null || raw === '' ? LOG_KEEP_DEFAULT : Number(raw);
   const dd = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
   const statHint = info && [info.oldest && `Oldest: ${dd(info.oldest)}`,
-    info.last_cleanup_at && `last cleanup ${friendlyTime(info.last_cleanup_at)}, ${Number(info.last_cleanup_count ?? 0).toLocaleString()} removed`].filter(Boolean).join(' · ');
+    info.last_cleanup_at && `last cleanup ${friendlyTime(info.last_cleanup_at)}, ${(() => { const n = Number(info.last_cleanup_count ?? 0), k = Number(info.last_cleanup_tickets ?? 0); return `${n.toLocaleString()} ${n === 1 ? 'entry' : 'entries'}${k ? ` and ${k} done ticket${k === 1 ? '' : 's'}` : ''} removed`; })()}`].filter(Boolean).join(' · ');
   const keepRow = segRow({ id: 'log_keep_days', label: 'Keep for', hint: 'Activity log entries, and tickets that are done', items: LOG_KEEP, value: LOG_KEEP.some(([v]) => v === keep) ? keep : LOG_KEEP_DEFAULT,
     tip: 'Older entries are deleted once a day. A line saying how many stays in the log. Older backups still hold them.',
     save: (v) => saveKey('log_keep_days', v), after: (v) => { state.logKeep = v; setHint(keepRow, 'Older entries go at the next cleanup (start or day close)'); } });

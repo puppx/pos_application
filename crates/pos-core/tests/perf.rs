@@ -206,3 +206,90 @@ fn synthetic_history() -> (Pos, Session) {
     }
     (pos, s)
 }
+
+/// The Activity log with 200k rows: each page (first pages with their
+/// counts, and a later page) for the common filters. Not run by default:
+///   cargo test -p pos-core --test perf activity_log -- --ignored --nocapture
+/// On a copy of a real database: POS_PERF_DB=/path/copy.db POS_PERF_PIN=1234 ...
+#[test]
+#[ignore]
+fn activity_log_with_200k_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = match std::env::var("POS_PERF_DB") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => {
+            let path = dir.path().join("pos.db");
+            {
+                let mut pos = Pos::open(&path).unwrap();
+                let admin = pos.setup_first_admin("Owner", "1234").unwrap();
+                pos.create_user(&admin, "Quinn", Role::Manager, "4646").unwrap();
+                pos.create_user(&admin, "Sam", Role::Staff, "2222").unwrap();
+            }
+            let c = rusqlite::Connection::open(&path).unwrap();
+            let now = chrono::Utc::now().timestamp();
+            let start = now - 365 * 86_400;
+            // A year of rows in the mix QA saw (logins, cancels, settings…),
+            // one day close per day.
+            c.execute_batch(&format!(
+                "BEGIN;
+                 WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 199999)
+                 INSERT INTO audit_log (user_id, action, detail, created_at, order_id)
+                 SELECT 1 + i % 3,
+                   CASE i % 20 WHEN 0 THEN 'order.cancel' WHEN 1 THEN 'order.cancel' WHEN 2 THEN 'order.cancel'
+                     WHEN 3 THEN 'setting.update' WHEN 4 THEN 'setting.update' WHEN 5 THEN 'logout'
+                     WHEN 6 THEN 'order.part_payment' WHEN 7 THEN 'order.discount' WHEN 8 THEN 'drawer.open'
+                     WHEN 9 THEN 'order.void' WHEN 10 THEN 'printer.kitchen' WHEN 11 THEN 'pin.failed'
+                     WHEN 12 THEN 'order.merge' ELSE 'login' END,
+                   CASE i % 20 WHEN 0 THEN 'order ' || i || ' empty' WHEN 8 THEN 'no sale' WHEN 3 THEN 'store_name' ELSE 'x ' || i END,
+                   {start} + i * 157,
+                   CASE WHEN i % 20 IN (0, 1, 2, 6, 7, 9, 12) THEN i ELSE NULL END
+                 FROM n;
+                 INSERT INTO audit_log (user_id, action, detail, created_at) VALUES (1, 'shift.close', '1', {now} - 5000);
+                 WITH RECURSIVE d(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM d WHERE i < 363)
+                 INSERT INTO day_closes (business_date, from_ts, to_ts, closed_by, summary)
+                 SELECT date({start} + i * 86400, 'unixepoch'), {start} + i * 86400, {start} + (i + 1) * 86400, 1, '{{}}' FROM d;
+                 COMMIT;"
+            ))
+            .unwrap();
+            path
+        }
+    };
+    let mut pos = Pos::open(&path).unwrap();
+    let pin = std::env::var("POS_PERF_PIN").unwrap_or_else(|_| "1234".into());
+    let s = pos.login(&pin).unwrap();
+    let quinn = pos.activity_staff(&s).unwrap().into_iter().find(|u| u.name == "Quinn").map(|u| u.id);
+    let week = chrono::Utc::now().timestamp() - 7 * 86_400;
+    let filters: Vec<(&str, ActivityFilter)> = vec![
+        ("everything", ActivityFilter::default()),
+        ("kind=login", ActivityFilter { kind: Some("login".into()), ..Default::default() }),
+        ("kind=void", ActivityFilter { kind: Some("void".into()), ..Default::default() }),
+        ("kind=money", ActivityFilter { kind: Some("money".into()), ..Default::default() }),
+        ("kind=setup", ActivityFilter { kind: Some("setup".into()), ..Default::default() }),
+        ("kind=shift (rare)", ActivityFilter { kind: Some("shift".into()), ..Default::default() }),
+        ("kind=other", ActivityFilter { kind: Some("other".into()), ..Default::default() }),
+        ("needs a look", ActivityFilter { look: Some(true), ..Default::default() }),
+        ("one person", ActivityFilter { user_id: quinn, ..Default::default() }),
+        ("text search", ActivityFilter { q: Some("store".into()), ..Default::default() }),
+        ("last 7 days", ActivityFilter { from: Some(week), ..Default::default() }),
+        ("7 days, login", ActivityFilter { from: Some(week), kind: Some("login".into()), ..Default::default() }),
+    ];
+    for (label, f) in &filters {
+        let t = Instant::now();
+        let first = pos.list_activity(&s, f, None, Some(200)).unwrap();
+        let t1 = t.elapsed();
+        let t = Instant::now();
+        let second = match first.next { Some(c) => pos.list_activity(&s, f, Some(c), Some(200)).unwrap().rows.len(), None => 0 };
+        let t2 = t.elapsed();
+        // Opened again after someone logged in: only the new row is counted.
+        pos.audit_event(&s, "login", "").unwrap();
+        let t = Instant::now();
+        let again = pos.list_activity(&s, f, None, Some(200)).unwrap();
+        let t3 = t.elapsed();
+        assert!(again.total >= first.total);
+        println!(
+            "{label:<20} first page {t1:>8.1?} ({} rows, {} days)  next page {t2:>8.1?} ({second} rows)  first page again {t3:>8.1?}",
+            first.total.unwrap_or(0),
+            first.days.map_or(0, |d| d.len())
+        );
+    }
+}

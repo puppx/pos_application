@@ -78,15 +78,24 @@ fn a_manager_and_an_admin_cancel_sent_and_unsent_orders_with_no_pin() {
 }
 
 #[test]
-fn staff_with_no_pin_are_refused_and_nothing_changes() {
+fn staff_with_no_pin_are_refused_once_sent_and_nothing_changes() {
     let mut k = setup();
     let sam = k.staff.clone();
-    for sent in [false, true] {
-        let id = order_with_curry(&mut k, &sam, sent);
-        for pin in [None, Some("")] {
-            assert!(matches!(k.pos.cancel_order_confirmed(&sam, id, "", pin), Err(PosError::Forbidden)), "sent={sent} pin={pin:?}");
-        }
-        assert_eq!(status(&k, id), "open");
+    let id = order_with_curry(&mut k, &sam, true);
+    for pin in [None, Some("")] {
+        assert!(matches!(k.pos.cancel_order_confirmed(&sam, id, "", pin), Err(PosError::Forbidden)), "pin={pin:?}");
+    }
+    assert_eq!(status(&k, id), "open");
+}
+
+#[test]
+fn staff_cancel_a_mistake_order_nothing_sent_or_paid_with_just_a_confirm() {
+    let mut k = setup();
+    let sam = k.staff.clone();
+    for pin in [None, Some("")] {
+        let id = order_with_curry(&mut k, &sam, false);
+        assert!(k.pos.cancel_order_confirmed(&sam, id, "", pin).unwrap().is_none());
+        assert_eq!(status(&k, id), "cancelled");
     }
 }
 

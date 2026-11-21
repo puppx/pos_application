@@ -71,6 +71,12 @@ pub struct App {
     /// The background worker (main.rs): day close backups and log cleanups
     /// go there; without one (tests) they run at once.
     jobs: Mutex<Option<std::sync::mpsc::Sender<Job>>>,
+    /// Why the database could not be opened at all (damaged): `inner.pos`
+    /// is then an empty stand-in that nothing may use, and only the main
+    /// till's recovery commands work, until a backup is restored.
+    cannot_open: Mutex<Option<String>>,
+    /// Wrong admin PINs typed on the recovery screen.
+    recovery_throttle: Mutex<LoginThrottle>,
 }
 
 /// Work for the background worker.
@@ -159,6 +165,39 @@ impl App {
             last_scheduled: Mutex::new(Instant::now()),
             jobs: Mutex::new(None),
             devices: Mutex::new(HashMap::new()),
+            cannot_open: Mutex::new(None),
+            recovery_throttle: Mutex::new(LoginThrottle::default()),
+        }
+    }
+
+    /// The app when its database file could not be opened (damaged, `why`):
+    /// only the recovery screen on the main till works (see [`RECOVERY_COMMANDS`]).
+    pub fn cannot_open(why: String, backup_dir: PathBuf) -> Result<App> {
+        let app = App::new(Pos::open_in_memory()?, backup_dir);
+        {
+            let mut st = app.backup_state();
+            st.damaged = true;
+            st.damaged_detail = Some(why.clone());
+        }
+        *app.cannot_open.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+        Ok(app)
+    }
+
+    /// The database could not be opened (see [`App::cannot_open`]).
+    pub fn opened_damaged(&self) -> Option<String> {
+        self.cannot_open.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The data turned out damaged (a check, a backup or any command hit
+    /// "database disk image is malformed"): no more automatic backups (good
+    /// ones are never pushed out), admins are told, and the main till
+    /// offers the recovery screen.
+    pub fn note_damage(&self, detail: &str) {
+        let mut st = self.backup_state();
+        if !st.damaged {
+            eprintln!("the database is damaged: {detail}");
+            st.damaged = true;
+            st.damaged_detail = Some(detail.to_string());
         }
     }
 
@@ -327,6 +366,41 @@ pub struct AppStatus {
     tickets: Option<TicketBadges>,
     /// Admins only: a backup problem to show (None = nothing to say).
     backup_alert: Option<BackupAlert>,
+    /// The main till only: the data is damaged, so the recovery screen can
+    /// restore a backup without logging in (None = all well).
+    recovery: Option<RecoveryInfo>,
+}
+
+/// `app_status.recovery` (main till only).
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryInfo {
+    /// "cannot_open": the data could not be opened at all (nothing else
+    /// works); "damaged": it opens but is damaged (logging in may still work).
+    reason: &'static str,
+    /// What SQLite said, for the support person.
+    detail: Option<String>,
+    message: String,
+    /// The login screen can still be tried ("damaged" only).
+    can_log_in: bool,
+}
+
+/// What `recovery_check` found: a backup that passed every check.
+#[derive(Serialize)]
+pub struct RecoveryCandidate {
+    file: BackupFile,
+    summary: BackupSummary,
+}
+
+#[derive(Serialize)]
+pub struct RecoveryRestoreResult {
+    #[serde(flatten)]
+    restored: RestoreResult,
+    /// Whose admin PIN was accepted: "backup" (an admin of the restored
+    /// backup) or "current" (an admin of the damaged data, still readable).
+    pin_from: &'static str,
+    /// The data could not be opened when the app started: restart the app
+    /// so the local network server and the automatic backups start too.
+    restart_needed: bool,
 }
 
 /// Result of a print attempt. Printing problems never undo the action
@@ -362,6 +436,10 @@ pub struct PayResult {
     order: Order,
     /// Receipt and/or cash drawer, per Settings > Receipt printer.
     print: PrintOutcome,
+    /// The same `idempotencyKey` came again (the till did not hear the
+    /// answer and asked again): this is the first answer; nothing was
+    /// taken or printed this time.
+    replayed: bool,
 }
 
 #[derive(Serialize)]
@@ -573,7 +651,7 @@ pub fn mark_unchanged(app: &App) {
 /// it to the second folder if one is set.
 fn backup_locked(app: &App, db: &Path, kind: BackupKind) -> Option<PathBuf> {
     let dir = &app.backup_dir;
-    if app.backup_state().damaged && kind != BackupKind::Manual {
+    if app.backup_state().damaged {
         return None;
     }
     let (settings, changes) = {
@@ -599,6 +677,9 @@ fn backup_locked(app: &App, db: &Path, kind: BackupKind) -> Option<PathBuf> {
         Err(e) => {
             eprintln!("{kind:?} backup failed: {e}");
             let _ = std::fs::remove_file(&work);
+            if let Some(why) = damage_behind(db, &e) {
+                app.note_damage(&why);
+            }
             let mut st = app.backup_state();
             st.last_error = Some(e.to_string());
             st.last_error_at = Some(unix_now());
@@ -673,6 +754,89 @@ fn second_copy(app: &App, settings: &BackupSettings, path: &Path) {
     }
 }
 
+/// When a backup failed: is the live data damaged? SQLite said so
+/// (SQLITE_CORRUPT), or the copy failed its check and the live file fails
+/// `quick_check` too (a copy that is bad by itself is not the data's fault).
+fn damage_behind(db: &Path, e: &PosError) -> Option<String> {
+    if is_corrupt(e) {
+        return Some(e.to_string());
+    }
+    if !matches!(e, PosError::Validation(m) if m.contains("damaged")) {
+        return None;
+    }
+    match Pos::quick_check_file(db) {
+        Ok(None) => None,
+        Ok(Some(p)) => Some(p),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
+/// "Back up now" when the data is damaged.
+const DAMAGED_NO_BACKUP: &str =
+    "The POS data is damaged, so no backup was made (your earlier backups are kept). Restore the newest good backup: Backup & data → Restore, or the recovery screen on the main till.";
+
+/// Commands that work while the database cannot be opened (the rest are
+/// refused): the recovery screen's, on the main till only.
+const RECOVERY_COMMANDS: &[&str] = &["app_status", "recovery_status", "recovery_check", "recovery_restore"];
+
+/// The recovery commands: the main till only, and only while the data is damaged.
+fn require_recovery(app: &App, t: &str) -> Result<()> {
+    if t != LOCAL {
+        return Err(PosError::Forbidden);
+    }
+    if !app.backup_state().damaged {
+        return Err(PosError::Validation("The POS data is not damaged: restore a backup from Backup & data instead.".into()));
+    }
+    Ok(())
+}
+
+/// The newest backups first, as the recovery screen lists them.
+fn recovery_backups(app: &App) -> Vec<BackupFile> {
+    list_backups(&app.backup_dir).into_iter().filter_map(|(_, p)| backup_file(&p)).filter(|b| is_full_backup_name(&b.name)).collect()
+}
+
+/// How many backups `recovery_check` tries, newest first, for a good one.
+const RECOVERY_TRIES: usize = 10;
+
+/// "Choose a backup…" on the recovery screen (main.rs, the native file
+/// picker): check the file and keep a copy in the backup folder as
+/// "pos-imported-<time>.db", ready for `recovery_restore`.
+pub fn recovery_import(app: &App, path: &Path) -> Result<RecoveryCandidate> {
+    require_recovery(app, LOCAL)?;
+    let summary = Pos::check_backup(path, work_path(&app.backup_dir))?;
+    let (dest, _) = unique_backup_path(&app.backup_dir, "pos-imported-");
+    let tmp = app.backup_dir.join(format!("upload-{}.part", unix_now()));
+    let copied = std::fs::copy(path, &tmp).and_then(|_| std::fs::rename(&tmp, &dest));
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&e, "cannot copy the backup"));
+    }
+    Ok(RecoveryCandidate { file: backup_file(&dest).ok_or(PosError::NotFound)?, summary })
+}
+
+/// The database a command found damaged: note it (see [`App::note_damage`]).
+fn watch_damage<T>(app: &App, cmd: &str, r: Result<T>) -> Result<T> {
+    match r {
+        Err(e) if is_corrupt(&e) => {
+            app.note_damage(&e.to_string());
+            // A backup file being checked or restored may be the damaged one: its own words.
+            if BACKUP_FILE_COMMANDS.contains(&cmd) {
+                return Err(e);
+            }
+            // The tills (and browsers) know this answer: not SQLite's words.
+            Err(PosError::Validation(DATA_DAMAGED.into()))
+        }
+        r => r,
+    }
+}
+
+/// Any command that hit damaged data answers this (the browsers show "The main
+/// till needs attention"; SQLite's words are kept for support, see `note_damage`).
+const DATA_DAMAGED: &str = "The POS data is damaged. Restore a backup on the main till.";
+/// Commands about a backup file, whose damage is the file's, not the live data's.
+const BACKUP_FILE_COMMANDS: &[&str] =
+    &["inspect_backup", "restore_backup", "upload_backup_chunk", "finish_backup_upload", "recovery_check", "recovery_restore", "restore_menu_backup", "import_menu"];
+
 /// What admins are told by `app_status.backup_alert`.
 fn backup_alert(app: &App) -> Option<BackupAlert> {
     let st = app.backup_state();
@@ -699,6 +863,7 @@ fn backup_alert(app: &App) -> Option<BackupAlert> {
 /// if damaged, make no backup at all and tell the admins to restore.
 pub fn startup_check(app: &App, unclean: bool) {
     if !unclean {
+        quick_check(app);
         return;
     }
     let (problem, on) = {
@@ -723,6 +888,22 @@ pub fn startup_check(app: &App, unclean: bool) {
     if matches!(problem, Ok(None)) && on {
         let made = backup_kind(app, BackupKind::Emergency);
         app.backup_state().emergency_backup = made.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    }
+}
+
+/// Every start after a proper close: `PRAGMA quick_check` of the database
+/// file through a connection of its own (the till keeps working), so data
+/// damaged since is found before a backup or a sale trips over it. The full
+/// `integrity_check` only runs after a crash (it takes many times longer).
+pub fn quick_check(app: &App) {
+    let Some(db) = app.db_path() else { return };
+    let started = Instant::now();
+    let found = Pos::quick_check_file(&db);
+    eprintln!("startup quick_check: {:?} in {:?}", found.as_ref().map(|p| p.as_deref().unwrap_or("ok")), started.elapsed());
+    match found {
+        Ok(None) => {}
+        Ok(Some(p)) => app.note_damage(&p),
+        Err(e) => app.note_damage(&e.to_string()),
     }
 }
 
@@ -755,6 +936,9 @@ pub fn exit_backup(app: &App) -> Option<PathBuf> {
 /// The automatic log cleanup, in batches of [`CLEANUP_BATCH`] with the lock
 /// let go between them (other terminals keep working). At most every 20 h.
 pub fn run_log_cleanup(app: &App) -> Option<(usize, usize)> {
+    if app.backup_state().damaged {
+        return None;
+    }
     let now = unix_now() as i64;
     let (cutoff, days) = app.lock().pos.log_cleanup_due(now).ok()??;
     let (mut count, mut tickets) = (0, 0);
@@ -840,6 +1024,28 @@ fn is_kind(name: &str, kind: &str) -> bool {
     name.strip_prefix(kind)
         .and_then(|r| r.strip_suffix(".db"))
         .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Copy a database file and its WAL as they are (the damaged data, which
+/// SQLite may not be able to read to copy it properly).
+fn copy_with_sidecars(db: &Path, dest: &Path) -> Result<()> {
+    std::fs::copy(db, dest).map_err(|e| io_error(&e, "cannot keep a copy of the damaged data"))?;
+    // Its WAL beside it ("…db-wal"): SQLite reads it with the copy.
+    let (mut from, mut to) = (db.as_os_str().to_owned(), dest.as_os_str().to_owned());
+    from.push("-wal");
+    to.push("-wal");
+    if Path::new(&from).is_file() {
+        std::fs::copy(&from, &to).map_err(|e| io_error(&e, "cannot keep a copy of the damaged data"))?;
+    }
+    Ok(())
+}
+
+fn remove_backup_with_sidecars(path: &Path) {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut p = path.as_os_str().to_owned();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
 }
 
 /// Disk full as the plain message, whatever reported it.
@@ -982,6 +1188,96 @@ fn approval_pin(app: &App, pin: Option<String>) -> Option<HashedPin> {
     pin.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(|p| app.hash_pin(p))
 }
 
+/// Run command `cmd` for terminal `t` (see [`commands!`]). While the
+/// database cannot be opened only the recovery commands run; a command
+/// that finds the data damaged marks it so (see [`App::note_damage`]).
+pub fn dispatch(app: &App, t: &str, cmd: &str, args: Value) -> Result<Value> {
+    if app.opened_damaged().is_some() && !RECOVERY_COMMANDS.contains(&cmd) {
+        return Err(PosError::Validation("The POS data is damaged and cannot be opened. Restore a backup on the main till.".into()));
+    }
+    watch_damage(app, cmd, dispatch_command(app, t, cmd, args))
+}
+
+/// Answers kept for a repeated `idempotency_key` (a till that lost the
+/// answer to a payment or a dish asks again with the same key), per app,
+/// terminal and command, for [`Once::KEEP`].
+struct Once;
+
+/// Per key: when, what it was for (a hash of the command, the order and its
+/// arguments: [`Once::what`]) and the first answer.
+type OnceEntry = (Instant, u64, Order);
+static ONCE: std::sync::LazyLock<Mutex<HashMap<String, OnceEntry>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A key that came again with another order, command or arguments: a till
+/// bug or a mix-up, never a lost answer. Nothing is done.
+const KEY_REUSED: &str = "This request was already used for something else (another order, amount or dish): nothing was done. Try again.";
+
+impl Once {
+    const KEEP: Duration = Duration::from_secs(15 * 60);
+    const MAX: usize = 2_000;
+
+    /// The key a repeat is known by (per app and terminal); None without a key (no check).
+    fn key(app: &App, t: &str, key: Option<&str>) -> Option<String> {
+        let key = key.map(str::trim).filter(|k| !k.is_empty() && k.len() <= 100)?;
+        Some(format!("{:p}|{t}|{key}", app as *const App))
+    }
+
+    /// What a request is: its command, order and arguments (`Debug` of them).
+    fn what(cmd: &str, order_id: i64, args: &impl std::fmt::Debug) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (cmd, order_id, format!("{args:?}")).hash(&mut h);
+        h.finish()
+    }
+
+    /// The first answer for `key`, if it came already for the same request
+    /// (`what`); refused ([`KEY_REUSED`]) when it came for another one.
+    /// Called with the database lock held, as is [`Once::remember`], so a
+    /// repeat that arrives while the first is still running waits for it.
+    fn seen(key: Option<&str>, what: u64) -> Result<Option<Order>> {
+        let Some(key) = key else { return Ok(None) };
+        let map = ONCE.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(key).filter(|(at, _, _)| at.elapsed() < Self::KEEP) {
+            Some((_, w, o)) if *w == what => Ok(Some(o.clone())),
+            Some(_) => Err(PosError::Conflict(KEY_REUSED.into())),
+            None => Ok(None),
+        }
+    }
+
+    fn remember(key: Option<String>, what: u64, o: &Order) {
+        let Some(key) = key else { return };
+        let mut map = ONCE.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (at, _, _)| at.elapsed() < Self::KEEP);
+        if map.len() >= Self::MAX {
+            if let Some(oldest) = map.iter().min_by_key(|(_, (at, _, _))| *at).map(|(k, _)| k.clone()) {
+                map.remove(&oldest);
+            }
+        }
+        map.insert(key, (Instant::now(), what, o.clone()));
+    }
+}
+
+/// `pay_order` and `add_payment`: one payment, checked against what the
+/// till showed as left to pay, taken once per `idempotency_key`. The
+/// receipt prints when the last part is paid; cash opens the drawer.
+#[allow(clippy::too_many_arguments)]
+fn take_payment(app: &App, t: &str, cmd: &str, order_id: i64, payment: &PaymentInput, pin: Option<String>, expected_left: Option<i64>, key: Option<String>) -> Result<PayResult> {
+    let pin = approval_pin(app, pin);
+    let key = Once::key(app, t, key.as_deref());
+    let what = Once::what(cmd, order_id, &(payment, expected_left));
+    let (order, job, replayed) = app.with_session(t, |pos, s| {
+        if let Some(o) = Once::seen(key.as_deref(), what)? {
+            return Ok((o, None, true));
+        }
+        let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
+        let order = pos.add_payment_checked(s, approver.as_ref(), order_id, payment, expected_left)?;
+        Once::remember(key, what, &order);
+        let job = pos.payment_print_job(s, &order)?;
+        Ok((order, job, false))
+    })?;
+    Ok(PayResult { order, print: print(job), replayed })
+}
+
 /// Declares the commands and generates [`dispatch`]. Each command lists its
 /// arguments (read from a JSON object with camelCase keys; `Option` ones may
 /// be left out) and a body returning `Result<T>`; `app` is the [`App`] and
@@ -989,7 +1285,7 @@ fn approval_pin(app: &App, pin: Option<String>) -> Option<HashedPin> {
 macro_rules! commands {
     ($( $(#[doc = $doc:literal])* fn $name:ident($app:ident, $t:ident $(, $arg:ident : $ty:ty)* $(,)?) -> $ret:ty $body:block )*) => {
         /// Run command `cmd` with JSON `args` for terminal `t`.
-        pub fn dispatch(app: &App, t: &str, cmd: &str, args: Value) -> Result<Value> {
+        fn dispatch_command(app: &App, t: &str, cmd: &str, args: Value) -> Result<Value> {
             let args = if args.is_null() { Value::Object(Default::default()) } else { args };
             match cmd {
                 $( stringify!($name) => {
@@ -1011,26 +1307,187 @@ macro_rules! commands {
 }
 
 commands! {
+    /// Never an error because the data is damaged: the main till must
+    /// still reach the recovery screen (`recovery`), so each part falls back.
     fn app_status(app, t) -> AppStatus {
+        let cannot_open = app.opened_damaged();
         let g = app.lock();
         let session = g.logins.get(t).map(|l| l.session.clone());
-        Ok(AppStatus {
+        fn or_damaged<T>(app: &App, r: Result<T>, default: T) -> Result<T> {
+            match r {
+                Ok(v) => Ok(v),
+                Err(e) if is_corrupt(&e) || app.backup_state().damaged => {
+                    if is_corrupt(&e) {
+                        app.note_damage(&e.to_string());
+                    }
+                    Ok(default)
+                }
+                Err(e) => Err(e),
+            }
+        }
+        let open = cannot_open.is_none();
+        let status = AppStatus {
             version: env!("CARGO_PKG_VERSION"),
-            needs_setup: g.pos.needs_setup()?,
-            store_name: g.pos.setting("store_name")?,
+            // Never the first-admin setup over data that is only unreadable.
+            needs_setup: open && or_damaged(app, g.pos.needs_setup(), false)?,
+            store_name: if open { or_damaged(app, g.pos.setting("store_name"), None)? } else { None },
             plan_width: PLAN_WIDTH,
             plan_height: PLAN_HEIGHT,
             remote: t != LOCAL,
-            auto_pin: g.pos.auto_login_length()?,
-            auto_pin_on: g.pos.pin_auto_login()?,
-            db_id: g.pos.database_id()?,
+            auto_pin: if open { or_damaged(app, g.pos.auto_login_length(), None)? } else { None },
+            auto_pin_on: open && or_damaged(app, g.pos.pin_auto_login(), false)?,
+            db_id: if open { or_damaged(app, g.pos.database_id(), String::new())? } else { String::new() },
             tickets: match &session {
-                Some(s) => Some(g.pos.ticket_badges(s)?),
-                None => None,
+                Some(s) if open => or_damaged(app, g.pos.ticket_badges(s).map(Some), None)?,
+                _ => None,
             },
             backup_alert: session.as_ref().filter(|s| s.role == Role::Admin).and_then(|_| backup_alert(app)),
+            recovery: None,
             session,
+        };
+        drop(g);
+        let st = app.backup_state().clone();
+        let recovery = (t == LOCAL && st.damaged).then(|| match &cannot_open {
+            Some(why) => RecoveryInfo {
+                reason: "cannot_open",
+                detail: Some(why.clone()),
+                message: "The POS data is damaged and cannot be opened. Restore a backup to carry on.".into(),
+                can_log_in: false,
+            },
+            None => RecoveryInfo {
+                reason: "damaged",
+                detail: st.damaged_detail.clone(),
+                message: "The POS data is damaged. Restore a backup to carry on.".into(),
+                can_log_in: true,
+            },
+        });
+        Ok(AppStatus { recovery, ..status })
+    }
+
+    // ---- recovery (main till only, while the data is damaged) ----
+
+    /// The recovery screen: why, and the full backups in the folder, newest first.
+    fn recovery_status(app, t) -> Value {
+        require_recovery(app, t)?;
+        let st = app.backup_state().clone();
+        Ok(serde_json::json!({
+            "cannot_open": app.opened_damaged().is_some(),
+            "detail": st.damaged_detail,
+            "backups": recovery_backups(app),
+            "folder": app.backup_dir.display().to_string(),
+        }))
+    }
+
+    /// Check one backup by name, or (no name) find the newest good one: the
+    /// newest backups are checked one by one (as for a restore: integrity,
+    /// POS tables, version, an admin) until one passes.
+    fn recovery_check(app, t, name: Option<String>) -> RecoveryCandidate {
+        require_recovery(app, t)?;
+        let names: Vec<String> = match name {
+            Some(n) if is_full_backup_name(&n) => vec![n],
+            Some(_) => return Err(PosError::Validation("that is not a backup".into())),
+            None => recovery_backups(app).into_iter().take(RECOVERY_TRIES).map(|b| b.name).collect(),
+        };
+        let mut last = None;
+        let mut found = None;
+        for n in &names {
+            let path = app.backup_dir.join(n);
+            match Pos::check_backup(&path, work_path(&app.backup_dir)) {
+                Ok(summary) => {
+                    found = Some(RecoveryCandidate { file: backup_file(&path).ok_or(PosError::NotFound)?, summary });
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("recovery: {n}: {e}");
+                    last = Some(e);
+                }
+            }
+        }
+        found.ok_or_else(|| match last {
+            Some(e) if names.len() == 1 => e,
+            _ => PosError::Validation(format!("No good backup was found among the newest {}. Choose a backup file (a USB stick or the second folder).", names.len())),
         })
+    }
+
+    /// Restore a backup from the recovery screen, without logging in: RESTORE
+    /// typed and an admin PIN. The PIN is checked against the backup's own
+    /// admins (the damaged data's staff list may be unreadable, and the
+    /// backup's admins are who run the till after), or the damaged data's
+    /// admins while still readable. As a normal restore: the backup is
+    /// checked first, the damaged data is kept as "pos-before-restore-…".
+    fn recovery_restore(app, t, name: String, pin: String, confirm: String) -> RecoveryRestoreResult {
+        require_recovery(app, t)?;
+        if confirm.trim() != RESTORE_WORD {
+            return Err(PosError::Validation(format!("type {RESTORE_WORD} to confirm")));
+        }
+        if !is_full_backup_name(&name) {
+            return Err(PosError::Validation("that is not a backup".into()));
+        }
+        app.recovery_throttle.lock().unwrap_or_else(|e| e.into_inner()).check(Instant::now())?;
+        let src = app.backup_dir.join(&name);
+        if !src.is_file() {
+            return Err(PosError::NotFound);
+        }
+        let _gate = app.backup_gate();
+        let db = app.db_path().ok_or_else(|| PosError::Internal("no database path".into()))?;
+        let cannot_open = app.opened_damaged().is_some();
+        let mut g = app.lock();
+        let inner = &mut *g;
+        let prepared = if cannot_open {
+            Pos::prepare_restore_file(&src, work_path(&app.backup_dir))?
+        } else {
+            inner.pos.prepare_restore(&src, work_path(&app.backup_dir))?
+        };
+        let current = if cannot_open { None } else { inner.pos.admin_with_pin(&pin).ok().flatten() };
+        let (by, pin_from) = match (current, prepared.admin_with_pin(&pin)?) {
+            (_, Some(n)) => (n, "backup"),
+            (Some(n), None) => (n, "current"),
+            (None, None) => {
+                app.recovery_throttle.lock().unwrap_or_else(|e| e.into_inner()).record_failure(Instant::now());
+                return Err(PosError::Validation("That is not the PIN of an admin in this backup.".into()));
+            }
+        };
+        app.recovery_throttle.lock().unwrap_or_else(|e| e.into_inner()).record_success();
+        // The damaged data is kept, as it is, in case anything can be saved from it.
+        let (safety_path, safety_copy) = unique_backup_path(&app.backup_dir, "pos-before-restore-");
+        let kept = if cannot_open { copy_with_sidecars(&db, &safety_path) } else { inner.pos.backup_unchecked(&safety_path).or_else(|_| copy_with_sidecars(&db, &safety_path)) };
+        if let Err(e) = kept {
+            remove_backup_with_sidecars(&safety_path);
+            return Err(disk_full(e));
+        }
+        let summary = if cannot_open {
+            prepared.install_as(&db)?;
+            let pos = Pos::open(&db)?;
+            let detail = restore_audit_detail(&prepared.summary, &format!("{by} (recovery screen, file {name})"));
+            if let Err(e) = pos.audit_restored(&detail) {
+                eprintln!("recovery: audit: {e}");
+            }
+            let summary = prepared.summary.clone();
+            drop(prepared);
+            inner.pos = pos;
+            summary
+        } else {
+            match inner.pos.restore_by(&format!("{by} (recovery screen, file {name})"), prepared) {
+                Ok(summary) => summary,
+                Err(e) => {
+                    remove_backup_with_sidecars(&safety_path);
+                    return Err(e);
+                }
+            }
+        };
+        inner.log_everyone_out();
+        *app.hasher.lock().unwrap_or_else(|e| e.into_inner()) = inner.pos.pin_hasher();
+        let keep = inner.pos.backups_kept().unwrap_or(BACKUPS_KEPT_DEFAULT);
+        drop(g);
+        *app.cannot_open.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        {
+            let mut st = app.backup_state();
+            st.damaged = false;
+            st.damaged_detail = None;
+        }
+        *app.backed_up_changes.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        prune_backups(&app.backup_dir, keep);
+        Ok(RecoveryRestoreResult { restored: RestoreResult { summary, restored: name, safety_copy }, pin_from, restart_needed: cannot_open })
     }
 
     /// Who can log in, for the login screen (pick a name, then the PIN).
@@ -1255,8 +1712,16 @@ commands! {
         app.with_session(t, |pos, s| pos.get_order(s, id))
     }
 
-    fn update_order_details(app, t, id: i64, details: OrderDetails) -> Order {
-        app.with_session(t, |pos, s| pos.update_order_details(s, id, &details))
+    /// `fields`: only these details change (the ones edited on this till);
+    /// left out, all of them, as before.
+    fn update_order_details(app, t, id: i64, details: OrderDetails, fields: Option<Vec<String>>) -> Order {
+        app.with_session(t, |pos, s| pos.update_order_details_fields(s, id, &details, fields.as_deref()))
+    }
+
+    /// Where an order that no longer exists went: the open bill it was
+    /// joined or moved onto (None when it is not known or not open).
+    fn order_moved_to(app, t, order_id: i64) -> Option<Order> {
+        app.with_session(t, |pos, s| pos.moved_to(s, order_id))
     }
 
     fn move_order(app, t, id: i64, table_id: i64) -> Order {
@@ -1266,9 +1731,20 @@ commands! {
     /// `starter`: order a starter as a main (false) or any dish as a starter
     /// (true); left out = the menu's setting. `team_id`: the kitchen team
     /// that makes it ("Which team makes this?"); left out = the menu's.
-    fn add_item(app, t, order_id: i64, product_id: i64, qty: i64, note: Option<String>, variant_id: Option<i64>, option_ids: Option<Vec<i64>>, starter: Option<bool>, team_id: Option<i64>) -> Order {
+    /// `idempotency_key`: a random id per tap; the same key again (the till
+    /// did not hear the answer) adds nothing and answers as the first time.
+    fn add_item(app, t, order_id: i64, product_id: i64, qty: i64, note: Option<String>, variant_id: Option<i64>, option_ids: Option<Vec<i64>>, starter: Option<bool>, team_id: Option<i64>, idempotency_key: Option<String>) -> Order {
         let option_ids = option_ids.unwrap_or_default();
-        app.with_session(t, |pos, s| pos.add_item_for(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids, starter, team_id))
+        let key = Once::key(app, t, idempotency_key.as_deref());
+        let what = Once::what("add_item", order_id, &(product_id, qty, &note, variant_id, &option_ids, starter, team_id));
+        app.with_session(t, |pos, s| {
+            if let Some(o) = Once::seen(key.as_deref(), what)? {
+                return Ok(o);
+            }
+            let o = pos.add_item_for(s, order_id, product_id, qty, note.as_deref(), variant_id, &option_ids, starter, team_id)?;
+            Once::remember(key, what, &o);
+            Ok(o)
+        })
     }
 
     fn set_item_course(app, t, item_id: i64, starter: bool) -> Order {
@@ -1312,13 +1788,20 @@ commands! {
     /// `pin`: a manager's or admin's PIN approving a discount over the staff
     /// limit, or staff reducing or removing a dish already sent (it only
     /// approves; nobody is logged in or out).
-    fn update_item(app, t, item_id: i64, update: ItemUpdate, pin: Option<String>, order_id: Option<i64>) -> Order {
+    ///
+    /// `expected_qty` / `expected_discount_cents`: what the till showed; the
+    /// line now differs = refused, "This dish changed on another till".
+    /// `qty_delta`: +1 / -1 from what the line has now (the order screen's
+    /// + and −); `update`'s own quantity, discount and note are then ignored.
+    fn update_item(app, t, item_id: i64, update: ItemUpdate, pin: Option<String>, order_id: Option<i64>, expected_qty: Option<i64>, expected_discount_cents: Option<i64>, qty_delta: Option<i64>) -> Order {
         let pin = pin.as_deref().map(|p| app.hash_pin(p));
+        let check = ItemCheck { expected_qty, expected_discount_cents, qty_delta };
         let (order, job) = app.with_session(t, |pos, s| {
             // The till says which order it shows: the dish must still be on it.
             if let Some(o) = order_id {
                 pos.check_item_on_order(o, item_id)?;
             }
+            let update = pos.resolve_item_update(item_id, &update, &check)?;
             let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
             pos.update_item_for_kitchen_approved(s, approver.as_ref(), item_id, &update)
         })?;
@@ -1577,31 +2060,22 @@ commands! {
 
     /// `pin`: a manager's or admin's PIN when staff pay by Other on an
     /// order not from a delivery app.
-    fn pay_order(app, t, order_id: i64, method: PaymentMethod, tendered_cents: i64, pin: Option<String>) -> PayResult {
-        let pin = approval_pin(app, pin);
-        let (order, job) = app.with_session(t, |pos, s| {
-            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
-            let payment = PaymentInput { method, amount_cents: None, tendered_cents, tip_cents: 0, items: None };
-            let order = pos.add_payment_approved(s, approver.as_ref(), order_id, &payment)?;
-            let job = pos.payment_print_job(s, &order)?;
-            Ok((order, job))
-        })?;
-        Ok(PayResult { order, print: print(job) })
+    /// `expected_left_cents`: what the till showed as left to pay; another
+    /// till changed the bill since = refused, "The bill changed on another
+    /// till" (nothing taken). `idempotency_key`: a random id per confirm;
+    /// the same key again answers as the first time and takes nothing.
+    fn pay_order(app, t, order_id: i64, method: PaymentMethod, tendered_cents: i64, pin: Option<String>, expected_left_cents: Option<i64>, idempotency_key: Option<String>) -> PayResult {
+        let payment = PaymentInput { method, amount_cents: None, tendered_cents, tip_cents: 0, items: None };
+        take_payment(app, t, "pay_order", order_id, &payment, pin, expected_left_cents, idempotency_key)
     }
 
     /// One payment: the rest, an amount, or chosen dishes, with a tip.
     /// The receipt prints when the last part is paid; cash opens the drawer.
     /// `pin`: a manager's or admin's PIN when staff pay by Other on an
     /// order not from a delivery app (it only approves).
-    fn add_payment(app, t, order_id: i64, payment: PaymentInput, pin: Option<String>) -> PayResult {
-        let pin = approval_pin(app, pin);
-        let (order, job) = app.with_session(t, |pos, s| {
-            let approver = pin.as_ref().map(|p| pos.pin_owner_hashed(p, Some(s.user_id))).transpose()?;
-            let order = pos.add_payment_approved(s, approver.as_ref(), order_id, &payment)?;
-            let job = pos.payment_print_job(s, &order)?;
-            Ok((order, job))
-        })?;
-        Ok(PayResult { order, print: print(job) })
+    /// `expected_left_cents` and `idempotency_key`: as for `pay_order`.
+    fn add_payment(app, t, order_id: i64, payment: PaymentInput, pin: Option<String>, expected_left_cents: Option<i64>, idempotency_key: Option<String>) -> PayResult {
+        take_payment(app, t, "add_payment", order_id, &payment, pin, expected_left_cents, idempotency_key)
     }
 
     /// Take back a part payment. Admins and managers need no PIN; staff
@@ -1964,20 +2438,31 @@ commands! {
     }
 
     fn backup_now(app, t) -> String {
+        app.with_session(t, |_, s| s.require(Permission::Backup))?;
         if app.backup_state().damaged {
-            return Err(PosError::Validation("The POS data is damaged: restore a backup instead (good backups are kept).".into()));
+            return Err(PosError::Validation(DAMAGED_NO_BACKUP.into()));
         }
         let path = backup_path(&app.backup_dir);
-        let settings = app.with_session(t, |pos, s| {
+        let made = app.with_session(t, |pos, s| {
             let changes = pos.change_count().ok();
             pos.backup_to(s, &path)?;
-            if let Err(e) = Pos::verify_backup_file(&path) {
-                let _ = std::fs::remove_file(&path);
-                return Err(e);
-            }
+            Pos::verify_backup_file(&path)?;
             *app.backed_up_changes.lock().unwrap_or_else(|e| e.into_inner()) = changes;
             pos.backup_settings()
-        })?;
+        });
+        let settings = match made {
+            Ok(s) => s,
+            Err(e) => {
+                remove_backup_with_sidecars(&path);
+                // The copy failed because the data itself is damaged: say
+                // that, not that "this backup file is damaged".
+                if let Some(why) = app.db_path().and_then(|db| damage_behind(&db, &e)) {
+                    app.note_damage(&why);
+                    return Err(PosError::Validation(DAMAGED_NO_BACKUP.into()));
+                }
+                return Err(e);
+            }
+        };
         {
             let mut st = app.backup_state();
             st.last_backup = path.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -2473,6 +2958,8 @@ mod tests {
         dispatch(&app, LOCAL, "send_to_kitchen", json!({ "orderId": id })).unwrap();
         let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": id, "reason": "mistake", "pin": "2222" })).unwrap();
         assert_eq!(r, json!({ "attempted": true, "error": null }));
+        // The File printer writes on a background thread: let it finish first.
+        pos_core::wait_for_prints(Duration::from_secs(10));
         let printed = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
         let _ = std::fs::remove_file(&path);
         assert!(printed.contains("CANCELLED") && printed.contains("Green curry"), "{printed}");
@@ -2553,16 +3040,21 @@ mod tests {
             o["id"].clone()
         };
         let status = |id: &Value| dispatch(&app, LOCAL, "get_order", json!({ "id": id })).unwrap()["status"].clone();
-        // Staff: no PIN (left out or empty) is refused, sent or not.
+        // Staff: no PIN (left out or empty) is refused once the kitchen has it;
+        // a mistake order (nothing sent or paid) is cancelled with just a confirm.
         dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
-        let unsent = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap()["id"].clone();
         let sent = sent_order();
-        for id in [&unsent, &sent] {
-            for args in [json!({ "orderId": id, "reason": "" }), json!({ "orderId": id, "reason": "", "pin": "" }), json!({ "orderId": id, "reason": "", "pin": null })] {
-                assert!(matches!(dispatch(&app, LOCAL, "cancel_order", args), Err(PosError::Forbidden)));
-            }
-            assert_eq!(status(id), "open");
+        for args in [json!({ "orderId": sent, "reason": "" }), json!({ "orderId": sent, "reason": "", "pin": "" }), json!({ "orderId": sent, "reason": "", "pin": null })] {
+            assert!(matches!(dispatch(&app, LOCAL, "cancel_order", args), Err(PosError::Forbidden)));
         }
+        assert_eq!(status(&sent), "open");
+        for pin in [json!(null), json!("")] {
+            let mistake = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap()["id"].clone();
+            dispatch(&app, LOCAL, "add_item", json!({ "orderId": mistake, "productId": curry.id, "qty": 1 })).unwrap();
+            dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": mistake, "reason": "", "pin": pin })).unwrap();
+            assert_eq!(status(&mistake), "cancelled");
+        }
+        let unsent = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap()["id"].clone();
         // Their own PIN for the unsent one; a manager's for the sent one.
         assert!(matches!(dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "", "pin": "2222" })), Err(PosError::Forbidden)));
         dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": unsent, "reason": "", "pin": "2222" })).unwrap();
@@ -2579,6 +3071,8 @@ mod tests {
             dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "", "pin": "" })).unwrap();
             assert_eq!(status(&sent), "cancelled");
         }
+        // The File printer writes on a background thread: let it finish first.
+        pos_core::wait_for_prints(Duration::from_secs(10));
         let printed = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
         let _ = std::fs::remove_file(&path);
         assert!(printed.contains("CANCELLED") && printed.contains("Green curry"), "{printed}");
@@ -2589,6 +3083,8 @@ mod tests {
         let r = dispatch(&app, LOCAL, "cancel_order", json!({ "orderId": sent, "reason": "" })).unwrap();
         assert_eq!(r, json!({ "attempted": false, "error": null }));
         assert_eq!(status(&sent), "cancelled");
+        // The File printer writes on a background thread: let it finish first.
+        pos_core::wait_for_prints(Duration::from_secs(10));
         let printed = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
         let _ = std::fs::remove_file(&path);
         assert!(printed.contains("NEW ORDER") && !printed.contains("CANCELLED"), "only the order went to the kitchen: {printed}");
@@ -2832,7 +3328,7 @@ mod tests {
         assert_eq!((o["id"].clone(), o["service_bp"].clone(), o["service_cents"].clone()), (b.clone(), json!(0), json!(0)));
         let (user, detail) = last_audit(&app, "order.move_items");
         assert_eq!(user, Some(sam.id));
-        assert!(detail.ends_with(&format!("-> order {b}: 1 dish(es) {quinn_note}")), "{detail}");
+        assert!(detail.ends_with(&format!("-> order {b}: 1 dish {quinn_note}")), "{detail}");
         let o = check("merge_into_table", json!({ "orderId": a, "tableId": tables[1] }), service);
         assert_eq!((o["id"].clone(), o["items"].as_array().unwrap().len()), (b.clone(), 3));
         assert!(last_audit(&app, "order.merge").1.ends_with(&format!("{a} -> order {b} {quinn_note}")));
@@ -2886,6 +3382,70 @@ mod tests {
             category_id: None, sku: None, barcode: None, name: name.into(), price_cents: 900, cost_cents: 0, tax_rate_bp: Some(0),
             stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
         }
+    }
+
+    #[test]
+    fn a_repeated_payment_or_dish_is_taken_once_and_a_stale_till_is_refused() {
+        let mut pos = Pos::open_in_memory().unwrap();
+        let admin = pos.setup_first_admin("Owner", "1111").unwrap();
+        let curry = pos.create_product(&admin, curry("Green curry")).unwrap();
+        let app = App::new(pos, std::env::temp_dir());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let id = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap()["id"].clone();
+        // A dish tapped once, the answer lost, asked again with the same key: one dish.
+        let add = json!({ "orderId": id, "productId": curry.id, "qty": 1, "idempotencyKey": "tap-1" });
+        let first = dispatch(&app, LOCAL, "add_item", add.clone()).unwrap();
+        assert_eq!(dispatch(&app, LOCAL, "add_item", add).unwrap(), first);
+        dispatch(&app, LOCAL, "add_item", json!({ "orderId": id, "productId": curry.id, "qty": 1, "idempotencyKey": "tap-2" })).unwrap();
+        let line = first["items"][0]["id"].clone();
+        // + and − as deltas: a stale update body does not matter.
+        let stale = json!({ "qty": 1, "discount_cents": 0, "note": null });
+        let o = dispatch(&app, LOCAL, "update_item", json!({ "itemId": line, "update": stale, "qtyDelta": 1, "orderId": id })).unwrap();
+        assert_eq!(o["items"][0]["qty"], 3);
+        // A note saved from a screen that still shows 2: refused, nothing lost.
+        let e = dispatch(&app, LOCAL, "update_item", json!({ "itemId": line, "update": { "qty": 2, "discount_cents": 0, "note": "mild" }, "expectedQty": 2 })).unwrap_err();
+        assert_eq!(e.to_string(), ITEM_CHANGED);
+        assert_eq!(dispatch(&app, LOCAL, "get_order", json!({ "id": id })).unwrap()["items"][0]["qty"], 3);
+        // The pay dialog showed 18.00 (two curries): the bill is 27.00 now, nothing is taken.
+        let pay = |left: i64, key: &str| json!({ "orderId": id, "payment": { "method": "card", "amount_cents": left }, "expectedLeftCents": left, "idempotencyKey": key });
+        let e = dispatch(&app, LOCAL, "add_payment", pay(1800, "pay-1")).unwrap_err();
+        assert_eq!(e.to_string(), BILL_CHANGED);
+        let e = dispatch(&app, LOCAL, "pay_order", json!({ "orderId": id, "method": "card", "tenderedCents": 0, "expectedLeftCents": 1800 })).unwrap_err();
+        assert_eq!(e.to_string(), BILL_CHANGED);
+        // Part of it by card, the answer lost, the same confirm again: one payment, and the same answer.
+        let part = json!({ "orderId": id, "payment": { "method": "card", "amount_cents": 900 }, "expectedLeftCents": 2700, "idempotencyKey": "pay-2" });
+        let r1 = dispatch(&app, LOCAL, "add_payment", part.clone()).unwrap();
+        let r2 = dispatch(&app, LOCAL, "add_payment", part).unwrap();
+        assert_eq!((r1["replayed"].clone(), r2["replayed"].clone()), (json!(false), json!(true)));
+        assert_eq!(r2["order"], r1["order"]);
+        let o = dispatch(&app, LOCAL, "get_order", json!({ "id": id })).unwrap();
+        assert_eq!((o["payments"].as_array().unwrap().len(), o["paid_cents"].clone()), (1, json!(900)));
+        // The same key for something else is refused, never replayed: another amount,
+        // another command, another order, another dish.
+        let other_amount = json!({ "orderId": id, "payment": { "method": "card", "amount_cents": 500 }, "expectedLeftCents": 1800, "idempotencyKey": "pay-2" });
+        assert_eq!(dispatch(&app, LOCAL, "add_payment", other_amount).unwrap_err().to_string(), KEY_REUSED);
+        let as_pay_order = json!({ "orderId": id, "method": "card", "tenderedCents": 0, "expectedLeftCents": 1800, "idempotencyKey": "pay-2" });
+        assert_eq!(dispatch(&app, LOCAL, "pay_order", as_pay_order).unwrap_err().to_string(), KEY_REUSED);
+        let id2 = dispatch(&app, LOCAL, "open_order", json!({ "order": { "order_type": "takeaway" } })).unwrap()["id"].clone();
+        dispatch(&app, LOCAL, "add_item", json!({ "orderId": id2, "productId": curry.id, "qty": 1 })).unwrap();
+        let other_order = json!({ "orderId": id2, "payment": { "method": "card", "amount_cents": 900 }, "expectedLeftCents": 2700, "idempotencyKey": "pay-2" });
+        assert_eq!(dispatch(&app, LOCAL, "add_payment", other_order).unwrap_err().to_string(), KEY_REUSED);
+        let e = dispatch(&app, LOCAL, "add_item", json!({ "orderId": id2, "productId": curry.id, "qty": 1, "idempotencyKey": "tap-1" })).unwrap_err();
+        assert_eq!(e.to_string(), KEY_REUSED);
+        let e = dispatch(&app, LOCAL, "add_item", json!({ "orderId": id, "productId": curry.id, "qty": 2, "idempotencyKey": "tap-1" })).unwrap_err();
+        assert_eq!(e.to_string(), KEY_REUSED);
+        assert_eq!(dispatch(&app, LOCAL, "get_order", json!({ "id": id2 })).unwrap()["payments"].as_array().unwrap().len(), 0);
+        assert_eq!(dispatch(&app, LOCAL, "get_order", json!({ "id": id2 })).unwrap()["items"][0]["qty"], 1);
+        // A refused attempt is not remembered: its key works once the bill is right.
+        let e = dispatch(&app, LOCAL, "pay_order", json!({ "orderId": id2, "method": "card", "tenderedCents": 0, "expectedLeftCents": 1, "idempotencyKey": "pay-3" })).unwrap_err();
+        assert_eq!(e.to_string(), BILL_CHANGED);
+        let r = dispatch(&app, LOCAL, "pay_order", json!({ "orderId": id2, "method": "card", "tenderedCents": 0, "expectedLeftCents": 900, "idempotencyKey": "pay-3" })).unwrap();
+        assert_eq!((r["order"]["status"].clone(), r["replayed"].clone()), (json!("paid"), json!(false)));
+        // Another terminal's key is its own.
+        assert!(matches!(dispatch(&app, "web-other", "add_payment", pay(1800, "pay-2")), Err(PosError::NotLoggedIn)));
+        // Without the new fields: as before.
+        let r = dispatch(&app, LOCAL, "pay_order", json!({ "orderId": id, "method": "cash", "tenderedCents": 2000 })).unwrap();
+        assert_eq!(r["order"]["status"], "paid");
     }
 
     /// A full backup from "the other PC" (its own staff, PINs, menu, an order), saved in `dir` as `name`.
@@ -3482,5 +4042,140 @@ mod tests {
         assert!(dispatch(&app, LOCAL, "backup_now", json!({})).is_err());
         assert_eq!(files(&app.backup_dir), before);
         assert_eq!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["backup_alert"]["kind"], "damaged");
+    }
+
+    /// A till on disk with a good backup ("pos-<time>.db") and a long log,
+    /// then its log pages overwritten on disk: damaged after a proper close.
+    fn damaged_till(dir: &Path) -> (PathBuf, String) {
+        let (app, db) = till_on_disk(dir);
+        app.set_db_path(db.clone());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let good = dispatch(&app, LOCAL, "backup_now", json!({})).unwrap().as_str().unwrap().to_string();
+        let good = Path::new(&good).file_name().unwrap().to_string_lossy().into_owned();
+        drop(app);
+        {
+            let c = Connection::open(&db).unwrap();
+            c.execute_batch(
+                "BEGIN;
+                 WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 2999)
+                 INSERT INTO audit_log (user_id, action, detail) SELECT 1, 'login', printf('%0200d', i) FROM n;
+                 COMMIT;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        }
+        let mut bytes = std::fs::read(&db).unwrap();
+        let pages = bytes.len() / 4096;
+        for b in &mut bytes[(pages - 60) * 4096..(pages - 20) * 4096] {
+            *b = 0xA5;
+        }
+        std::fs::write(&db, bytes).unwrap();
+        (db, good)
+    }
+
+    #[test]
+    fn data_damaged_after_a_proper_close_is_found_at_start_and_backups_say_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, good) = damaged_till(dir.path());
+        let app = App::new(Pos::open(&db).unwrap(), dir.path().join("backups"));
+        app.set_db_path(db.clone());
+        assert!(!app.backup_state().damaged);
+        // A proper close last time: the quick check finds it all the same.
+        startup_check(&app, false);
+        let st = app.backup_state().clone();
+        assert!(st.damaged && !st.unclean_shutdown, "{st:?}");
+        let before = files(&app.backup_dir);
+        assert!(backup_kind(&app, BackupKind::Scheduled).is_none());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let e = dispatch(&app, LOCAL, "backup_now", json!({})).unwrap_err().to_string();
+        assert!(e.starts_with("The POS data is damaged, so no backup was made"), "{e}");
+        assert_eq!(files(&app.backup_dir), before, "no backup, and the good ones stay");
+        let st = dispatch(&app, LOCAL, "app_status", Value::Null).unwrap();
+        assert_eq!((st["backup_alert"]["kind"].clone(), st["recovery"]["reason"].clone()), (json!("damaged"), json!("damaged")));
+        assert!(st["recovery"]["can_log_in"].as_bool().unwrap());
+        assert!(app.backup_dir.join(&good).is_file());
+
+        // Not found at start (no check yet): "Back up now" itself finds it.
+        let app = App::new(Pos::open(&db).unwrap(), dir.path().join("backups"));
+        app.set_db_path(db.clone());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        let e = dispatch(&app, LOCAL, "backup_now", json!({})).unwrap_err().to_string();
+        assert!(e.starts_with("The POS data is damaged, so no backup was made"), "{e}");
+        assert!(app.backup_state().damaged);
+        assert_eq!(files(&app.backup_dir), before);
+
+        // Any command that reads a damaged page marks it too.
+        let app = App::new(Pos::open(&db).unwrap(), dir.path().join("backups"));
+        let read = dispatch(&app, LOCAL, "login", json!({ "pin": "1111" }))
+            .and_then(|_| dispatch(&app, LOCAL, "export_activity", json!({})));
+        assert!(read.is_err() && app.backup_state().damaged, "{read:?}");
+    }
+
+    #[test]
+    fn the_recovery_screen_restores_a_backup_with_its_admin_pin_on_the_main_till_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, good) = damaged_till(dir.path());
+        let app = App::new(Pos::open(&db).unwrap(), dir.path().join("backups"));
+        app.set_db_path(db.clone());
+        // Not while the data is fine.
+        assert!(dispatch(&app, LOCAL, "recovery_status", json!({})).unwrap_err().to_string().contains("not damaged"));
+        startup_check(&app, false);
+        let tablet = "0123456789abcdef0123456789abcdef";
+        for cmd in ["recovery_status", "recovery_check", "recovery_restore"] {
+            let args = json!({ "name": good, "pin": "1111", "confirm": "RESTORE" });
+            assert!(matches!(dispatch(&app, tablet, cmd, args), Err(PosError::Forbidden)), "{cmd} from a tablet");
+        }
+        assert!(dispatch(&app, tablet, "app_status", Value::Null).unwrap()["recovery"].is_null());
+        let st = dispatch(&app, LOCAL, "recovery_status", json!({})).unwrap();
+        assert!(st["backups"].as_array().unwrap().iter().any(|b| b["name"] == good.as_str()));
+        // The newest good one: the imported file of another shop is older.
+        let found = dispatch(&app, LOCAL, "recovery_check", json!({})).unwrap();
+        assert_eq!((found["file"]["name"].clone(), found["summary"]["store_name"].clone()), (json!(good), json!("This Shop")));
+        let args = |pin: &str, confirm: &str| json!({ "name": good, "pin": pin, "confirm": confirm });
+        let e = dispatch(&app, LOCAL, "recovery_restore", args("1111", "restore")).unwrap_err().to_string();
+        assert_eq!(e, "type RESTORE to confirm");
+        // Staff PIN, or no admin's: refused.
+        let e = dispatch(&app, LOCAL, "recovery_restore", args("2222", "RESTORE")).unwrap_err().to_string();
+        assert!(e.contains("not the PIN of an admin"), "{e}");
+        let done = dispatch(&app, LOCAL, "recovery_restore", args("1111", "RESTORE")).unwrap();
+        assert_eq!((done["pin_from"].clone(), done["restart_needed"].clone(), done["restored"].clone()), (json!("backup"), json!(false), json!(good)));
+        let safety = done["safety_copy"].as_str().unwrap();
+        assert!(safety.starts_with("pos-before-restore-") && app.backup_dir.join(safety).is_file());
+        assert!(!app.backup_state().damaged);
+        assert_eq!(Pos::quick_check_file(&db).unwrap(), None, "the data is whole again");
+        assert!(dispatch(&app, LOCAL, "app_status", Value::Null).unwrap()["recovery"].is_null());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        assert!(dispatch(&app, LOCAL, "export_activity", json!({})).is_ok());
+        // The restore's audit row says what came back, who, how and from which file.
+        let (_, detail) = last_audit(&app, "backup.restore");
+        assert!(detail.contains(" staff, by ") && detail.contains(&format!("(recovery screen, file {good})")), "{detail}");
+        // Once restored, the recovery screen is gone.
+        assert!(dispatch(&app, LOCAL, "recovery_restore", args("1111", "RESTORE")).is_err());
+    }
+
+    #[test]
+    fn data_that_cannot_be_opened_only_offers_the_recovery_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, good) = damaged_till(dir.path());
+        // The header itself is gone: not a database any more.
+        let mut bytes = std::fs::read(&db).unwrap();
+        bytes[..100].fill(0x5A);
+        std::fs::write(&db, bytes).unwrap();
+        let e = Pos::open(&db).err().expect("it cannot be opened");
+        assert!(is_corrupt(&e), "{e}");
+        let app = App::cannot_open(e.to_string(), dir.path().join("backups")).unwrap();
+        app.set_db_path(db.clone());
+        let st = dispatch(&app, LOCAL, "app_status", Value::Null).unwrap();
+        assert_eq!((st["needs_setup"].clone(), st["recovery"]["reason"].clone(), st["recovery"]["can_log_in"].clone()), (json!(false), json!("cannot_open"), json!(false)));
+        // Nothing else runs, least of all the first-admin setup.
+        assert!(dispatch(&app, LOCAL, "setup_admin", json!({ "name": "X", "pin": "9999" })).is_err());
+        assert!(dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).is_err());
+        let done = dispatch(&app, LOCAL, "recovery_restore", json!({ "name": good, "pin": "1111", "confirm": "RESTORE" })).unwrap();
+        assert_eq!(done["restart_needed"], true);
+        assert!(app.opened_damaged().is_none() && !app.backup_state().damaged);
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        assert_eq!(dispatch(&app, LOCAL, "get_setting", json!({ "key": "store_name" })).unwrap(), "This Shop");
+        drop(app);
+        assert_eq!(store_name(&db), "This Shop");
     }
 }

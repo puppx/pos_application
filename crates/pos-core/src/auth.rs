@@ -76,7 +76,7 @@ impl LoginThrottle {
     }
 }
 
-fn argon_hash(pin: &str, salt: &[u8; 16], params: &Params) -> Result<Vec<u8>> {
+pub(crate) fn argon_hash(pin: &str, salt: &[u8; 16], params: &Params) -> Result<Vec<u8>> {
     validate_pin(pin)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.clone());
     let mut out = vec![0u8; 32];

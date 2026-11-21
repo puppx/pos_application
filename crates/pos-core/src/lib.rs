@@ -60,11 +60,12 @@ pub use printing::{
     PRINT_CANCELLED_ORDER_KEY, SLOW_CHUNK, SLOW_PAUSE,
 };
 pub use orders::{
-    ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, EMPTY_ORDER_AGE, EMPTY_ORDER_SWEPT, OPEN_ITEM_SKU,
+    ItemCheck, ItemUpdate, NewOrder, Order, OrderDetails, OrderItem, OrderSummary, OrderType, Payment, PaymentInput, PaymentMethod, BELOW_PAID, BILL_CHANGED, EMPTY_ORDER_AGE,
+    EMPTY_ORDER_SWEPT, ITEM_CHANGED, OPEN_ITEM_SKU,
 };
 pub use products::{NewProduct, Product, ProductUpdate};
 pub use reports::{GroupTotal, SalesSummary, TopProduct};
-pub use restore::{io_error, is_disk_full, BackupSummary, PreparedRestore, DISK_FULL};
+pub use restore::{io_error, is_corrupt, is_disk_full, restore_audit_detail, BackupSummary, PreparedRestore, DISK_FULL};
 pub use service::{ServiceSettings, MAX_SERVICE_BP};
 pub use settings::{
     discount_presets, BackupSettings, PaymentNames, BACKUPS_KEPT_DEFAULT, BACKUP_COPY_ON_KEY, BACKUP_DAYCLOSE_KEY, BACKUP_EMERGENCY_KEY, BACKUP_EXIT_KEY,
@@ -119,12 +120,19 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0031_payment_ids.sql"),
     include_str!("migrations/0032_tickets.sql"),
     include_str!("migrations/0033_activity.sql"),
+    include_str!("migrations/0034_ticket_ids.sql"),
 ];
 /// The migration (1-based, as in `user_version`) after which old audit rows
 /// get their `order_id` / `approver_id` filled in from their detail text.
 const ACTIVITY_MIGRATION: usize = 33;
 /// The schema this app creates; backups up to this version can be restored.
 pub const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
+
+/// "1 dish", "2 dishes": a count and its noun, for wording people read.
+pub(crate) fn plural(n: impl Into<i64>, one: &str, many: &str) -> String {
+    let n = n.into();
+    format!("{n} {}", if n == 1 { one } else { many })
+}
 
 pub struct Pos {
     conn: Connection,
@@ -136,6 +144,8 @@ pub struct Pos {
     /// The terminal the current command came from ("local", "web-<id>"),
     /// written on every audit row (see [`Pos::set_terminal`]).
     terminal: Option<String>,
+    /// The Activity log's first-page counts, kept between calls.
+    log_counts: activity::CountCache,
 }
 
 impl Pos {
@@ -168,11 +178,12 @@ impl Pos {
         migrate(&conn)?;
         conn.execute_batch(receipt::BILL_STALE_TRIGGERS)?;
         conn.execute_batch(orders::ACTIVITY_TRIGGERS)?;
+        conn.execute_batch(activity::LOG_CHANGE_TRIGGERS)?;
         let pin_salt = load_or_create_salt(&conn)?;
         if database_id(&conn)?.is_none() {
             new_database_id(&conn)?;
         }
-        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default(), last_empty_sweep: None, terminal: None })
+        Ok(Pos { conn, pin_salt, pin_params, throttle: LoginThrottle::default(), last_empty_sweep: None, terminal: None, log_counts: Default::default() })
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {

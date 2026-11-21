@@ -28,7 +28,9 @@ pub const LOG_KEEP_KEY: &str = "log_keep_days";
 pub const LOG_KEEP_DEFAULT: i64 = 180;
 pub const LOG_KEEP_CHOICES: &[i64] = &[30, 90, 180, 365, 0];
 const CLEANUP_AT_KEY: &str = "_log_cleanup_at";
+/// Log rows the last automatic cleanup deleted (done tickets apart, below).
 const CLEANUP_COUNT_KEY: &str = "_log_cleanup_count";
+const CLEANUP_TICKETS_KEY: &str = "_log_cleanup_tickets";
 /// The automatic cleanup runs at most this often.
 pub const CLEANUP_EVERY_SECS: i64 = 20 * 60 * 60;
 /// Rows deleted per batch (each batch is its own short transaction).
@@ -243,10 +245,11 @@ pub struct ActivityPage {
     pub next: Option<ActivityCursor>,
     /// Rows per business day for the whole filter (first page only).
     pub days: Option<Vec<ActivityDay>>,
-    /// "Needs a look" rows in the date range (other filters too, except `look`).
-    pub look_count: i64,
-    /// Rows matching the filter (all pages).
-    pub total: i64,
+    /// "Needs a look" rows in the date range (other filters too, except
+    /// `look`). First page only (None on the pages after it).
+    pub look_count: Option<i64>,
+    /// Rows matching the filter (all pages). First page only.
+    pub total: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,7 +276,11 @@ pub struct LogRetention {
     /// Unix seconds of the oldest row.
     pub oldest: Option<i64>,
     pub last_cleanup_at: Option<i64>,
+    /// Log rows the last automatic cleanup deleted (as `count` in its
+    /// `log.auto_cleared` row).
     pub last_cleanup_count: Option<i64>,
+    /// Done tickets it deleted (as `tickets` in that row).
+    pub last_cleanup_tickets: Option<i64>,
 }
 
 const ROW_SELECT: &str = "SELECT a.id, a.created_at, a.action, COALESCE(a.detail, ''), a.user_id, u.name, a.approver_id, ap.name, a.order_id, a.terminal,
@@ -295,12 +302,102 @@ const ROW_FROM: &str = " FROM audit_log a
         LEFT JOIN floors f ON f.id = t.floor_id
         LEFT JOIN delivery_channels ch ON ch.id = o.channel_id";
 
-/// The business day of `a.created_at` (?1 = the open business date).
-fn day_sql(cur: usize) -> String {
-    format!(
-        "COALESCE((SELECT d.business_date FROM day_closes d WHERE a.created_at >= d.from_ts AND a.created_at < d.to_ts LIMIT 1),
-           CASE WHEN a.created_at >= (SELECT MAX(to_ts) FROM day_closes) THEN ?{cur} ELSE date(a.created_at, 'unixepoch', 'localtime') END)"
-    )
+/// Counts every delete or change of a log row (not the inserts: a new row
+/// has a higher id), so the cached first-page counts know when to start
+/// again. Temporary (this connection only), made on every open.
+pub(crate) const LOG_CHANGE_TRIGGERS: &str = "
+    CREATE TEMP TABLE IF NOT EXISTS log_changes (n INTEGER NOT NULL);
+    INSERT INTO log_changes (n) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM log_changes);
+    CREATE TEMP TRIGGER IF NOT EXISTS log_row_deleted AFTER DELETE ON main.audit_log BEGIN UPDATE log_changes SET n = n + 1; END;
+    CREATE TEMP TRIGGER IF NOT EXISTS log_row_changed AFTER UPDATE ON main.audit_log BEGIN UPDATE log_changes SET n = n + 1; END;
+";
+
+/// First-page counts of the last few filters: on the next first page only
+/// the rows added since are counted. Any delete or change of a log row, a
+/// day close or a new business day starts again.
+#[derive(Default)]
+pub(crate) struct CountCache(std::cell::RefCell<Vec<CountEntry>>);
+
+struct CountEntry {
+    /// The filter and the business days it was counted with.
+    key: String,
+    changes: i64,
+    max_id: i64,
+    by_day: std::collections::BTreeMap<String, i64>,
+    look: i64,
+}
+
+const COUNT_CACHE_SIZE: usize = 8;
+/// Below this many matches a page is gathered by type and sorted, not
+/// read along the time index.
+const FEW_ROWS: i64 = 3000;
+
+fn count_key(f: &ActivityFilter, days: &BusinessDays) -> String {
+    format!("{:?}|{}|{}|{:?}|{:?}", (f.from, f.to, f.user_id, &f.kind, f.look, &f.q), days.open, days.closes.len(), days.last_to, days.closes.last())
+}
+
+/// The business days, as History has them: a row in a closed day's range
+/// belongs to that day, one after the last close to the day still open,
+/// and any other (before the first close, or a gap) to its date on this
+/// PC. Read once per page and worked out here, not looked up per row.
+struct BusinessDays {
+    /// (from_ts, to_ts, business_date) of every close, by from_ts.
+    closes: Vec<(i64, i64, String)>,
+    last_to: Option<i64>,
+    open: String,
+}
+
+impl BusinessDays {
+    fn day_of(&self, at: i64) -> String {
+        if let Some(c) = self.close_at(at) {
+            return c.2.clone();
+        }
+        if self.last_to.is_some_and(|t| at >= t) {
+            return self.open.clone();
+        }
+        crate::local_date(at)
+    }
+
+    fn close_at(&self, at: i64) -> Option<&(i64, i64, String)> {
+        let i = self.closes.partition_point(|c| c.0 <= at);
+        self.closes[..i].iter().rev().take(2).find(|c| at < c.1)
+    }
+
+    /// [lo, hi) cut into (from, to, day) pieces that each lie in one day.
+    fn pieces(&self, lo: i64, hi: i64) -> Vec<(i64, i64, String)> {
+        let mut out: Vec<(i64, i64, String)> = Vec::new();
+        let mut t = lo;
+        while t < hi {
+            let (end, day) = if let Some(c) = self.close_at(t) {
+                (c.1, c.2.clone())
+            } else if self.last_to.is_some_and(|l| t >= l) {
+                (hi, self.open.clone())
+            } else {
+                // A day with no close: up to the next close or local midnight.
+                let next = self.closes.get(self.closes.partition_point(|c| c.0 <= t)).map_or(i64::MAX, |c| c.0);
+                (next.min(next_local_midnight(t)), crate::local_date(t))
+            };
+            let end = end.clamp(t + 1, hi);
+            match out.last_mut() {
+                Some(last) if last.1 == t && last.2 == day => last.1 = end,
+                _ => out.push((t, end, day)),
+            }
+            t = end;
+        }
+        out
+    }
+}
+
+/// The first local midnight after `t`.
+fn next_local_midnight(t: i64) -> i64 {
+    use chrono::TimeZone;
+    let next = chrono::DateTime::from_timestamp(t, 0)
+        .map(|d| d.with_timezone(&chrono::Local).date_naive())
+        .and_then(|d| d.succ_opt())
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|d| chrono::Local.from_local_datetime(&d).earliest())
+        .map(|d| d.timestamp());
+    next.filter(|&n| n > t).unwrap_or(t + 3600)
 }
 
 fn kind_case() -> String {
@@ -403,14 +500,26 @@ fn row_from(r: &rusqlite::Row) -> rusqlite::Result<ActivityRow> {
         device,
         ref_name: r.get(18)?,
         look: r.get(19)?,
-        day: r.get(20)?,
-        kind: r.get(21)?,
+        // Filled in by the caller (see `BusinessDays`).
+        day: String::new(),
+        kind: r.get(20)?,
         cleared,
         action,
     })
 }
 
-fn csv_field(s: &str) -> String {
+/// One CSV field. A value a spreadsheet would read as a formula (starting
+/// with = + - @, a tab or a carriage return) gets a leading single quote,
+/// the usual guard against formula injection: "=HYPERLINK(...)" typed as a
+/// note shows as text, never runs.
+pub(crate) fn csv_field(s: &str) -> String {
+    let guarded;
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        guarded = format!("'{s}");
+        guarded.as_str()
+    } else {
+        s
+    };
     if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -419,8 +528,20 @@ fn csv_field(s: &str) -> String {
 }
 
 impl Pos {
+    fn business_days(&self) -> Result<BusinessDays> {
+        let mut stmt = self.conn.prepare_cached("SELECT from_ts, to_ts, business_date FROM day_closes ORDER BY from_ts, id")?;
+        let closes = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<Vec<(i64, i64, String)>>>()?;
+        let last_to = closes.iter().map(|c| c.1).max();
+        Ok(BusinessDays { closes, last_to, open: self.business_date()?.format("%Y-%m-%d").to_string() })
+    }
+
     fn activity_rows(&self, f: &ActivityFilter, before: Option<ActivityCursor>, limit: usize, oldest_first: bool) -> Result<Vec<ActivityRow>> {
-        let mut args = vec![Value::Text(self.business_date()?.format("%Y-%m-%d").to_string())];
+        self.activity_rows_with(f, before, limit, oldest_first, false)
+    }
+
+    /// `few`: the filter matches few rows (see [`FEW_ROWS`]).
+    fn activity_rows_with(&self, f: &ActivityFilter, before: Option<ActivityCursor>, limit: usize, oldest_first: bool, few: bool) -> Result<Vec<ActivityRow>> {
+        let mut args = Vec::new();
         let mut w = where_sql(f, true, &mut args)?;
         if let Some(c) = before {
             args.push(Value::Integer(c.at));
@@ -429,49 +550,145 @@ impl Pos {
             w += &format!(" AND (a.created_at < ?{at} OR (a.created_at = ?{at} AND a.id < ?{}))", at + 1);
         }
         let order = if oldest_first { "ASC" } else { "DESC" };
+        // Newest first along the time index, stopping at `limit` matches:
+        // never every match gathered and sorted (an index on the type would
+        // tempt SQLite into that, e.g. for 90 000 logins). One order's rows
+        // come from its own index.
+        let by_order = w.contains("a.order_id = ?");
+        let index = if by_order || few { "" } else { " INDEXED BY audit_log_created_at" };
+        let from = ROW_FROM.replacen("audit_log a", &format!("audit_log a{index}"), 1);
+        let sql = format!("{ROW_SELECT}, {}, {}{from} WHERE {w} ORDER BY a.created_at {order}, a.id {order} LIMIT {limit}", look_sql(), kind_case());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map(params_from_iter(args), row_from)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let days = self.business_days()?;
+        for r in &mut rows {
+            r.day = days.day_of(r.at);
+        }
+        Ok(rows)
+    }
+
+    /// The first page's counts: rows per business day, all of them, and
+    /// those that need a look. Counted once per filter, then only the rows
+    /// added since (see [`CountCache`]).
+    fn activity_counts(&self, f: &ActivityFilter) -> Result<(Vec<ActivityDay>, i64, i64)> {
+        let days = self.business_days()?;
+        let key = count_key(f, &days);
+        let changes: i64 = self.conn.query_row("SELECT n FROM temp.log_changes", [], |r| r.get(0))?;
+        let max_id: i64 = self.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM audit_log", [], |r| r.get(0))?;
+        let mut cache = self.log_counts.0.borrow_mut();
+        let hit = cache.iter().position(|e| e.key == key && e.changes == changes && e.max_id <= max_id);
+        let mut entry = match hit {
+            Some(i) => {
+                let mut e = cache.remove(i);
+                if e.max_id < max_id {
+                    self.count_new_rows(f, &days, &mut e)?;
+                }
+                e
+            }
+            None => self.count_all_rows(f, &days, key)?,
+        };
+        entry.changes = changes;
+        entry.max_id = max_id;
+        let total = entry.by_day.values().sum();
+        let look = entry.look;
+        let list = entry.by_day.iter().rev().filter(|(_, n)| **n > 0).map(|(date, count)| ActivityDay { date: date.clone(), count: *count }).collect();
+        cache.insert(0, entry);
+        cache.truncate(COUNT_CACHE_SIZE);
+        Ok((list, look, total))
+    }
+
+    /// The total the first page of `f` counted, if still remembered (it may
+    /// be a few rows behind: it only picks a query plan).
+    fn cached_total(&self, f: &ActivityFilter) -> Option<i64> {
+        let key = count_key(f, &self.business_days().ok()?);
+        self.log_counts.0.borrow().iter().find(|e| e.key == key).map(|e| e.by_day.values().sum())
+    }
+
+    /// (counted, look) as SQL for the counts: with "Needs a look" on, the
+    /// rows shown are the look rows and the clearing rows.
+    fn count_exprs(f: &ActivityFilter) -> (String, String) {
+        let counted = if f.look == Some(true) { format!("a.action IN {CLEARED_ACTIONS}") } else { "1".into() };
+        (counted, look_sql())
+    }
+
+    fn count_all_rows(&self, f: &ActivityFilter, days: &BusinessDays, key: String) -> Result<CountEntry> {
+        let mut entry = CountEntry { key, changes: 0, max_id: 0, by_day: Default::default(), look: 0 };
+        let (min, max): (Option<i64>, Option<i64>) = self.conn.query_row("SELECT MIN(created_at), MAX(created_at) FROM audit_log", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let (Some(min), Some(max)) = (min, max) else { return Ok(entry) };
+        let lo = f.from.map_or(min, |t| t.max(min));
+        let hi = f.to.map_or(max + 1, |t| t.min(max + 1));
+        if lo >= hi {
+            return Ok(entry);
+        }
+        let pieces = days.pieces(lo, hi);
+        let json = serde_json::to_string(&pieces).map_err(|e| PosError::Internal(e.to_string()))?;
+        let mut args = vec![Value::Text(json)];
+        let w = where_sql(f, false, &mut args)?;
+        let (counted, look) = Self::count_exprs(f);
+        // Per piece, along the time index, both counts in one number: no
+        // sort of every row by day, as GROUP BY would need.
         let sql = format!(
-            "{ROW_SELECT}, {}, {}, {}{ROW_FROM} WHERE {w} ORDER BY a.created_at {order}, a.id {order} LIMIT {limit}",
-            look_sql(),
-            day_sql(1),
-            kind_case()
+            "SELECT p.value ->> 2, (SELECT COALESCE(SUM({counted}), 0) * 4294967296 + COALESCE(SUM({look}), 0)
+               FROM audit_log a
+               LEFT JOIN users u ON u.id = a.user_id
+               LEFT JOIN orders o ON o.id = a.order_id
+               LEFT JOIN dining_tables t ON t.id = o.table_id
+               WHERE a.created_at >= p.value ->> 0 AND a.created_at < p.value ->> 1 AND {w})
+             FROM json_each(?1) p"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args), row_from)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        let per_piece = stmt.query_map(params_from_iter(args), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for p in per_piece {
+            let (date, both) = p?;
+            let (counted, look) = (both >> 32, both & 0xFFFF_FFFF);
+            entry.look += look;
+            *entry.by_day.entry(date).or_default() += counted + look * i64::from(f.look == Some(true));
+        }
+        Ok(entry)
+    }
+
+    /// Add the rows written since `entry` was counted.
+    fn count_new_rows(&self, f: &ActivityFilter, days: &BusinessDays, entry: &mut CountEntry) -> Result<()> {
+        let mut args = vec![Value::Integer(entry.max_id)];
+        let w = where_sql(f, false, &mut args)?;
+        let (counted, look) = Self::count_exprs(f);
+        let sql = format!("SELECT a.created_at, {counted}, {look}{ROW_FROM} WHERE a.id > ?1 AND {w}");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, r.get::<_, bool>(2)?)))?;
+        for r in rows {
+            let (at, counted, look) = r?;
+            let shown = counted || (look && f.look == Some(true));
+            if shown {
+                *entry.by_day.entry(days.day_of(at)).or_default() += 1;
+            }
+            entry.look += i64::from(look);
+        }
+        Ok(())
     }
 
     /// One page of the Activity log, newest first (managers and admins).
     pub fn list_activity(&self, s: &Session, f: &ActivityFilter, before: Option<ActivityCursor>, limit: Option<usize>) -> Result<ActivityPage> {
         s.require(Permission::ViewActivity)?;
         let limit = limit.unwrap_or(200).clamp(1, 500);
-        let mut rows = self.activity_rows(f, before, limit + 1, false)?;
+        // The counts only with the first page: the pages after it keep them.
+        let counts = match before {
+            None => Some(self.activity_counts(f)?),
+            Some(_) => None,
+        };
+        // Few matches (counted for the first page, or remembered from it):
+        // let SQLite gather them by type, as along the time index it would
+        // read the whole log to find them.
+        let few = counts.as_ref().map(|c| c.2).or_else(|| self.cached_total(f)).is_some_and(|n| n < FEW_ROWS);
+        let mut rows = self.activity_rows_with(f, before, limit + 1, false, few)?;
         let next = if rows.len() > limit {
             rows.truncate(limit);
             rows.last().map(|r| ActivityCursor { at: r.at, id: r.id })
         } else {
             None
         };
-        let mut args = Vec::new();
-        let w = where_sql(f, true, &mut args)?;
-        let total: i64 = self.conn.query_row(&format!("SELECT COUNT(*){ROW_FROM} WHERE {w}"), params_from_iter(args), |r| r.get(0))?;
-        let mut args = Vec::new();
-        let w = where_sql(f, false, &mut args)?;
-        let look_count: i64 = self.conn.query_row(
-            &format!("SELECT COUNT(*){ROW_FROM} WHERE {w} AND {}", look_sql()),
-            params_from_iter(args),
-            |r| r.get(0),
-        )?;
-        let days = if before.is_none() {
-            let mut args = vec![Value::Text(self.business_date()?.format("%Y-%m-%d").to_string())];
-            let w = where_sql(f, true, &mut args)?;
-            let sql = format!("SELECT d, COUNT(*) FROM (SELECT {} AS d{ROW_FROM} WHERE {w}) GROUP BY d ORDER BY d DESC", day_sql(1));
-            let mut stmt = self.conn.prepare(&sql)?;
-            let days = stmt
-                .query_map(params_from_iter(args), |r| Ok(ActivityDay { date: r.get(0)?, count: r.get(1)? }))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Some(days)
-        } else {
-            None
+        let (days, look_count, total) = match counts {
+            Some((days, look, total)) => (Some(days), Some(look), Some(total)),
+            None => (None, None, None),
         };
         Ok(ActivityPage { rows, next, days, look_count, total })
     }
@@ -479,15 +696,13 @@ impl Pos {
     /// The rows about one order (and its tickets), oldest first, at most 100.
     pub fn order_activity(&self, s: &Session, order_id: i64) -> Result<Vec<ActivityRow>> {
         s.require(Permission::ViewActivity)?;
-        let args = vec![Value::Text(self.business_date()?.format("%Y-%m-%d").to_string()), Value::Integer(order_id)];
-        let sql = format!(
-            "{ROW_SELECT}, {}, {}, {}{ROW_FROM} WHERE a.order_id = ?2 ORDER BY a.created_at, a.id LIMIT 100",
-            look_sql(),
-            day_sql(1),
-            kind_case()
-        );
+        let sql = format!("{ROW_SELECT}, {}, {}{ROW_FROM} WHERE a.order_id = ?1 ORDER BY a.created_at, a.id LIMIT 100", look_sql(), kind_case());
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args), row_from)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = stmt.query_map([order_id], row_from)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let days = self.business_days()?;
+        for r in &mut rows {
+            r.day = days.day_of(r.at);
+        }
         Ok(rows)
     }
 
@@ -645,6 +860,7 @@ impl Pos {
             oldest,
             last_cleanup_at: self.raw_setting_i64(CLEANUP_AT_KEY)?,
             last_cleanup_count: self.raw_setting_i64(CLEANUP_COUNT_KEY)?,
+            last_cleanup_tickets: self.raw_setting_i64(CLEANUP_TICKETS_KEY)?,
         })
     }
 
@@ -692,7 +908,9 @@ impl Pos {
 
     /// End of an automatic cleanup: one `log.auto_cleared` row when anything went.
     pub fn log_cleanup_finish(&self, cutoff: i64, days: i64, count: usize, tickets: usize) -> Result<()> {
-        self.set_raw_setting(CLEANUP_COUNT_KEY, &(count + tickets).to_string())?;
+        // Log rows and tickets apart, as in the `log.auto_cleared` row.
+        self.set_raw_setting(CLEANUP_COUNT_KEY, &count.to_string())?;
+        self.set_raw_setting(CLEANUP_TICKETS_KEY, &tickets.to_string())?;
         if count + tickets > 0 {
             let detail = serde_json::json!({ "count": count, "cutoff": cutoff, "tickets": tickets, "days": days });
             self.write_cleared(None, "log.auto_cleared", &detail)?;
@@ -764,7 +982,7 @@ mod tests {
         assert!(matches!(pos.list_activity(&sam, &f, None, None), Err(PosError::Forbidden)));
         assert!(matches!(pos.order_activity(&sam, 1), Err(PosError::Forbidden)));
         assert!(matches!(pos.activity_staff(&sam), Err(PosError::Forbidden)));
-        assert!(pos.list_activity(&quinn, &f, None, None).unwrap().total > 0);
+        assert!(pos.list_activity(&quinn, &f, None, None).unwrap().total.unwrap() > 0);
         assert!(pos.list_activity(&admin, &f, None, None).unwrap().days.is_some());
         // Managing it is for admins only.
         let mut pos = pos;
@@ -786,7 +1004,9 @@ mod tests {
         let mut before = None;
         loop {
             let page = pos.list_activity(&admin, &f, before, Some(10)).unwrap();
-            assert_eq!(page.total, 27, "25 settings + the two staff added in setup");
+            // The counts come with the first page only.
+            let want = if before.is_none() { Some(27) } else { None };
+            assert_eq!(page.total, want, "25 settings + the two staff added in setup");
             seen.extend(page.rows.iter().map(|r| (r.at, r.id)));
             match page.next {
                 Some(n) => before = Some(n),
@@ -814,7 +1034,7 @@ mod tests {
         let page = pos.list_activity(&admin, &f, None, None).unwrap();
         let acts: Vec<_> = page.rows.iter().map(|r| (r.action.as_str(), r.detail.as_str())).collect();
         assert_eq!(acts, [("pin.failed", ""), ("drawer.open", "no sale"), ("order.cancel", &*format!("42 changed mind (PIN of Quinn #{}, manager)", quinn.user_id))]);
-        assert_eq!(page.look_count, 3);
+        assert_eq!(page.look_count, Some(3));
         let cancel = page.rows.last().unwrap();
         assert_eq!((cancel.user_name.as_deref(), cancel.approver_name.as_deref(), cancel.order_id), (Some("Sam"), Some("Quinn"), Some(42)));
         // A price changed with Quinn's PIN: Sam did it, Quinn approved it.
@@ -865,6 +1085,63 @@ mod tests {
     }
 
     #[test]
+    fn the_remembered_first_page_counts_follow_new_deleted_and_changed_rows() {
+        let (mut pos, admin, quinn, _) = setup();
+        for i in 0..40 {
+            row(&pos, Some(quinn.user_id), if i % 4 == 0 { "order.void" } else { "login" }, "", 1_000 + i * 3600);
+        }
+        let filters = [
+            ActivityFilter::default(),
+            ActivityFilter { kind: Some("login".into()), ..Default::default() },
+            ActivityFilter { look: Some(true), ..Default::default() },
+            ActivityFilter { user_id: Some(quinn.user_id), from: Some(1_000 + 10 * 3600), ..Default::default() },
+        ];
+        // Every first page against counting it all again with nothing remembered.
+        let check = |pos: &mut Pos, what: &str| {
+            for f in &filters {
+                let page = pos.list_activity(&admin, f, None, Some(5)).unwrap();
+                let kept = std::mem::take(&mut pos.log_counts);
+                let fresh = pos.activity_counts(f).unwrap();
+                pos.log_counts = kept;
+                let days = page.days.unwrap();
+                assert_eq!((page.total, page.look_count), (Some(fresh.2), Some(fresh.1)), "{what}: {f:?}");
+                assert_eq!(days.iter().map(|d| (d.date.clone(), d.count)).collect::<Vec<_>>(), fresh.0.iter().map(|d| (d.date.clone(), d.count)).collect::<Vec<_>>(), "{what}");
+                assert_eq!(Some(days.iter().map(|d| d.count).sum::<i64>()), page.total, "{what}");
+            }
+        };
+        check(&mut pos, "first");
+        row(&pos, Some(quinn.user_id), "order.void", "", 1_000 + 50 * 3600);
+        row(&pos, Some(admin.user_id), "login", "", 1_000 + 51 * 3600);
+        check(&mut pos, "after new rows");
+        pos.delete_activity(&admin, &[3, 4, 5], "1234").unwrap();
+        check(&mut pos, "after a delete");
+        pos.conn.execute("UPDATE audit_log SET action = 'order.void' WHERE action = 'login' AND id % 5 = 0", []).unwrap();
+        check(&mut pos, "after a change");
+        pos.conn
+            .execute("INSERT INTO day_closes (business_date, from_ts, to_ts, closed_by, summary) VALUES ('1970-01-02', 0, 20000, ?1, '{}')", [admin.user_id])
+            .unwrap();
+        check(&mut pos, "after a day close");
+    }
+
+    #[test]
+    fn csv_fields_a_spreadsheet_would_run_as_formulas_start_with_a_quote() {
+        assert_eq!(csv_field("=HYPERLINK(\"http://x\")"), "\"'=HYPERLINK(\"\"http://x\"\")\"");
+        assert_eq!(csv_field("+1"), "'+1");
+        assert_eq!(csv_field("-2+3"), "'-2+3");
+        assert_eq!(csv_field("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(csv_field("\tx"), "'\tx");
+        assert_eq!(csv_field("\rx"), "\"'\rx\"");
+        assert_eq!(csv_field("a=b, c"), "\"a=b, c\"");
+        assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field(""), "");
+        // Through the export: a typed note never reaches the file as a formula.
+        let (pos, admin, _, _) = setup();
+        row(&pos, Some(admin.user_id), "order.note", "=cmd|' /C calc'!A0", 100);
+        let csv = pos.export_activity(&admin, &ActivityFilter::default(), None).unwrap().0;
+        assert!(csv.contains(",'=cmd|' /C calc'!A0\r\n"), "{csv}");
+    }
+
+    #[test]
     fn the_cleanup_runs_in_batches_at_most_every_20_hours_and_forever_keeps_all() {
         let (mut pos, admin, quinn, sam) = setup();
         let now = chrono::Utc::now().timestamp() + 60;
@@ -900,7 +1177,10 @@ mod tests {
         assert_eq!(pos.log_cleanup_due(now + 3600).unwrap(), None);
         assert!(pos.log_cleanup_due(now + CLEANUP_EVERY_SECS + 1).unwrap().is_some());
         let r = pos.log_retention(&admin).unwrap();
-        assert_eq!((r.keep_days, r.last_cleanup_count), (180, Some(CLEANUP_BATCH as i64 + 501)));
+        assert_eq!((r.keep_days, r.last_cleanup_count, r.last_cleanup_tickets), (180, Some(CLEANUP_BATCH as i64 + 500), Some(1)));
+        let auto: String = pos.conn.query_row("SELECT detail FROM audit_log WHERE action = 'log.auto_cleared'", [], |r| r.get(0)).unwrap();
+        let auto: serde_json::Value = serde_json::from_str(&auto).unwrap();
+        assert_eq!((auto["count"].as_i64(), auto["tickets"].as_i64()), (r.last_cleanup_count, r.last_cleanup_tickets), "the setting and the row agree");
         assert!(r.count > 0 && r.approx_bytes > 0);
     }
 

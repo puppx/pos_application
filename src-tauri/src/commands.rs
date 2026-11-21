@@ -708,7 +708,7 @@ pub fn prune_all(dir: &Path, keep: usize, auto_keep: usize) {
         .chain(of_kind("pos-exit-").skip(SAFETY_COPIES_KEPT))
         .chain(of_kind("pos-emergency-").skip(SAFETY_COPIES_KEPT).filter(old_enough));
     for (_, p) in old {
-        let _ = std::fs::remove_file(p);
+        remove_backup_with_sidecars(p);
     }
 }
 
@@ -1178,7 +1178,21 @@ pub fn prune_backups(dir: &Path, keep: usize) {
     // just the newest few, so repeated uploads cannot fill the disk.
     let imported = of_kind("pos-imported-").skip(SAFETY_COPIES_KEPT);
     for (_, old) in of_kind("pos-").skip(keep.max(1)).chain(safety).chain(imported) {
-        let _ = std::fs::remove_file(old);
+        remove_backup_with_sidecars(old);
+    }
+    remove_lone_sidecars(dir);
+}
+
+/// "-wal", "-shm" or "-journal" files of backups that are gone (pruned or
+/// deleted by an older version, which left them): nothing reads them any more.
+fn remove_lone_sidecars(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(db) = ["-wal", "-shm", "-journal"].iter().find_map(|s| name.strip_suffix(s)) else { continue };
+        if db.starts_with("pos-") && db.ends_with(".db") && !dir.join(db).exists() {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
 }
 
@@ -2795,7 +2809,17 @@ mod tests {
             let f = std::fs::File::create(dir.join(format!("pos-before-reset-{}.db", 1_500_000_100 + i))).unwrap();
             f.set_modified(SystemTime::now() - std::time::Duration::from_secs(86_400 - i * 60)).unwrap();
         }
+        // Sidecar files go with their backup; one whose backup is gone goes too;
+        // a kept backup's stay, and so do the live data's and other files'.
+        for n in ["pos-1700000000.db-wal", "pos-1700000000.db-shm", "pos-before-restore-1400000000.db-wal", "pos-1600000000.db-wal",
+            "pos-1700000005.db-wal", "pos.db-wal", "notes.db-wal"] {
+            std::fs::File::create(dir.join(n)).unwrap();
+        }
         prune_backups(&dir, 3);
+        for n in ["pos-1700000005.db-wal", "pos.db-wal", "notes.db-wal"] {
+            assert!(dir.join(n).is_file(), "{n} kept");
+            std::fs::remove_file(dir.join(n)).unwrap();
+        }
         let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         left.sort();
         assert_eq!(left, [

@@ -625,6 +625,29 @@ mod tests {
     }
 
     #[test]
+    fn checking_a_backup_leaves_no_files_beside_it() {
+        let dir = tmp();
+        let live = dir.path().join("live.db");
+        let mut pos = Pos::from_conn(Connection::open(&live).unwrap(), auth::test_params()).unwrap();
+        pos.setup_first_admin("Owner", "1111").unwrap();
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let file = backups.join("pos-1.db");
+        pos.backup_unchecked(&file).unwrap();
+        Pos::backup_database_file(&live, backups.join("pos-2.db")).unwrap();
+        for name in ["pos-1.db", "pos-2.db"] {
+            let f = backups.join(name);
+            Pos::verify_backup_file(&f).unwrap();
+            assert_eq!(Pos::quick_check_file(&f).unwrap(), None);
+            Pos::check_backup(&f, backups.join("restore-work-1.tmp")).unwrap();
+            pos.prepare_restore(&f, backups.join("restore-work-2.tmp")).unwrap();
+        }
+        let mut left: Vec<String> = std::fs::read_dir(&backups).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["pos-1.db", "pos-2.db"]);
+    }
+
+    #[test]
     fn an_older_backup_is_brought_up_to_date() {
         let dir = tmp();
         let src = dir.path().join("old.db");

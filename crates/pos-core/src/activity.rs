@@ -37,14 +37,14 @@ pub const CLEANUP_EVERY_SECS: i64 = 20 * 60 * 60;
 pub const CLEANUP_BATCH: usize = 2000;
 
 /// A cancel that only closed an empty order (by hand, by the sweep or at day close).
-const EMPTY_CANCEL: &str = "(a.action = 'order.cancel' AND (a.user_id IS NULL OR a.detail LIKE '% empty' OR a.detail LIKE '%empty order(s)%'))";
+const EMPTY_CANCEL: &str = "(a.action = 'order.cancel' AND (a.user_id IS NULL OR COALESCE(a.detail, '') LIKE '% empty' OR COALESCE(a.detail, '') LIKE '%empty order(s)%'))";
 
 /// "Needs a look" (Activity log filter), as one SQL condition on `a`.
 pub fn look_sql() -> String {
     format!(
         "(a.action IN ('order.void', 'order.delete', 'order.item_void', 'order.payment_removed', 'login.failed', 'pin.failed', 'reset.bad_pin', 'log.bad_pin')
           OR (a.action = 'order.cancel' AND NOT {EMPTY_CANCEL})
-          OR (a.action = 'drawer.open' AND a.detail = 'no sale'))"
+          OR (a.action = 'drawer.open' AND COALESCE(a.detail, '') = 'no sale'))"
     )
 }
 
@@ -286,12 +286,12 @@ pub struct LogRetention {
 const ROW_SELECT: &str = "SELECT a.id, a.created_at, a.action, COALESCE(a.detail, ''), a.user_id, u.name, a.approver_id, ap.name, a.order_id, a.terminal,
         o.order_type, o.status, t.name, f.name, o.customer_name, ch.name, o.external_ref, o.total_cents,
         CASE
-          WHEN a.action LIKE 'product.%' THEN (SELECT name FROM products WHERE id = CAST(a.detail AS INTEGER))
-          WHEN a.action LIKE 'customer.%' THEN (SELECT name FROM customers WHERE id = CAST(a.detail AS INTEGER))
-          WHEN a.action IN ('user.reset_pin', 'user.update', 'user.create') THEN (SELECT name FROM users WHERE id = CAST(a.detail AS INTEGER))
-          WHEN a.action LIKE 'category.%' THEN (SELECT name FROM categories WHERE id = CAST(a.detail AS INTEGER))
-          WHEN a.action LIKE 'floor.%' THEN (SELECT name FROM floors WHERE id = CAST(a.detail AS INTEGER))
-          WHEN a.action = 'order.move' THEN (SELECT name FROM dining_tables WHERE id = CAST(substr(a.detail, instr(a.detail, '-> table ') + 9) AS INTEGER))
+          WHEN a.action LIKE 'product.%' THEN (SELECT name FROM products WHERE id = CAST(COALESCE(a.detail, '') AS INTEGER))
+          WHEN a.action LIKE 'customer.%' THEN (SELECT name FROM customers WHERE id = CAST(COALESCE(a.detail, '') AS INTEGER))
+          WHEN a.action IN ('user.reset_pin', 'user.update', 'user.create') THEN (SELECT name FROM users WHERE id = CAST(COALESCE(a.detail, '') AS INTEGER))
+          WHEN a.action LIKE 'category.%' THEN (SELECT name FROM categories WHERE id = CAST(COALESCE(a.detail, '') AS INTEGER))
+          WHEN a.action LIKE 'floor.%' THEN (SELECT name FROM floors WHERE id = CAST(COALESCE(a.detail, '') AS INTEGER))
+          WHEN a.action = 'order.move' THEN (SELECT name FROM dining_tables WHERE id = CAST(substr(COALESCE(a.detail, ''), instr(COALESCE(a.detail, ''), '-> table ') + 9) AS INTEGER))
         END";
 
 const ROW_FROM: &str = " FROM audit_log a
@@ -426,7 +426,7 @@ fn where_sql(f: &ActivityFilter, with_look: bool, args: &mut Vec<Value>) -> Resu
         let p = arg(Value::Integer(uid), args);
         let approved: Vec<String> = APPROVER_IS_USER
             .iter()
-            .map(|(a, word)| format!("(a.action = '{a}' AND a.detail LIKE '%{word}' || (SELECT name FROM users WHERE id = {p}))"))
+            .map(|(a, word)| format!("(a.action = '{a}' AND COALESCE(a.detail, '') LIKE '%{word}' || (SELECT name FROM users WHERE id = {p}))"))
             .collect();
         keep.push(format!("(a.user_id = {p} OR a.approver_id = {p} OR {})", approved.join(" OR ")));
     }
@@ -443,7 +443,7 @@ fn where_sql(f: &ActivityFilter, with_look: bool, args: &mut Vec<Value>) -> Resu
         } else {
             let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
             let p = arg(Value::Text(like), args);
-            keep.push(format!("(u.name LIKE {p} ESCAPE '\\' OR t.name LIKE {p} ESCAPE '\\' OR a.detail LIKE {p} ESCAPE '\\')"));
+            keep.push(format!("(u.name LIKE {p} ESCAPE '\\' OR t.name LIKE {p} ESCAPE '\\' OR COALESCE(a.detail, '') LIKE {p} ESCAPE '\\')"));
         }
     }
     if !keep.is_empty() {
@@ -973,6 +973,44 @@ mod tests {
 
     fn count(pos: &Pos, action: &str) -> i64 {
         pos.conn.query_row("SELECT COUNT(*) FROM audit_log WHERE action = ?1", [action], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn rows_with_no_detail_never_break_the_log_its_filters_or_the_export() {
+        let (pos, admin, ..) = setup();
+        // Rows written with no detail at all (older versions, or by hand).
+        for (i, action) in ["order.cancel", "drawer.open", "order.void", "product.update", "order.move", "user.update", "login", "order.discount_approved"].iter().enumerate() {
+            pos.conn
+                .execute("INSERT INTO audit_log (user_id, action, detail, created_at) VALUES (?1, ?2, NULL, ?3)", params![admin.user_id, action, 5_000 + i as i64])
+                .unwrap();
+        }
+        let n_null: i64 = pos.conn.query_row("SELECT COUNT(*) FROM audit_log WHERE detail IS NULL", [], |r| r.get(0)).unwrap();
+        assert!(n_null >= 8);
+        let all = pos.list_activity(&admin, &ActivityFilter::default(), None, None).unwrap();
+        let nulls: Vec<_> = all.rows.iter().filter(|r| r.at >= 5_000 && r.at < 5_100).collect();
+        assert_eq!(nulls.len(), 8);
+        assert!(nulls.iter().all(|r| r.detail.is_empty()));
+        // A cancel with no detail is a real cancel (needs a look); "other" and "void" agree with the rows' kinds.
+        let cancel = nulls.iter().find(|r| r.action == "order.cancel").unwrap();
+        assert!(cancel.look && cancel.kind == "void", "{} {}", cancel.look, cancel.kind);
+        for kind in ["void", "money", "login", "setup", "shift", "other"] {
+            let f = ActivityFilter { kind: Some(kind.into()), ..Default::default() };
+            let page = pos.list_activity(&admin, &f, None, None).unwrap();
+            assert!(page.rows.iter().all(|r| r.kind == kind), "{kind}");
+        }
+        let f = ActivityFilter { kind: Some("other".into()), ..Default::default() };
+        assert!(pos.list_activity(&admin, &f, None, None).unwrap().rows.iter().any(|r| r.action == "order.move" && r.at >= 5_000));
+        for f in [
+            ActivityFilter { look: Some(true), ..Default::default() },
+            ActivityFilter { q: Some("no sale".into()), ..Default::default() },
+            ActivityFilter { user_id: Some(admin.user_id), ..Default::default() },
+        ] {
+            pos.list_activity(&admin, &f, None, None).unwrap();
+        }
+        let (csv, rows) = pos.export_activity(&admin, &ActivityFilter::default(), None).unwrap();
+        assert_eq!(rows, all.total.unwrap() as usize);
+        assert!(csv.contains(",order.cancel,"));
+        pos.order_activity(&admin, 1).unwrap();
     }
 
     #[test]

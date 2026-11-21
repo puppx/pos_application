@@ -1384,6 +1384,16 @@ fn footer_words(footer: &str) -> Vec<String> {
     v
 }
 
+/// A set section that holds drinks or desserts by its name ("Drinks",
+/// "Soft drinks", "Dessert", "เครื่องดื่ม", "ของหวาน"): not called with the mains.
+fn not_a_main_section(name: Option<&str>, alt: Option<&str>) -> bool {
+    let words = ["drink", "beverage", "dessert", "sweet", "เครื่องดื่ม", "ของหวาน"];
+    [name, alt].into_iter().flatten().any(|n| {
+        let n = n.to_lowercase();
+        words.iter().any(|w| n.contains(w))
+    })
+}
+
 /// The lines the kitchen cooks: everything but a set's own (billing) line.
 pub(crate) fn kitchen_only(items: &[OrderItem]) -> Vec<OrderItem> {
     items.iter().filter(|i| !i.is_set).cloned().collect()
@@ -2356,7 +2366,10 @@ impl Pos {
     fn brief_items(&self, items: &[OrderItem], names: PrintNames) -> Result<Vec<TicketItem>> {
         let mut out = self.ticket_items(items, names, false)?;
         for it in &mut out {
-            it.options.clear();
+            // A set's main keeps what it comes with ("with rice", put first by
+            // ticket_items), as on the full ticket; other options are left off.
+            let with = it.set.is_some() && it.options.first().is_some_and(|o| o.starts_with("with "));
+            it.options.truncate(usize::from(with));
         }
         Ok(out)
     }
@@ -2427,7 +2440,15 @@ impl Pos {
     pub fn main_course_job(&self, s: &Session, order_id: i64) -> Result<Option<PrintJob>> {
         let o = self.get_order(s, order_id)?;
         let sent: Vec<OrderItem> = o.items.iter().filter(|i| i.sent_at.is_some() && !i.starter && !i.is_set).cloned().collect();
-        let mains = self.drinks_apart(&sent)?.1;
+        // Of a set, its main and its sides: not a drink or dessert, whether
+        // ticked as such on the menu or only in a section named so ("Drinks").
+        let mut mains = Vec::new();
+        for i in self.drinks_apart(&sent)?.1 {
+            if i.parent_id.is_some() && (self.course_of(&i)? != Course::Mains || not_a_main_section(i.section_name.as_deref(), i.section_alt.as_deref())) {
+                continue;
+            }
+            mains.push(i);
+        }
         if mains.is_empty() {
             return invalid("no main courses have been sent to the kitchen yet");
         }

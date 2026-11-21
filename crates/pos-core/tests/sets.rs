@@ -338,3 +338,36 @@ fn calling_mains_again_prints_the_set_note_and_the_dish_notes() {
     let text = String::from_utf8_lossy(&k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes()).to_string();
     assert!(text.contains("MAIN COURSE") && !text.contains("Green curry") && !text.contains("peanuts") && !text.contains("extra hot"), "{text}");
 }
+
+#[test]
+fn calling_mains_again_lists_the_mains_with_their_sides_but_not_a_drinks_section() {
+    let mut k = setup();
+    let cola = k.pos.create_product(&k.s, NewProduct {
+        category_id: None, sku: None, barcode: None, name: "Cola".into(), price_cents: 200, cost_cents: 0, tax_rate_bp: Some(1000),
+        stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+    }).unwrap();
+    // A set whose main comes with rice, and a "Drinks" section (the cola is not ticked Drink).
+    let lunch = k.pos.create_product(&k.s, NewProduct {
+        category_id: None, sku: None, barcode: None, name: "Lunch set".into(), price_cents: 1500, cost_cents: 0, tax_rate_bp: Some(1000),
+        stock_qty: 0, track_stock: false, starter: false, name_alt: None, prep: false, team_id: None,
+    }).unwrap();
+    let secs = k.pos.save_set(&k.s, lunch.id, &[
+        SetSectionInput { name: "Main".into(), name_alt: None, pick: 1, starter: false, product_ids: vec![k.curry.id], with_ids: vec![k.rice.id] },
+        SetSectionInput { name: "Drinks".into(), name_alt: Some("เครื่องดื่ม".into()), pick: 1, starter: false, product_ids: vec![cola.id], with_ids: vec![] },
+    ]).unwrap();
+    let o = k.pos.open_order(&k.s, &dine_in(k.table)).unwrap();
+    let picks = vec![
+        SetPick { section_id: secs[0].id, product_id: k.curry.id, with_id: Some(k.rice.id), ..Default::default() },
+        SetPick { section_id: secs[1].id, product_id: cola.id, with_id: None, ..Default::default() },
+    ];
+    let o = k.pos.add_set(&k.s, o.id, lunch.id, &picks, None).unwrap();
+    k.pos.send_to_kitchen(&k.s, o.id).unwrap();
+    // The full ticket had both; calling the mains again: the curry with its rice, no cola.
+    let text = String::from_utf8_lossy(&k.pos.main_course_job(&k.s, o.id).unwrap().unwrap().bytes()).to_string();
+    assert!(text.contains("MAIN COURSE") && text.contains("1 x Green curry") && text.contains("with Jasmine rice"), "{text}");
+    assert!(!text.contains("Cola") && !text.contains("DRINKS"), "drinks are not called with the mains: {text}");
+    // The full kitchen ticket still shows both.
+    let full = k.pos.kitchen_reprint_job(&k.s, o.id).unwrap().unwrap();
+    let full = String::from_utf8_lossy(&full.bytes()).to_string();
+    assert!(full.contains("Cola") && full.contains("Green curry"), "{full}");
+}

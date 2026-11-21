@@ -820,7 +820,7 @@ td.short, strong.short { color: var(--danger); }
 .pay-sum .grand strong { font-size: 26px; font-variant-numeric: tabular-nums; }
 .row.quick button { flex: 1; min-height: 46px; white-space: nowrap; }
 /* Split evenly ÷2…÷12: one line per button, wraps to a second row if needed. */
-.split-n .seg button { white-space: nowrap; padding: 0 9px; }
+.split-n .seg button { white-space: nowrap; padding: 0 9px; min-width: 44px; }
 .pay-hint { padding: 12px; background: var(--surface-2); border-radius: var(--radius-sm); }
 .pay-ok { min-height: 76px; font-size: 21px; }
 .pay-right .keypad button { min-height: 52px; }

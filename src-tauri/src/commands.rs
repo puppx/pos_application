@@ -2728,7 +2728,14 @@ commands! {
     /// (admins). `save`: on the main till, also write it to Downloads.
     fn export_activity(app, t, from: Option<i64>, to: Option<i64>, user_id: Option<i64>, kind: Option<String>, look: Option<bool>, q: Option<String>, before: Option<i64>, save: Option<bool>) -> ExportedCsv {
         let f = ActivityFilter { from, to, user_id, kind, look, q };
-        let (csv, rows) = app.with_session(t, |pos, s| pos.export_activity(s, &f, before))?;
+        // A big log takes seconds to write out: it is read on a connection of its
+        // own (WAL: one consistent snapshot), so the tills are not held up meanwhile.
+        // In memory (tests): on the shared one, as before.
+        let s = app.with_session(t, |_, s| s.require(Permission::Delete).map(|_| s.clone()))?;
+        let (csv, rows) = match app.db_path() {
+            Some(db) => Pos::open(&db)?.export_activity(&s, &f, before)?,
+            None => app.with_session(t, |pos, s| pos.export_activity(s, &f, before))?,
+        };
         let file_name = format!("activity-{}.csv", chrono_today());
         let path = if save == Some(true) && t == LOCAL {
             let (mut path, mut n) = (downloads_dir(&app.backup_dir).join(&file_name), 1);
@@ -3748,6 +3755,23 @@ mod tests {
     /// A till on a database file (as the app runs), Owner 1111 and Sam 2222,
     /// backups in `dir/backups`; and a full backup from another PC (Nok
     /// 4321) in that folder as "pos-1700000000.db".
+    #[test]
+    fn the_activity_export_reads_on_its_own_connection_with_the_same_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, db) = till_on_disk(dir.path());
+        dispatch(&app, LOCAL, "login", json!({ "pin": "1111" })).unwrap();
+        dispatch(&app, LOCAL, "set_setting", json!({ "key": "store_name", "value": "Shop, \"quoted\"" })).unwrap();
+        // On the shared connection (no file known yet), then on its own connection.
+        let shared = dispatch(&app, LOCAL, "export_activity", json!({})).unwrap();
+        app.set_db_path(db);
+        let own = dispatch(&app, LOCAL, "export_activity", json!({})).unwrap();
+        assert_eq!((own["csv"].clone(), own["rows"].clone()), (shared["csv"].clone(), shared["rows"].clone()));
+        assert!(own["rows"].as_u64().unwrap() >= 3, "{own}");
+        // Still admins only.
+        dispatch(&app, LOCAL, "login", json!({ "pin": "2222" })).unwrap();
+        assert!(matches!(dispatch(&app, LOCAL, "export_activity", json!({})), Err(PosError::Forbidden)));
+    }
+
     fn till_on_disk(dir: &Path) -> (App, PathBuf) {
         let backups = dir.join("backups");
         std::fs::create_dir_all(&backups).unwrap();

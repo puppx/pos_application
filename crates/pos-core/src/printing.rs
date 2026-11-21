@@ -2223,7 +2223,9 @@ impl Pos {
         // Made before cancelling: a cancelled order is not every user's to read.
         let cooking: Vec<i64> = self
             .conn
-            .prepare_cached("SELECT id FROM order_items WHERE order_id = ?1 AND sent_at IS NOT NULL AND kitchen_done_at IS NULL")?
+            // Dishes sent, and prepare-ahead dishes whose PREPARE NOW ticket printed
+            // (the kitchen has started them), not yet marked done.
+            .prepare_cached("SELECT id FROM order_items WHERE order_id = ?1 AND (sent_at IS NOT NULL OR prep_sent_at IS NOT NULL) AND kitchen_done_at IS NULL")?
             .query_map([order_id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let job = if cooking.is_empty() || !self.prints_cancelled_order()? {

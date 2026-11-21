@@ -182,7 +182,8 @@ pub struct ItemCheck {
     /// it gets fewer. Taps made faster than the till hears back all count.
     /// 0: a new note alone (the update's note), on the line's quantity and
     /// discount as they are now: a note never conflicts with another till's
-    /// change of quantity.
+    /// change of quantity. Its `discount_cents` must be the line's discount
+    /// now (else refused: a discount is sent on its own, with its checks).
     #[serde(default)]
     pub qty_delta: Option<i64>,
 }
@@ -1493,6 +1494,11 @@ impl Pos {
             return invalid("that is too many at once");
         }
         if delta == 0 {
+            // A note alone: a discount sent with it is refused, never dropped
+            // (a discount has its own checks: the staff limit, below paid).
+            if upd.discount_cents != discount {
+                return invalid("a note alone (qtyDelta 0) cannot change the discount: send the discount separately");
+            }
             return Ok(ItemUpdate { qty, discount_cents: discount, note: upd.note.clone() });
         }
         let new = (qty + delta).max(0);

@@ -1642,7 +1642,8 @@ async function renderOrder() {
     }
     const args = { orderId, itemId: it.id, update: { qty: it.qty, discount_cents: it.discount_cents, note: it.note, ...edit } };
     if (delta) args.qtyDelta = delta;
-    if (noteOnly) args.qtyDelta = 0;
+    // A note alone: the discount sent is the one shown, and checked as such.
+    if (noteOnly) Object.assign(args, { qtyDelta: 0, expectedDiscountCents: it.discount_cents });
     // A − on a dish the kitchen has (a CANCELLED ticket) is for the number on screen only.
     else if (!delta || (delta < 0 && it.sent_at)) Object.assign(args, { expectedQty: it.qty, expectedDiscountCents: it.discount_cents });
     try {
@@ -2673,7 +2674,10 @@ async function payDialog(order, refresh, pay) {
             const n = it ? Math.min(q, it.qty - it.paid_qty) : 0;
             if (n > 0) pick.set(id, n); else pick.delete(id);
           }
-          note = { kind: 'warn', text: `Bill changed on another till: ${pick.size ? `these dishes now come to ${money(share())}` : 'those dishes are no longer on it'} (was ${money(wasDue)}). Nothing taken.` };
+          // Their share the same (another dish changed): say what is left to pay now instead.
+          note = { kind: 'warn', text: !pick.size ? `Bill changed on another till: those dishes are no longer on it (was ${money(wasDue)}). Nothing taken.`
+            : share() !== wasDue ? `Bill changed on another till: these dishes now come to ${money(share())} (was ${money(wasDue)}). Nothing taken.`
+              : `Bill changed on another till: now ${money(left())} left to pay (was ${money(was)}). Nothing taken. Check and tap Confirm again.` };
         } else {
           pick.clear();
           note = { kind: 'warn', text: `Bill changed on another till: now ${money(left())} (was ${money(was)}). Nothing taken.` };

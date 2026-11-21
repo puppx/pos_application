@@ -202,3 +202,29 @@ fn the_cancelled_ticket_for_a_whole_order_can_be_switched_off() {
     let job = k.pos.cancel_order_confirmed(&quinn, id, "", None).unwrap().expect("a CANCELLED ticket");
     assert!(String::from_utf8_lossy(&job.bytes()).contains("CANCELLED"));
 }
+
+#[test]
+fn cancelling_tells_the_kitchen_about_dishes_it_was_told_to_prepare_ahead() {
+    let mut k = setup();
+    let quinn = k.manager.clone();
+    // Dine-in: the soup is a starter, the curry a main prepared ahead.
+    k.pos.set_starter(&k.admin, k.soup.id, true).unwrap();
+    k.pos.set_prep(&k.admin, k.curry.id, true).unwrap();
+    let floor = k.pos.create_floor(&k.admin, "Ground").unwrap();
+    let t = k.pos.save_floor_layout(&k.admin, floor.id, &[TableLayout { is_table: Some(true), id: None, name: "1".into(), shape: TableShape::Rect, x: 0, y: 0, w: 80, h: 80 }]).unwrap();
+    let o = k.pos.open_order(&quinn, &NewOrder { order_type: OrderType::DineIn, table_id: Some(t[0].id), channel_id: None, details: OrderDetails::default() }).unwrap();
+    k.pos.add_item(&quinn, o.id, k.soup.id, 1, None, None, &[]).unwrap();
+    k.pos.add_item(&quinn, o.id, k.curry.id, 1, None, None, &[]).unwrap();
+    // The soup goes; the curry waits for mains but gets a PREPARE NOW ticket.
+    let sent = k.pos.send_to_kitchen(&quinn, o.id).unwrap();
+    assert_eq!(sent.iter().map(|i| i.product_id).collect::<Vec<_>>(), vec![k.soup.id]);
+    let prep = k.pos.send_prep(&quinn, o.id).unwrap();
+    assert_eq!(prep.iter().map(|i| i.product_id).collect::<Vec<_>>(), vec![k.curry.id]);
+    // The soup is done; the curry is being prepared: the CANCELLED ticket names it.
+    k.pos.kitchen_done(&quinn, &[sent[0].id], true).unwrap();
+    let job = k.pos.cancel_order_confirmed(&quinn, o.id, "", None).unwrap().expect("a CANCELLED ticket");
+    let text = String::from_utf8_lossy(&job.bytes()).to_string();
+    assert!(text.contains("CANCELLED") && text.contains("Green curry"), "{text}");
+    assert!(!text.contains("Tom yum"), "done dishes are not cancelled: {text}");
+    assert_eq!(status(&k, o.id), "cancelled");
+}

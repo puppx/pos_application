@@ -213,12 +213,21 @@ fn a_note_alone_goes_on_the_dish_as_it_is_now() {
     let o = takeaway(&mut k);
     let o = k.pos.add_item(&k.admin, o.id, k.curry.id, 1, None, None, &[]).unwrap();
     let line = o.items[0].id;
-    // Another till makes it 3 with a discount; this screen still shows 1 and types a note.
-    k.pos.update_item(&k.staff, line, &ItemUpdate { qty: 3, discount_cents: 300, note: None }).unwrap();
-    let note_only = ItemCheck { qty_delta: Some(0), ..Default::default() };
+    // Another till makes it 3; this screen still shows 1 and types a note.
+    k.pos.update_item(&k.staff, line, &ItemUpdate { qty: 3, discount_cents: 0, note: None }).unwrap();
+    let note_only = ItemCheck { qty_delta: Some(0), expected_discount_cents: Some(0), ..Default::default() };
     let u = k.pos.resolve_item_update(line, &ItemUpdate { qty: 1, discount_cents: 0, note: Some("no chilli".into()) }, &note_only).unwrap();
     let it = k.pos.update_item(&k.admin, line, &u).unwrap().items[0].clone();
-    assert_eq!((it.qty, it.discount_cents, it.note.as_deref()), (3, 300, Some("no chilli")));
+    assert_eq!((it.qty, it.discount_cents, it.note.as_deref()), (3, 0, Some("no chilli")));
+    // A discount sent with a note alone is refused, not dropped: nothing changes.
+    let bare = ItemCheck { qty_delta: Some(0), ..Default::default() };
+    let e = k.pos.resolve_item_update(line, &ItemUpdate { qty: 3, discount_cents: 900, note: Some("mild".into()) }, &bare).unwrap_err();
+    assert!(e.to_string().contains("send the discount separately"), "{e}");
+    // The discount this till showed is checked: changed on another till = a conflict.
+    k.pos.update_item(&k.staff, line, &ItemUpdate { qty: 3, discount_cents: 300, note: Some("no chilli".into()) }).unwrap();
+    assert_eq!(msg(k.pos.resolve_item_update(line, &ItemUpdate { qty: 3, discount_cents: 0, note: Some("mild".into()) }, &note_only).unwrap_err()), ITEM_CHANGED);
+    let it = k.pos.get_order(&k.admin, o.id).unwrap().items[0].clone();
+    assert_eq!((it.discount_cents, it.note.as_deref()), (300, Some("no chilli")));
 }
 
 #[test]
